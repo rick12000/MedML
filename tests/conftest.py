@@ -5,18 +5,17 @@ import pandas as pd
 import pytest
 
 from causal_pipeline.config import (
-    ATEEstimatorSpec,
     ATEKind,
-    CATEEstimatorSpec,
     CATEEvaluationConfig,
     CATEKind,
     DataConfig,
     DiagnosticConfig,
+    IPWATEEstimatorSpec,
     LearnerSpec,
+    MetaCATEEstimatorSpec,
     OutcomeType,
     PipelineConfig,
     PolicyConfig,
-    SensitivityConfig,
     SplitConfig,
     TreatmentMode,
 )
@@ -90,18 +89,18 @@ def pipeline_config_no_policy(
             plot_propensity_overlap=False,
         ),
         ate_estimators=[
-            ATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
         cate_estimators=[
-            CATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
+            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
         ],
-        sensitivity=SensitivityConfig(enabled=False),
+        sensitivity=None,
         cate_evaluation=CATEEvaluationConfig(
             dr_crossfit_folds=3,
             rate_bootstrap_samples=20,
             random_state=0,
         ),
-        policy=PolicyConfig(enabled=False),
+        policy=None,
         results_dir="results",
     )
 
@@ -125,18 +124,18 @@ def pipeline_config_with_policy(
             plot_propensity_overlap=False,
         ),
         ate_estimators=[
-            ATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
         cate_estimators=[
-            CATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
+            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
         ],
-        sensitivity=SensitivityConfig(enabled=False),
+        sensitivity=None,
         cate_evaluation=CATEEvaluationConfig(
             dr_crossfit_folds=3,
             rate_bootstrap_samples=20,
             random_state=0,
         ),
-        policy=PolicyConfig(enabled=True),
+        policy=PolicyConfig(),
         results_dir="results",
     )
 

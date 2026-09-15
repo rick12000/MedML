@@ -42,4 +42,4 @@ Outputs are written under `results/` (partitions, diagnostics, ATE/CATE summarie
 
 ## Policy workflow
 
-Set `PolicyConfig(enabled=True)` and `train_fraction + validation_fraction + test_fraction = 1` with `test_fraction > 0`. With policy disabled, the test partition is an empty `DataFrame` with the input schema.
+Set `policy=PolicyConfig(...)` on `PipelineConfig` and use `train_fraction + validation_fraction + test_fraction = 1` with `test_fraction > 0`. Omit `policy` (or set it to `None`) to skip policy fitting; the test partition is then an empty `DataFrame` with the input schema. Omit `sensitivity` to skip ATE sensitivity analysis.

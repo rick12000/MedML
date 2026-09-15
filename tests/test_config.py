@@ -1,8 +1,14 @@
 import pytest
+from pydantic import ValidationError
 
 from causal_pipeline.config import (
+    ATEKind,
+    CATEKind,
+    CausalForestCATEEstimatorSpec,
     DataConfig,
+    IPWATEEstimatorSpec,
     LearnerSpec,
+    MetaCATEEstimatorSpec,
     OutcomeType,
     PipelineConfig,
     PolicyConfig,
@@ -16,7 +22,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 def test_pipeline_config_accepts_valid_no_policy_split(pipeline_config_no_policy: PipelineConfig) -> None:
     assert pipeline_config_no_policy.split.test_fraction == 0.0
-    assert pipeline_config_no_policy.policy.enabled is False
+    assert pipeline_config_no_policy.policy is None
 
 
 @pytest.mark.parametrize(
@@ -26,7 +32,7 @@ def test_pipeline_config_accepts_valid_no_policy_split(pipeline_config_no_policy
         (0.5, 0.4, 0.0),
     ],
 )
-def test_pipeline_config_rejects_invalid_split_when_policy_disabled(
+def test_pipeline_config_rejects_invalid_split_without_policy(
     train_fraction: float,
     validation_fraction: float,
     test_fraction: float,
@@ -46,7 +52,7 @@ def test_pipeline_config_rejects_invalid_split_when_policy_disabled(
         )
 
 
-def test_pipeline_config_requires_positive_test_when_policy_enabled(
+def test_pipeline_config_requires_positive_test_when_policy_configured(
     pipeline_config_with_policy: PipelineConfig,
 ) -> None:
     with pytest.raises(ValueError):
@@ -85,3 +91,21 @@ def test_build_sklearn_learner_returns_expected_estimator(
 def test_build_sklearn_learner_unknown_name_raises() -> None:
     with pytest.raises(ValueError):
         build_sklearn_learner(LearnerSpec(name="not_a_learner", params={}))
+
+
+def test_ipw_ate_spec_requires_propensity_learner(logistic_learner: LearnerSpec) -> None:
+    with pytest.raises(ValidationError):
+        IPWATEEstimatorSpec(kind=ATEKind.IPW)
+
+
+def test_meta_cate_spec_requires_base_learner() -> None:
+    with pytest.raises(ValidationError):
+        MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER)
+
+
+def test_causal_forest_cate_spec_requires_learners(forest_learner: LearnerSpec) -> None:
+    with pytest.raises(ValidationError):
+        CausalForestCATEEstimatorSpec(
+            kind=CATEKind.CAUSAL_FOREST,
+            outcome_learner=forest_learner,
+        )

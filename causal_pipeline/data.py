@@ -147,7 +147,7 @@ class DataSplitter:
         group_id = data_config.group_id
         treatment_col = data_config.treatment
 
-        if not config.policy.enabled:
+        if config.policy is None:
             if group_id is None:
                 df_train, df_validation = train_test_split(
                     df_input,

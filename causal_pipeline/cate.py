@@ -21,7 +21,15 @@ from causalml.inference.meta import (
 )
 from econml.dml import CausalForestDML
 
-from causal_pipeline.config import CATEEstimatorSpec, CATEKind, OutcomeType, build_sklearn_learner
+from causal_pipeline.config import (
+    CATEEstimatorSpec,
+    CATEKind,
+    CausalForestCATEEstimatorSpec,
+    MetaCATEEstimatorSpec,
+    NeuralCATEEstimatorSpec,
+    OutcomeType,
+    build_sklearn_learner,
+)
 from causal_pipeline.data import CausalDataset, contrast_columns
 
 logger = logging.getLogger(__name__)
@@ -66,7 +74,7 @@ def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseC
 
 
 class MetaLearnerAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CATEEstimatorSpec, data: CausalDataset, letter: str) -> None:
+    def __init__(self, spec: MetaCATEEstimatorSpec, data: CausalDataset, letter: str) -> None:
         self.spec = spec
         self.data = data
         self.letter = letter
@@ -77,9 +85,6 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> MetaLearnerAdapter:
-        if self.spec.base_learner is None:
-            raise ValueError(f"{self.spec.kind.value} requires base_learner.")
-
         X = data.X_effect_modifiers
         treatment = data.treatment_series
         outcome = data.outcome_series
@@ -142,7 +147,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
 
 
 class CausalForestAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: CausalForestCATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -152,9 +157,6 @@ class CausalForestAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> CausalForestAdapter:
-        if self.spec.outcome_learner is None or self.spec.propensity_learner is None:
-            raise ValueError("causal_forest requires outcome_learner and propensity_learner.")
-
         X = data.X_effect_modifiers
         treatment = data.treatment_series
         outcome = data.outcome_series
@@ -196,7 +198,7 @@ class CausalForestAdapter(BaseCATEEstimator):
 
 
 class TARNetAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: NeuralCATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -235,7 +237,7 @@ class TARNetAdapter(BaseCATEEstimator):
 
 
 class CFRNetAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: NeuralCATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -276,7 +278,7 @@ class CFRNetAdapter(BaseCATEEstimator):
 
 
 class DragonNetAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: NeuralCATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None

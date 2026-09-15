@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.cate import BaseCATEEstimator
-from causal_pipeline.config import JsonValue, PipelineConfig, build_sklearn_learner
+from causal_pipeline.config import JsonValue, PipelineConfig, PolicyConfig, build_sklearn_learner
 from causal_pipeline.data import CausalDataset
 
 if TYPE_CHECKING:
@@ -50,8 +50,9 @@ class FittedPolicy(BaseModel):
 class PolicyService:
     """Train policy/subgroup models on validation and evaluate on test."""
 
-    def __init__(self, config: PipelineConfig) -> None:
+    def __init__(self, config: PipelineConfig, policy: PolicyConfig) -> None:
         self.config = config
+        self.policy = policy
 
     def fit_policy_methods(
         self,
@@ -62,7 +63,7 @@ class PolicyService:
         X_mod = validation.X_effect_modifiers
         policies: list[FittedPolicy] = []
 
-        if self.config.policy.standard_policy_tree:
+        if self.policy.standard_policy_tree:
             for estimator_id, df_cate_predictions in predictions.items():
                 policies.append(
                     self.fit_standard_policy_tree(
@@ -73,10 +74,10 @@ class PolicyService:
                     )
                 )
 
-        if self.config.policy.dr_policy_tree:
+        if self.policy.dr_policy_tree:
             policies.append(self.fit_dr_policy_tree(validation))
 
-        if self.config.policy.virtual_twins:
+        if self.policy.virtual_twins:
             for estimator_id, model in cate_models.items():
                 effects = model.predict_effects(validation)
                 policies.append(
@@ -88,7 +89,7 @@ class PolicyService:
                     )
                 )
 
-        if self.config.policy.mob:
+        if self.policy.mob:
             policies.append(self.fit_mob(validation))
 
         return policies
@@ -109,7 +110,7 @@ class PolicyService:
             arm_index = control_index + column_index + 1
             if arm_index < reward.shape[1]:
                 reward[:, arm_index] = predictions[column].values
-        tree = PolicyTree(**dict(self.config.policy.policy_tree_params))
+        tree = PolicyTree(**dict(self.policy.policy_tree_params))
         tree.fit(X_mod, reward)
         rules = self.extract_policy_tree_rules(
             tree=tree,
@@ -128,12 +129,12 @@ class PolicyService:
 
     def fit_dr_policy_tree(self, validation: CausalDataset) -> FittedPolicy:
         logger.info("Fitting DRPolicyTree.")
-        params = dict(self.config.policy.dr_policy_tree_params)
+        params = dict(self.policy.dr_policy_tree_params)
         model_regression = build_sklearn_learner(
-            self.config.policy.dr_policy_regression_learner,
+            self.policy.dr_policy_regression_learner,
         )
         model_propensity = build_sklearn_learner(
-            self.config.policy.dr_policy_propensity_learner,
+            self.policy.dr_policy_propensity_learner,
         )
         tree = DRPolicyTree(
             model_regression=model_regression,
@@ -169,7 +170,7 @@ class PolicyService:
         effects: pd.DataFrame,
     ) -> FittedPolicy:
         logger.info("Fitting virtual twins for %s.", estimator_id)
-        tree = DecisionTreeRegressor(**dict(self.config.policy.virtual_twins_params))
+        tree = DecisionTreeRegressor(**dict(self.policy.virtual_twins_params))
         tree.fit(X_mod, effects.values)
         rules = self.extract_sklearn_tree_rules(
             tree=tree,

@@ -19,10 +19,12 @@ from sklearn.linear_model import LinearRegression
 from causal_pipeline.config import (
     ATEEstimatorSpec,
     ATEKind,
+    DoublyRobustATEEstimatorSpec,
+    DoubleMLATEEstimatorSpec,
+    IPWATEEstimatorSpec,
     JsonValue,
     LearnerSpec,
     OutcomeType,
-    PipelineConfig,
     SensitivityConfig,
     build_sklearn_learner,
 )
@@ -45,15 +47,12 @@ class BaseATEEstimator(ABC):
 def create_ate_estimator(
     spec: ATEEstimatorSpec,
     data: CausalDataset,
-    sensitivity_outcome_learner: LearnerSpec,
+    sensitivity_outcome_learner: LearnerSpec | None = None,
 ) -> BaseATEEstimator:
     if spec.kind == ATEKind.IPW:
-        if spec.propensity_learner is None:
-            raise ValueError("IPW requires propensity_learner.")
         return IPWAdapter(
             spec=spec,
             data=data,
-            propensity_spec=spec.propensity_learner,
             sensitivity_outcome_learner=sensitivity_outcome_learner,
         )
     if spec.kind == ATEKind.AIPW:
@@ -72,14 +71,12 @@ def create_ate_estimator(
 class IPWAdapter(BaseATEEstimator):
     def __init__(
         self,
-        spec: ATEEstimatorSpec,
+        spec: IPWATEEstimatorSpec,
         data: CausalDataset,
-        propensity_spec: LearnerSpec,
-        sensitivity_outcome_learner: LearnerSpec,
+        sensitivity_outcome_learner: LearnerSpec | None = None,
     ) -> None:
         self.spec = spec
         self.data = data
-        self.propensity_spec = propensity_spec
         self.sensitivity_outcome_learner = sensitivity_outcome_learner
         self.model = None
         self.X: pd.DataFrame | None = None
@@ -92,7 +89,7 @@ class IPWAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        learner = build_sklearn_learner(self.propensity_spec)
+        learner = build_sklearn_learner(self.spec.propensity_learner)
         clip_min, clip_max = self.spec.clip_bounds
         self.model = IPW(
             learner=learner,
@@ -105,10 +102,14 @@ class IPWAdapter(BaseATEEstimator):
         self.outcome = outcome.copy()
         self.model.fit(X, treatment)
         self.fitted_propensity = self.model.compute_propensity_matrix(X)
-        outcome_learner = build_sklearn_learner(self.sensitivity_outcome_learner)
-        design = pd.concat([treatment.reset_index(drop=True), X.reset_index(drop=True)], axis=1)
-        outcome_learner.fit(design, outcome)
-        self.outcome_predictions = outcome_learner.predict(design).values
+        if self.sensitivity_outcome_learner is not None:
+            outcome_learner = build_sklearn_learner(self.sensitivity_outcome_learner)
+            design = pd.concat(
+                [treatment.reset_index(drop=True), X.reset_index(drop=True)],
+                axis=1,
+            )
+            outcome_learner.fit(design, outcome)
+            self.outcome_predictions = outcome_learner.predict(design).values
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -126,7 +127,7 @@ class IPWAdapter(BaseATEEstimator):
         )
 
 class AIPWAdapter(BaseATEEstimator):
-    def __init__(self, spec: ATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -140,13 +141,8 @@ class AIPWAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        propensity_spec = self.spec.propensity_learner
-        outcome_spec = self.spec.outcome_learner
-        if propensity_spec is None or outcome_spec is None:
-            raise ValueError("AIPW requires outcome_learner and propensity_learner.")
-
-        outcome_learner = build_sklearn_learner(outcome_spec)
-        propensity_learner = build_sklearn_learner(propensity_spec)
+        outcome_learner = build_sklearn_learner(self.spec.outcome_learner)
+        propensity_learner = build_sklearn_learner(self.spec.propensity_learner)
         predict_proba = self.data.outcome_type == OutcomeType.BINARY
         outcome_model = Standardization(
             outcome_learner,
@@ -184,7 +180,7 @@ class AIPWAdapter(BaseATEEstimator):
         )
 
 class TMLEAdapter(BaseATEEstimator):
-    def __init__(self, spec: ATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -200,13 +196,8 @@ class TMLEAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        propensity_spec = self.spec.propensity_learner
-        outcome_spec = self.spec.outcome_learner
-        if propensity_spec is None or outcome_spec is None:
-            raise ValueError("TMLE requires outcome_learner and propensity_learner.")
-
-        outcome_learner = build_sklearn_learner(outcome_spec)
-        propensity_learner = build_sklearn_learner(propensity_spec)
+        outcome_learner = build_sklearn_learner(self.spec.outcome_learner)
+        propensity_learner = build_sklearn_learner(self.spec.propensity_learner)
         predict_proba = self.data.outcome_type == OutcomeType.BINARY
         self.outcome_model = Standardization(
             outcome_learner,
@@ -248,7 +239,7 @@ class TMLEAdapter(BaseATEEstimator):
         )
 
 class DoubleMLIRMAdapter(BaseATEEstimator):
-    def __init__(self, spec: ATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -257,16 +248,11 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        outcome_spec = self.spec.outcome_learner
-        propensity_spec = self.spec.propensity_learner
-        if outcome_spec is None or propensity_spec is None:
-            raise ValueError("DML IRM requires outcome_learner and propensity_learner.")
-
         df_dml = pd.DataFrame({"y": outcome, "d": treatment})
         df_dml = pd.concat([df_dml, X.reset_index(drop=True)], axis=1)
         dml_data = DoubleMLData(df_dml, y_col="y", d_cols="d")
-        ml_g = build_sklearn_learner(outcome_spec)
-        ml_m = build_sklearn_learner(propensity_spec)
+        ml_g = build_sklearn_learner(self.spec.outcome_learner)
+        ml_m = build_sklearn_learner(self.spec.propensity_learner)
         self.model = DoubleMLIRM(
             dml_data,
             ml_g=ml_g,
@@ -292,7 +278,7 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         )
 
 class DoubleMLPLRAdapter(BaseATEEstimator):
-    def __init__(self, spec: ATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -301,16 +287,11 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        outcome_spec = self.spec.outcome_learner
-        propensity_spec = self.spec.propensity_learner
-        if outcome_spec is None or propensity_spec is None:
-            raise ValueError("DML PLR requires outcome_learner and propensity_learner.")
-
         df_dml = pd.DataFrame({"y": outcome, "d": treatment})
         df_dml = pd.concat([df_dml, X.reset_index(drop=True)], axis=1)
         dml_data = DoubleMLData(df_dml, y_col="y", d_cols="d")
-        ml_l = build_sklearn_learner(outcome_spec)
-        ml_m = build_sklearn_learner(propensity_spec)
+        ml_l = build_sklearn_learner(self.spec.outcome_learner)
+        ml_m = build_sklearn_learner(self.spec.propensity_learner)
         self.model = DoubleMLPLR(
             dml_data,
             ml_l=ml_l,
@@ -335,7 +316,7 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         )
 
 class DoubleMLAPOSAdapter(BaseATEEstimator):
-    def __init__(self, spec: ATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
@@ -344,16 +325,11 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         X = data.X_confounders
         treatment = data.treatment_series
         outcome = data.outcome_series
-        outcome_spec = self.spec.outcome_learner
-        propensity_spec = self.spec.propensity_learner
-        if outcome_spec is None or propensity_spec is None:
-            raise ValueError("DML APOS requires outcome_learner and propensity_learner.")
-
         df_dml = pd.DataFrame({"y": outcome, "d": treatment})
         df_dml = pd.concat([df_dml, X.reset_index(drop=True)], axis=1)
         dml_data = DoubleMLData(df_dml, y_col="y", d_cols="d")
-        ml_g = build_sklearn_learner(outcome_spec)
-        ml_m = build_sklearn_learner(propensity_spec)
+        ml_g = build_sklearn_learner(self.spec.outcome_learner)
+        ml_m = build_sklearn_learner(self.spec.propensity_learner)
         self.model = DoubleMLAPOS(
             dml_data,
             ml_g=ml_g,
@@ -415,8 +391,8 @@ class SensitivityResult(BaseModel):
 class ATESensitivityAnalyzer:
     """Omitted-variable sensitivity for dedicated ATE estimators."""
 
-    def __init__(self, config: PipelineConfig) -> None:
-        self.config = config
+    def __init__(self, sensitivity: SensitivityConfig) -> None:
+        self.sensitivity = sensitivity
 
     def analyze(
         self,
@@ -425,7 +401,7 @@ class ATESensitivityAnalyzer:
         estimator_id: str,
         results_root: str,
     ) -> SensitivityResult:
-        sensitivity_config = self.config.sensitivity
+        sensitivity_config = self.sensitivity
         if isinstance(estimator, DoubleMLIRMAdapter) and estimator.model is not None:
             return self.analyze_doubleml_native(
                 estimator.model,

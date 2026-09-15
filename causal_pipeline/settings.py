@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from causal_pipeline.config import (
-    ATEEstimatorSpec,
     ATEKind,
-    CATEEstimatorSpec,
     CATEEvaluationConfig,
     CATEKind,
+    CausalForestCATEEstimatorSpec,
     DataConfig,
     DiagnosticConfig,
+    DoublyRobustATEEstimatorSpec,
+    DoubleMLATEEstimatorSpec,
+    IPWATEEstimatorSpec,
     LearnerSpec,
+    MetaCATEEstimatorSpec,
     OutcomeType,
     PipelineConfig,
     PolicyConfig,
@@ -86,7 +89,7 @@ def build_pipeline_config(policy_enabled: bool = False) -> PipelineConfig:
             test_fraction=SPLIT_TEST_FRACTION_WITH_POLICY,
             random_state=SPLIT_RANDOM_STATE,
         )
-        policy = PolicyConfig(enabled=True)
+        policy = PolicyConfig()
     else:
         split = SplitConfig(
             train_fraction=SPLIT_TRAIN_FRACTION_NO_POLICY,
@@ -94,43 +97,43 @@ def build_pipeline_config(policy_enabled: bool = False) -> PipelineConfig:
             test_fraction=SPLIT_TEST_FRACTION_NO_POLICY,
             random_state=SPLIT_RANDOM_STATE,
         )
-        policy = PolicyConfig(enabled=False)
+        policy = None
 
     return PipelineConfig(
         data=DATA_CONFIG,
         split=split,
         diagnostics=DiagnosticConfig(propensity_learner=LOGISTIC_LEARNER),
         ate_estimators=[
-            ATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=LOGISTIC_LEARNER),
-            ATEEstimatorSpec(
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=LOGISTIC_LEARNER),
+            DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.AIPW,
                 outcome_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
             ),
-            ATEEstimatorSpec(
+            DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.TMLE,
                 outcome_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
             ),
-            ATEEstimatorSpec(
+            DoubleMLATEEstimatorSpec(
                 kind=ATEKind.DML_IRM,
                 outcome_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
             ),
         ],
         cate_estimators=[
-            CATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            CATEEstimatorSpec(kind=CATEKind.T_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            CATEEstimatorSpec(kind=CATEKind.X_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            CATEEstimatorSpec(kind=CATEKind.R_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            CATEEstimatorSpec(kind=CATEKind.DR_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            CATEEstimatorSpec(
+            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            MetaCATEEstimatorSpec(kind=CATEKind.T_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            MetaCATEEstimatorSpec(kind=CATEKind.X_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            MetaCATEEstimatorSpec(kind=CATEKind.R_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            MetaCATEEstimatorSpec(kind=CATEKind.DR_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            CausalForestCATEEstimatorSpec(
                 kind=CATEKind.CAUSAL_FOREST,
                 outcome_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
             ),
         ],
-        sensitivity=SensitivityConfig(enabled=True),
+        sensitivity=SensitivityConfig(),
         cate_evaluation=CATEEvaluationConfig(),
         policy=policy,
         results_dir=RESULTS_DIR,

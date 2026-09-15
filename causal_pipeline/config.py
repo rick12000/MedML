@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field, model_validator
 from sklearn.base import BaseEstimator
@@ -85,68 +85,77 @@ class DataConfig(BaseModel):
     treatment_values: list[JsonValue]
 
 
-class ATEEstimatorSpec(BaseModel):
-    kind: ATEKind
-    enabled: bool = True
+class _ATEEstimatorCommon(BaseModel):
     params: LearnerParams = Field(default_factory=dict)
-    outcome_learner: LearnerSpec | None = None
-    propensity_learner: LearnerSpec | None = None
+
+
+class IPWATEEstimatorSpec(_ATEEstimatorCommon):
+    kind: Literal[ATEKind.IPW]
+    propensity_learner: LearnerSpec
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     use_stabilized: bool = DEFAULT_IPW_USE_STABILIZED
+
+
+class DoublyRobustATEEstimatorSpec(_ATEEstimatorCommon):
+    kind: Literal[ATEKind.AIPW, ATEKind.TMLE]
+    outcome_learner: LearnerSpec
+    propensity_learner: LearnerSpec
+    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     reduced: bool = DEFAULT_TMLE_REDUCED
+
+
+class DoubleMLATEEstimatorSpec(_ATEEstimatorCommon):
+    kind: Literal[ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS]
+    outcome_learner: LearnerSpec
+    propensity_learner: LearnerSpec
+    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     n_rep: PositiveInt = DEFAULT_DML_N_REP
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
 
-    @model_validator(mode="after")
-    def validate_kind_requirements(self) -> ATEEstimatorSpec:
-        if not self.enabled:
-            return self
-        if self.kind == ATEKind.IPW and self.propensity_learner is None:
-            raise ValueError("IPW requires propensity_learner.")
-        learners_required = {
-            ATEKind.AIPW,
-            ATEKind.TMLE,
-            ATEKind.DML_IRM,
-            ATEKind.DML_PLR,
-            ATEKind.DML_APOS,
-        }
-        if self.kind in learners_required:
-            if self.outcome_learner is None or self.propensity_learner is None:
-                raise ValueError(f"{self.kind.value} requires outcome_learner and propensity_learner.")
-        return self
+
+ATEEstimatorSpec = Annotated[
+    Union[IPWATEEstimatorSpec, DoublyRobustATEEstimatorSpec, DoubleMLATEEstimatorSpec],
+    Field(discriminator="kind"),
+]
 
 
-_META_CATE_KINDS = frozenset(
-    {
-        CATEKind.S_LEARNER,
-        CATEKind.T_LEARNER,
-        CATEKind.X_LEARNER,
-        CATEKind.R_LEARNER,
-        CATEKind.DR_LEARNER,
-    }
-)
-
-
-class CATEEstimatorSpec(BaseModel):
-    kind: CATEKind
-    enabled: bool = True
+class _CATEEstimatorCommon(BaseModel):
     params: LearnerParams = Field(default_factory=dict)
-    base_learner: LearnerSpec | None = None
-    outcome_learner: LearnerSpec | None = None
-    propensity_learner: LearnerSpec | None = None
+
+
+MetaCATEKind = Literal[
+    CATEKind.S_LEARNER,
+    CATEKind.T_LEARNER,
+    CATEKind.X_LEARNER,
+    CATEKind.R_LEARNER,
+    CATEKind.DR_LEARNER,
+]
+
+
+class MetaCATEEstimatorSpec(_CATEEstimatorCommon):
+    kind: MetaCATEKind
+    base_learner: LearnerSpec
+
+
+class CausalForestCATEEstimatorSpec(_CATEEstimatorCommon):
+    kind: Literal[CATEKind.CAUSAL_FOREST]
+    outcome_learner: LearnerSpec
+    propensity_learner: LearnerSpec
+
+
+NeuralCATEKind = Literal[CATEKind.TARNET, CATEKind.CFRNET, CATEKind.DRAGONNET]
+
+
+class NeuralCATEEstimatorSpec(_CATEEstimatorCommon):
+    kind: NeuralCATEKind
     penalty_disc: float = DEFAULT_CFRNET_PENALTY_DISC
 
-    @model_validator(mode="after")
-    def validate_kind_requirements(self) -> CATEEstimatorSpec:
-        if not self.enabled:
-            return self
-        if self.kind in _META_CATE_KINDS and self.base_learner is None:
-            raise ValueError(f"{self.kind.value} requires base_learner.")
-        if self.kind == CATEKind.CAUSAL_FOREST:
-            if self.outcome_learner is None or self.propensity_learner is None:
-                raise ValueError("causal_forest requires outcome_learner and propensity_learner.")
-        return self
+
+CATEEstimatorSpec = Annotated[
+    Union[MetaCATEEstimatorSpec, CausalForestCATEEstimatorSpec, NeuralCATEEstimatorSpec],
+    Field(discriminator="kind"),
+]
 
 
 class SplitConfig(BaseModel):
@@ -165,7 +174,6 @@ class DiagnosticConfig(BaseModel):
 
 
 class SensitivityConfig(BaseModel):
-    enabled: bool = True
     null_effect: float = 0.0
     benchmark_multiplier_max: float = 3.0
     benchmark_grid_size: PositiveInt = 100
@@ -187,7 +195,6 @@ class CATEEvaluationConfig(BaseModel):
 
 
 class PolicyConfig(BaseModel):
-    enabled: bool = False
     standard_policy_tree: bool = True
     dr_policy_tree: bool = True
     virtual_twins: bool = True
@@ -210,9 +217,9 @@ class PipelineConfig(BaseModel):
     diagnostics: DiagnosticConfig
     ate_estimators: list[ATEEstimatorSpec]
     cate_estimators: list[CATEEstimatorSpec]
-    sensitivity: SensitivityConfig
+    sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig
-    policy: PolicyConfig
+    policy: PolicyConfig | None = None
     results_dir: str = "results"
 
     @model_validator(mode="after")
@@ -222,20 +229,20 @@ class PipelineConfig(BaseModel):
         test = self.split.test_fraction
         total = train + validation + test
 
-        if self.policy.enabled:
+        if self.policy is not None:
             if abs(total - 1.0) > 1e-9:
                 raise ValueError(
-                    "When policy is enabled, train + validation + test must equal 1."
+                    "When policy is configured, train + validation + test must equal 1."
                 )
             if test <= 0.0:
-                raise ValueError("When policy is enabled, test_fraction must be > 0.")
+                raise ValueError("When policy is configured, test_fraction must be > 0.")
         else:
             if abs(train + validation - 1.0) > 1e-9:
                 raise ValueError(
-                    "When policy is disabled, train + validation must equal 1."
+                    "Without policy configuration, train + validation must equal 1."
                 )
             if test != 0.0:
-                raise ValueError("When policy is disabled, test_fraction must be 0.")
+                raise ValueError("Without policy configuration, test_fraction must be 0.")
         return self
 
 

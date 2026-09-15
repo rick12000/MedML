@@ -34,9 +34,9 @@ class CausalPipeline:
         self.config = config
         self.splitter = splitter or DataSplitter()
         self.diagnostics_runner = diagnostics_runner or DiagnosticsRunner(config)
-        self.sensitivity_analyzer = sensitivity_analyzer or ATESensitivityAnalyzer(config)
+        self.sensitivity_analyzer = sensitivity_analyzer
         self.evaluator = evaluator or CATEEvaluator(config)
-        self.policy_service = policy_service or PolicyService(config)
+        self.policy_service = policy_service
         self.results = results or ResultStore(config)
 
     def run(self, df_input: pd.DataFrame) -> None:
@@ -67,14 +67,18 @@ class CausalPipeline:
         )
 
         policy_results = None
-        if self.config.policy.enabled:
-            policies = self.policy_service.fit_policy_methods(
+        if self.config.policy is not None:
+            policy_service = self.policy_service or PolicyService(
+                self.config,
+                self.config.policy,
+            )
+            policies = policy_service.fit_policy_methods(
                 cate_models=cate_models,
                 validation=partitions.validation,
                 predictions=validation_predictions,
             )
             test_scores = self.evaluator.build_robust_scores(partitions.test)
-            policy_results = self.policy_service.evaluate_policies(
+            policy_results = policy_service.evaluate_policies(
                 policies=policies,
                 test=partitions.test,
                 test_scores=test_scores,
@@ -94,14 +98,17 @@ class CausalPipeline:
 
     def fit_ate_estimators(self, train: CausalDataset) -> dict[str, BaseATEEstimator]:
         models: dict[str, BaseATEEstimator] = {}
+        sensitivity_outcome_learner = (
+            self.config.sensitivity.outcome_learner
+            if self.config.sensitivity is not None
+            else None
+        )
         for spec in self.config.ate_estimators:
-            if not spec.enabled:
-                continue
             logger.info("Fitting ATE estimator %s.", spec.kind.value)
             estimator = create_ate_estimator(
                 spec=spec,
                 data=train,
-                sensitivity_outcome_learner=self.config.sensitivity.outcome_learner,
+                sensitivity_outcome_learner=sensitivity_outcome_learner,
             )
             estimator.fit(train)
             models[spec.kind.value] = estimator
@@ -128,12 +135,15 @@ class CausalPipeline:
         ate_models: dict[str, BaseATEEstimator],
         train: CausalDataset,
     ) -> dict[str, pd.DataFrame]:
-        if not self.config.sensitivity.enabled:
+        if self.config.sensitivity is None:
             return {}
+        analyzer = self.sensitivity_analyzer or ATESensitivityAnalyzer(
+            self.config.sensitivity,
+        )
         summaries = {}
         for estimator_id, model in ate_models.items():
             logger.info("Running sensitivity analysis for %s.", estimator_id)
-            result = self.sensitivity_analyzer.analyze(
+            result = analyzer.analyze(
                 estimator=model,
                 training_data=train,
                 estimator_id=estimator_id,
@@ -149,8 +159,6 @@ class CausalPipeline:
     def fit_cate_estimators(self, train: CausalDataset) -> dict[str, BaseCATEEstimator]:
         models: dict[str, BaseCATEEstimator] = {}
         for spec in self.config.cate_estimators:
-            if not spec.enabled:
-                continue
             logger.info("Fitting CATE estimator %s.", spec.kind.value)
             estimator = create_cate_estimator(spec=spec, data=train)
             estimator.fit(train)

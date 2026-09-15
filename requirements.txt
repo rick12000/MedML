@@ -1,0 +1,11 @@
+pandas>=2.0
+numpy>=1.26
+pydantic>=2.0
+scikit-learn>=1.4
+matplotlib>=3.8
+pyarrow>=15.0
+causallib>=0.9
+doubleml>=0.9
+econml>=0.15
+causalml>=0.15
+pytest>=8.0

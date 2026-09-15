@@ -1,0 +1,47 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec
+.venv/
+venv/
+
+# ─── Secrets / environment ────────────────────────────────────────────────────
+.env
+!.env.example
+*.key
+*.pem
+secrets.json
+
+# ─── Application logs / cache (never commit user data) ───────────────────────
+/cache
+backend/cache/
+*.log
+*.err
+
+# ─── OS artefacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Editor artefacts ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Build / distribution artefacts ──────────────────────────────────────────
+_build/
+inst/
+deprecated_spots.json
+
+# ─── Developer / docs artefacts ───────────────────────────────────────────────
+# developer/ is committed to the repo — do not add it here
+site/
+.venv-docs/

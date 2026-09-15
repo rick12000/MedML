@@ -1,0 +1,62 @@
+---
+alwaysApply: true
+---
+# Coding Style Guidelines
+
+## General
+
+- Adopt the DRY principle. If code is repeated in multiple places, functionalize it.
+
+## Functions
+
+- Make all inputs explicit. Avoid relying on state or shared context unless encapsulated.
+- Do not mutate function inputs.
+- Functions should do one thing.
+- All functions must have type hints for parameters and return values (NEVER use the Any type hint, always assign informative types).
+- If a function returns multiple types, refactor. Don't return `Union[str, dict, None]`.
+- Don't rely on default argument values unless backed by named constants.
+- Avoid `*args` and `**kwargs` unless required.
+- Call functions, methods, and initializers with keyword arguments when readability benefits.
+
+## Naming
+
+- Variable names should be descriptive and reduced to the shortest meaningful length.
+- No single-letter variable names unless in mathematical contexts or simple loops.
+
+## Architecture
+
+- Inject external dependencies. Do not instantiate them inside business logic.
+- Don't create classes if functions are sufficient.
+- Keep modules small and focused.
+- Keep `__init__.py` files empty.
+- Use full, explicit imports. No relative imports.
+- Keep imports at the top of the file unless conditionally importing for performance reasons. Do not put imports in functions or methods purely to avoid circular imports, if circular imports are present, they require architectural redesign, not workarounds.
+
+## Configuration
+
+- Use Pydantic models for configuration, NOT data classes.
+- Access environment variables only through configuration models.
+- No hard-coded values. Use constants or configuration.
+
+## Error Handling
+
+- Avoid broad exception handling.
+- Avoid exception-driven control flow.
+
+## Comments
+
+- Comments should explain why, not what.
+- Keep comments under 10% of code.
+- No commented-out code.
+
+## Other
+
+- Add code rather than configuration where both are equally clear.
+- Prefer composition over inheritance.
+- Make side effects explicit.
+- Keep public interfaces small and predictable.
+- Avoid implicit behavior (e.g. input mutation, in-place dataframe modification).
+- No `print()` statements. Use logging.
+- Logging should be structured into severities. Use INFO for high level, generic logs such as "Fitting Random Forest estimator...". Use DEBUG to report data shapes post-transformations or filtering events, spot check dataframe rows (only if data is non sensitive and can be logged), etc.
+- Do not use "_" prefixes in variable or method names. Python doesn't have true private variables or methods.
+- Spacing code rows should not be an afterthought. Do not clump all code rows in a function or method together with no spacing. Use spacing to delineate different semantic or logical sections of your code.

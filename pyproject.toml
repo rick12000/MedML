@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "causal-pipeline"
+version = "0.1.0"
+description = "Modular observational causal inference pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "pydantic>=2.0",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "pyarrow>=15.0",
+    "causallib>=0.9",
+    "doubleml>=0.9",
+    "econml>=0.15",
+    "causalml>=0.15",
+]
+
+[project.optional-dependencies]
+neural = ["catenets>=0.2", "jax>=0.4"]
+r = ["rpy2>=3.5"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["causal_pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

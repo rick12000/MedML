@@ -9,7 +9,7 @@ from sklearn.linear_model import LinearRegression
 
 from causal_pipeline.ate import (
     contrasts_from_population_outcomes,
-    create_ate_estimator,
+    initialize_ate_estimator,
     doubleml_dataframe,
     factual_outcome_predictions,
     treated_propensity,
@@ -82,7 +82,7 @@ def test_ipw_estimate_is_finite_after_split(
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     partitions = DataSplitter().split(dataset=dataset, config=pipeline_config_no_policy)
     spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner)
-    estimator = create_ate_estimator(spec=spec, data=partitions.estimation)
+    estimator = initialize_ate_estimator(spec=spec, data=partitions.estimation)
     estimator.fit(data=partitions.estimation)
     table = estimator.estimate()
     assert table.shape[0] == 1
@@ -103,7 +103,7 @@ def test_aipw_estimate_is_finite_on_binary_outcome(
         outcome_learner=forest_classifier,
         propensity_learner=logistic_learner,
     )
-    estimator = create_ate_estimator(spec=spec, data=dataset)
+    estimator = initialize_ate_estimator(spec=spec, data=dataset)
     estimator.fit(data=dataset)
     table = estimator.estimate()
     assert table.shape[0] == 1

@@ -63,7 +63,7 @@ class BaseATEEstimator(ABC):
         ...
 
 
-def create_ate_estimator(
+def initialize_ate_estimator(
     spec: ATEEstimatorSpec,
     data: CausalDataset,
 ) -> BaseATEEstimator:

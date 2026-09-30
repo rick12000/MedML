@@ -11,7 +11,7 @@ import pandas as pd
 from causal_pipeline.ate import (
     ATESensitivityAnalyzer,
     BaseATEEstimator,
-    create_ate_estimator,
+    initialize_ate_estimator,
     estimator_supports_sensitivity,
 )
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table
@@ -163,7 +163,7 @@ class CausalPipeline:
             return models
         for spec in self.config.ate_estimators:
             logger.info("Fitting ATE estimator %s.", spec.kind.value)
-            estimator = create_ate_estimator(spec=spec, data=train)
+            estimator = initialize_ate_estimator(spec=spec, data=train)
             estimator.fit(train)
             models[spec.kind.value] = estimator
         return models

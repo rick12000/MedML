@@ -52,9 +52,17 @@ class CATEKind(StrEnum):
 
 class PolicyKind(StrEnum):
     POLICY_TREE = "policy_tree"
+    EXACT_POLICY_TREE = "exact_policy_tree"
     DR_POLICY_TREE = "dr_policy_tree"
     VIRTUAL_TWINS = "virtual_twins"
     MOB = "mob"
+
+
+class PolicySearchMode(StrEnum):
+    """Welfare maximizes total reward. CAPITAL maximizes a clinically constrained subgroup."""
+
+    WELFARE = "welfare"
+    CAPITAL = "capital"
 
 
 DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
@@ -72,6 +80,13 @@ DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL: ConfidenceLevel = 0.95
 DEFAULT_CATE_EVAL_CROSSFIT_FOLDS: PositiveInt = 5
 DEFAULT_CALIBRATION_BINS: PositiveInt = 10
 DEFAULT_RATE_BOOTSTRAP_SAMPLES: PositiveInt = 1000
+DEFAULT_ECETH_TOLERANCE: float = 0.01
+DEFAULT_EXACT_POLICY_DEPTH: int = 2
+DEFAULT_EXACT_POLICY_MIN_NODE_SIZE: PositiveInt = 1
+DEFAULT_EXACT_POLICY_SPLIT_STEP: PositiveInt = 1
+DEFAULT_MINIMUM_EFFECT: float = 0.0
+DEFAULT_CLINICAL_THRESHOLD: float = 0.0
+DEFAULT_NEGATIVE_EFFECT_PENALTY: float = 0.0
 DEFAULT_ESTIMAND_ATE: str = "ate"
 DEFAULT_DIAGNOSTIC_STABILIZED_WEIGHTS: bool = False
 DEFAULT_TEST_FRACTION: Fraction = 0.0
@@ -79,7 +94,9 @@ DEFAULT_NULL_EFFECT: float = 0.0
 DEFAULT_BENCHMARK_MULTIPLIER_MAX: float = 3.0
 DEFAULT_BENCHMARK_GRID_SIZE: PositiveInt = 100
 DEFAULT_LEARNER_RANDOM_STATE: int = 0
-CATE_DEPENDENT_POLICY_KINDS = frozenset({PolicyKind.POLICY_TREE, PolicyKind.VIRTUAL_TWINS})
+CATE_DEPENDENT_POLICY_KINDS = frozenset(
+    {PolicyKind.POLICY_TREE, PolicyKind.EXACT_POLICY_TREE, PolicyKind.VIRTUAL_TWINS}
+)
 
 
 class ArbitraryTypesModel(BaseModel):
@@ -269,6 +286,25 @@ class SensitivityConfig(ArbitraryTypesModel):
     benchmark_multiplier_max: float = DEFAULT_BENCHMARK_MULTIPLIER_MAX
     benchmark_grid_size: PositiveInt = DEFAULT_BENCHMARK_GRID_SIZE
     confidence_level: ConfidenceLevel = DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL
+    selection_column: ColumnName | None = None
+    sampling_learner: BaseEstimator | None = None
+    propensity_learner: BaseEstimator | None = None
+    inclusion_fraction: float | None = None
+    outcome_bounds: tuple[float, float] | None = None
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> SensitivityConfig:
+        if self.selection_column is not None and (
+            self.sampling_learner is None or self.propensity_learner is None
+        ):
+            raise ValueError(
+                "Observed-selection transport requires sampling_learner and propensity_learner."
+            )
+        if self.inclusion_fraction is not None and not 0.0 < self.inclusion_fraction < 1.0:
+            raise ValueError("inclusion_fraction must lie strictly between 0 and 1.")
+        if self.outcome_bounds is not None and self.outcome_bounds[0] >= self.outcome_bounds[1]:
+            raise ValueError("outcome_bounds must be ordered as (lower, upper).")
+        return self
 
 
 class CATEEvaluationConfig(ArbitraryTypesModel):
@@ -278,6 +314,8 @@ class CATEEvaluationConfig(ArbitraryTypesModel):
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     calibration_bins: PositiveInt = DEFAULT_CALIBRATION_BINS
     rate_bootstrap_samples: PositiveInt = DEFAULT_RATE_BOOTSTRAP_SAMPLES
+    eceth_tolerance: float = Field(default=DEFAULT_ECETH_TOLERANCE, gt=0.0)
+    eceth_bootstrap_samples: PositiveInt = DEFAULT_RATE_BOOTSTRAP_SAMPLES
     random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
@@ -292,9 +330,23 @@ class DRPolicyTreeMethodSpec(ArbitraryTypesModel):
     propensity_learner: BaseEstimator
 
 
+class ExactPolicyTreeMethodSpec(ArbitraryTypesModel):
+    """Globally optimal depth-2 policy tree, in welfare or CAPITAL mode."""
+
+    kind: Literal[PolicyKind.EXACT_POLICY_TREE]
+    mode: PolicySearchMode = PolicySearchMode.WELFARE
+    depth: Annotated[int, Field(ge=1, le=2)] = DEFAULT_EXACT_POLICY_DEPTH
+    min_node_size: PositiveInt = DEFAULT_EXACT_POLICY_MIN_NODE_SIZE
+    split_step: PositiveInt = DEFAULT_EXACT_POLICY_SPLIT_STEP
+    minimum_effect: float = DEFAULT_MINIMUM_EFFECT
+    clinical_threshold: float = DEFAULT_CLINICAL_THRESHOLD
+    negative_effect_penalty: float = Field(default=DEFAULT_NEGATIVE_EFFECT_PENALTY, ge=0.0)
+
+
 class VirtualTwinsMethodSpec(ArbitraryTypesModel):
     kind: Literal[PolicyKind.VIRTUAL_TWINS]
     tree: DecisionTreeRegressor = Field(default_factory=DecisionTreeRegressor)
+    minimum_effect: float = Field(default=DEFAULT_MINIMUM_EFFECT, ge=0.0)
 
 
 class MOBMethodSpec(BaseModel):
@@ -304,6 +356,7 @@ class MOBMethodSpec(BaseModel):
 PolicyMethodSpec = Annotated[
     Union[
         PolicyTreeMethodSpec,
+        ExactPolicyTreeMethodSpec,
         DRPolicyTreeMethodSpec,
         VirtualTwinsMethodSpec,
         MOBMethodSpec,
@@ -351,7 +404,7 @@ class PipelineConfig(BaseModel):
             policy_kinds = {method.kind for method in self.policy or []}
             if policy_kinds & CATE_DEPENDENT_POLICY_KINDS and not cate_configured:
                 raise ValueError(
-                    "policy_tree and virtual_twins require at least one CATE estimator."
+                    "policy_tree, exact_policy_tree, and virtual_twins require at least one CATE estimator."
                 )
 
         test_fraction = self.split.test_fraction

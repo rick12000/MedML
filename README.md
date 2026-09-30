@@ -7,7 +7,6 @@ Modular observational causal inference pipeline built as a thin orchestration la
 ```text
 causal_pipeline/
   config.py        # Pydantic configuration models and estimator cloning
-  settings.py      # Project constants and assembled PipelineConfig
   data.py          # CausalDataset, splitting, contrast utilities
   diagnostics.py   # Propensity overlap and covariate balance (SMD)
   ate.py           # ATE adapters and omitted-variable sensitivity
@@ -16,7 +15,9 @@ causal_pipeline/
   policy.py        # Policy trees, virtual twins, MOB (R), test evaluation
   results.py       # ResultStore persistence
   pipeline.py      # CausalPipeline orchestration
-run_analysis.py    # Example entrypoint
+settings.py         # Example run configuration (not part of the package)
+run_analysis.py      # Example entrypoint
+scripts/generate_toy_cohort.py
 tests/
 ```
 

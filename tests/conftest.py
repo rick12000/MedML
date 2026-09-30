@@ -32,7 +32,7 @@ from causal_pipeline.config import (
     SplitConfig,
     TreatmentMode,
 )
-from causal_pipeline.settings import DATA_CONFIG
+from settings import DATA_CONFIG
 from causal_pipeline.utils import ensure_directory
 
 TEST_LOGISTIC_MAX_ITER = 500
@@ -226,6 +226,7 @@ def integration_pipeline_config(integration_cache_dir: Path) -> PipelineConfig:
             outcome_learner=classifier,
             dr_crossfit_folds=TEST_POLICY_CROSSFIT_FOLDS,
             rate_bootstrap_samples=TEST_INTEGRATION_BOOTSTRAP_SAMPLES,
+            eceth_bootstrap_samples=TEST_INTEGRATION_BOOTSTRAP_SAMPLES,
             random_state=TEST_RANDOM_STATE,
         ),
         policy=None,

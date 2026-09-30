@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
+from scipy.stats import t as student_t
 
 from causal_pipeline.config import CATEEvaluationConfig, clone_estimator, predict_outcome_mean
 from causal_pipeline.crossfit import cross_fit_splits
@@ -59,6 +60,9 @@ class ContrastEvaluation(BaseModel):
 
     contrast: str = Field(min_length=1)
     eceth: float
+    eceth_standard_error: float
+    eceth_pvalue: float
+    eceth_tolerance: float
     rate_autoc: float
     rate_autoc_pvalue: float
     rate_qini: float
@@ -136,10 +140,13 @@ class CATEEvaluator:
                     continue
                 tau_hat = df_cate_predictions[contrast].values
                 gamma = robust_scores[contrast].values
-                eceth = compute_eceth(
+                eceth, eceth_se, eceth_pvalue = eceth_hypothesis_test(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     n_bins=self.evaluation.calibration_bins,
+                    tolerance=self.evaluation.eceth_tolerance,
+                    bootstrap_samples=self.evaluation.eceth_bootstrap_samples,
+                    random_state=self.evaluation.random_state,
                 )
                 calibration_path = f"cate/{estimator_id}/{contrast}/calibration.png"
                 calibration_file = results_root / calibration_path
@@ -170,6 +177,9 @@ class CATEEvaluator:
                     ContrastEvaluation(
                         contrast=contrast,
                         eceth=eceth,
+                        eceth_standard_error=eceth_se,
+                        eceth_pvalue=eceth_pvalue,
+                        eceth_tolerance=self.evaluation.eceth_tolerance,
                         rate_autoc=rate_autoc,
                         rate_autoc_pvalue=rate_autoc_p,
                         rate_qini=rate_qini,
@@ -237,13 +247,68 @@ def compute_eceth(
     gamma: np.ndarray,
     n_bins: int,
 ) -> float:
-    """Binned absolute calibration error of a CATE against doubly robust scores."""
-    rows = calibration_bin_rows(tau_hat=tau_hat, gamma=gamma, n_bins=n_bins)
-    if not rows:
-        return 0.0
-    gaps = [
-        abs(row["mean_predicted_cate"] - row["mean_robust_proxy"])
-        for row in rows
-    ]
-    weights = [int(row["bin_size"]) for row in rows]
-    return float(np.average(gaps, weights=weights))
+    """Leave-one-out ℓ2 calibration error of Xu and Yadlowsky (2022).
+
+    Within each equal-count bin of predicted CATE, the bin mean of the doubly
+    robust scores is recomputed without patient i. The estimator is the mean
+    product of (score − prediction) and (leave-one-out bin mean − prediction).
+    It can be slightly negative in finite samples; that is the debiased
+    estimator, not a display truncation at zero.
+    """
+    predicted = np.asarray(tau_hat, dtype=float)
+    proxy = np.asarray(gamma, dtype=float)
+    if predicted.shape != proxy.shape or predicted.ndim != 1:
+        raise ValueError("CATE predictions and proxy scores must be one-dimensional and aligned.")
+    if len(predicted) < 2:
+        raise ValueError("ECETH needs at least two observations.")
+    order = np.argsort(predicted, kind="mergesort")
+    products: list[np.ndarray] = []
+    for bin_index in np.array_split(order, n_bins):
+        if len(bin_index) < 2:
+            continue
+        proxy_bin = proxy[bin_index]
+        predicted_bin = predicted[bin_index]
+        leave_one_out = (float(np.sum(proxy_bin)) - proxy_bin) / (len(bin_index) - 1)
+        products.append((proxy_bin - predicted_bin) * (leave_one_out - predicted_bin))
+    if not products:
+        raise ValueError("Each ECETH bin needs at least two observations for the leave-one-out mean.")
+    return float(np.mean(np.concatenate(products)))
+
+
+def eceth_hypothesis_test(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    n_bins: int,
+    tolerance: float,
+    bootstrap_samples: int,
+    random_state: int,
+) -> tuple[float, float, float]:
+    """Test H0: ECETH ≥ tolerance against H1: ECETH < tolerance.
+
+    Xu and Yadlowsky use a one-sided t-test with nonparametric bootstrap
+    standard errors of the leave-one-out estimator. The nuisance scores are
+    held fixed: the estimator is asymptotically linear, so the bootstrap
+    resamples the pairs (prediction, score).
+    """
+    if bootstrap_samples < 2:
+        raise ValueError("The ECETH test needs at least two bootstrap replicates.")
+    predicted = np.asarray(tau_hat, dtype=float)
+    proxy = np.asarray(gamma, dtype=float)
+    estimate = compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=n_bins)
+    generator = np.random.default_rng(random_state)
+    replicates = np.empty(bootstrap_samples)
+    sample_size = len(predicted)
+    for replicate in range(bootstrap_samples):
+        drawn = generator.choice(sample_size, size=sample_size, replace=True)
+        replicates[replicate] = compute_eceth(
+            tau_hat=predicted[drawn],
+            gamma=proxy[drawn],
+            n_bins=n_bins,
+        )
+    standard_error = float(np.std(replicates, ddof=1))
+    if standard_error == 0.0:
+        p_value = 0.0 if estimate < tolerance else 1.0
+        return estimate, standard_error, p_value
+    statistic = (estimate - tolerance) / standard_error
+    p_value = float(student_t.cdf(statistic, df=bootstrap_samples - 1))
+    return estimate, standard_error, p_value

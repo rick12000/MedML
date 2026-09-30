@@ -17,6 +17,7 @@ from causal_pipeline.ate import (
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table
 from causal_pipeline.config import (
     CATEEstimatorSpec,
+    DEFAULT_PROPENSITY_CLIP,
     PipelineConfig,
 )
 from causal_pipeline.crossfit import cross_fit_predictions
@@ -25,6 +26,12 @@ from causal_pipeline.diagnostics import DiagnosticsRunner
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.policy import PolicyService
 from causal_pipeline.results import ResultStore
+from causal_pipeline.selection import (
+    plot_tipping_point,
+    split_included_population,
+    transport_included_effects,
+    unseen_population_bound,
+)
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -94,7 +101,8 @@ class CausalPipeline:
 
     def run(self, df_input: pd.DataFrame) -> None:
         logger.info("Starting causal pipeline run.")
-        dataset = CausalDataset(data=self.config.data, df=df_input.copy())
+        analysis_frame, excluded_frame = self.analysis_frame(df_input)
+        dataset = CausalDataset(data=self.config.data, df=analysis_frame)
         partitions = self.splitter.split(dataset, self.config)
         self.results.save_partitions(partitions)
 
@@ -111,6 +119,11 @@ class CausalPipeline:
         ate_models = self.fit_ate_estimators(estimation)
         ate_results = self.estimate_ate_models(ate_models)
         sensitivity_summaries = self.run_ate_sensitivity(ate_models)
+        self.run_selection_analyses(
+            estimation=estimation,
+            excluded=excluded_frame,
+            ate_results=ate_results,
+        )
 
         cate_predictions = self.cross_fit_cate_predictions(estimation)
         cate_ate_results = {
@@ -121,11 +134,13 @@ class CausalPipeline:
             write_dataframe(self.results.cate_dir(estimator_id) / "ate_estimate.csv", estimate)
 
         cate_evaluation: dict[str, list[ContrastEvaluation]] = {}
-        if self.evaluator is not None and cate_predictions:
-            robust_scores = self.evaluator.build_robust_scores(dataset=estimation)
+        estimation_scores = None
+        if self.evaluator is not None and (cate_predictions or self.config.policy):
+            estimation_scores = self.evaluator.build_robust_scores(dataset=estimation)
+        if self.evaluator is not None and cate_predictions and estimation_scores is not None:
             cate_evaluation = self.evaluator.evaluate_cate_models(
                 predictions=cate_predictions,
-                robust_scores=robust_scores,
+                robust_scores=estimation_scores,
                 results_root=self.results.root,
             )
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation)
@@ -141,6 +156,7 @@ class CausalPipeline:
             policies = self.policy_service.fit_policy_methods(
                 estimation=estimation,
                 predictions=cate_predictions,
+                robust_scores=estimation_scores,
             )
             test_scores = self.evaluator.build_robust_scores(dataset=partitions.test)
             policy_results = self.policy_service.evaluate_policies(
@@ -158,6 +174,88 @@ class CausalPipeline:
             policy_summary=policy_results,
         )
         logger.info("Causal pipeline run completed.")
+
+    def analysis_frame(self, df_input: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+        sensitivity = self.config.sensitivity
+        if sensitivity is None or sensitivity.selection_column is None:
+            return df_input.copy(), None
+        data = self.config.data
+        blocked = [data.outcome, data.treatment, *data.confounders, *data.effect_modifiers]
+        included, excluded = split_included_population(
+            df=df_input,
+            selection_column=sensitivity.selection_column,
+            blocked_columns=blocked,
+        )
+        logger.info(
+            "Restricted the analysis to %s included patients and held out %s excluded patients.",
+            len(included),
+            len(excluded),
+        )
+        return included, excluded
+
+    def run_selection_analyses(
+        self,
+        estimation: CausalDataset,
+        excluded: pd.DataFrame | None,
+        ate_results: dict[str, pd.DataFrame],
+    ) -> None:
+        sensitivity = self.config.sensitivity
+        if sensitivity is None:
+            return
+        if (
+            excluded is not None
+            and len(excluded) > 0
+            and sensitivity.sampling_learner is not None
+            and sensitivity.propensity_learner is not None
+        ):
+            covariates = list(estimation.X_adjustment.columns)
+            missing = [column for column in covariates if column not in excluded.columns]
+            if missing:
+                raise ValueError(f"Excluded patients are missing covariates: {missing}")
+            transported = transport_included_effects(
+                included_covariates=estimation.X_adjustment.copy(),
+                included_treatment=estimation.treatment_series.copy(),
+                included_outcome=estimation.outcome_series.copy(),
+                excluded_covariates=excluded.loc[:, covariates].copy(),
+                outcome_learner=sensitivity.outcome_learner,
+                sampling_learner=sensitivity.sampling_learner,
+                propensity_learner=sensitivity.propensity_learner,
+                treatment_values=estimation.treatment_values,
+                control_value=estimation.control_value,
+                propensity_clip=DEFAULT_PROPENSITY_CLIP,
+            )
+            self.results.write_dataframe("selection/transport.csv", transported)
+        if sensitivity.inclusion_fraction is None:
+            return
+        outcome_lower = None
+        outcome_upper = None
+        if sensitivity.outcome_bounds is not None:
+            outcome_lower, outcome_upper = sensitivity.outcome_bounds
+        for estimator_id, estimates in ate_results.items():
+            rows = []
+            for _, estimate_row in estimates.iterrows():
+                bound = unseen_population_bound(
+                    included_effect=float(estimate_row["estimate"]),
+                    inclusion_fraction=sensitivity.inclusion_fraction,
+                    outcome_lower=outcome_lower,
+                    outcome_upper=outcome_upper,
+                )
+                rows.append(bound.model_dump())
+                if outcome_lower is not None and outcome_upper is not None:
+                    plot_tipping_point(
+                        bound=bound,
+                        outcome_lower=outcome_lower,
+                        outcome_upper=outcome_upper,
+                        save_path=str(
+                            self.results.ate_dir(estimator_id)
+                            / "selection"
+                            / f"tipping_{estimate_row['contrast']}.png"
+                        ),
+                    )
+            write_dataframe(
+                self.results.ate_dir(estimator_id) / "selection" / "unseen.csv",
+                pd.DataFrame(rows),
+            )
 
     def fit_ate_estimators(self, train: CausalDataset) -> dict[str, BaseATEEstimator]:
         models: dict[str, BaseATEEstimator] = {}
@@ -261,6 +359,9 @@ class CausalPipeline:
                 df_cate_evaluation = pd.DataFrame(
                     {
                         "eceth": [contrast_result.eceth],
+                        "eceth_standard_error": [contrast_result.eceth_standard_error],
+                        "eceth_pvalue": [contrast_result.eceth_pvalue],
+                        "eceth_tolerance": [contrast_result.eceth_tolerance],
                         "rate_autoc": [contrast_result.rate_autoc],
                         "rate_autoc_pvalue": [contrast_result.rate_autoc_pvalue],
                         "rate_qini": [contrast_result.rate_qini],
@@ -333,6 +434,9 @@ class CausalPipeline:
                         "ate_ci_lower": ate_row["ci_lower"],
                         "ate_ci_upper": ate_row["ci_upper"],
                         "eceth": evaluation.eceth if evaluation else None,
+                        "eceth_standard_error": evaluation.eceth_standard_error if evaluation else None,
+                        "eceth_pvalue": evaluation.eceth_pvalue if evaluation else None,
+                        "eceth_tolerance": evaluation.eceth_tolerance if evaluation else None,
                         "rate_autoc": evaluation.rate_autoc if evaluation else None,
                         "rate_autoc_pvalue": evaluation.rate_autoc_pvalue
                         if evaluation

@@ -11,6 +11,7 @@ from causal_pipeline.evaluation import (
     RATE_WEIGHTING_AUTOC,
     compute_eceth,
     rate_input_frame,
+    eceth_hypothesis_test,
 )
 
 EVALUATION_N_OBSERVATIONS = 40
@@ -21,6 +22,52 @@ def test_compute_eceth_is_zero_when_predictions_match_scores() -> None:
     tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
     value = compute_eceth(tau_hat=tau_hat, gamma=tau_hat.copy(), n_bins=2)
     assert value == 0.0
+
+
+def test_compute_eceth_leave_one_out_ignores_a_single_bin_outlier() -> None:
+    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
+    gamma = np.array([0.0, 10.0, 1.0, 1.0])
+    value = compute_eceth(tau_hat=tau_hat, gamma=gamma, n_bins=2)
+    assert value == 0.0
+
+
+def test_compute_eceth_is_the_mean_squared_gap_when_the_bin_is_shifted() -> None:
+    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
+    gamma = np.ones(4)
+    value = compute_eceth(tau_hat=tau_hat, gamma=gamma, n_bins=2)
+    assert value == 0.5
+
+
+def test_eceth_tolerance_test_rejects_a_perfectly_calibrated_model() -> None:
+    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
+    estimate, standard_error, p_value = eceth_hypothesis_test(
+        tau_hat=tau_hat,
+        gamma=tau_hat.copy(),
+        n_bins=2,
+        tolerance=0.01,
+        bootstrap_samples=10,
+        random_state=0,
+    )
+    assert estimate == 0.0
+    assert standard_error == 0.0
+    assert p_value == 0.0
+
+
+def test_eceth_tolerance_test_does_not_reject_a_large_calibration_gap() -> None:
+    tau_hat = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+    gamma = np.ones(8)
+    estimate, standard_error, p_value = eceth_hypothesis_test(
+        tau_hat=tau_hat,
+        gamma=gamma,
+        n_bins=2,
+        tolerance=0.01,
+        bootstrap_samples=30,
+        random_state=0,
+    )
+    assert estimate == 0.5
+    assert standard_error > 0.0
+    assert 0.0 <= p_value <= 1.0
+    assert p_value > 0.5
 
 
 def test_compute_eceth_returns_finite_scalar_for_well_specified_inputs() -> None:

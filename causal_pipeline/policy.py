@@ -13,22 +13,31 @@ from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.config import (
     DRPolicyTreeMethodSpec,
+    ExactPolicyTreeMethodSpec,
     JsonValue,
     MOBMethodSpec,
     PolicyKind,
     PolicyMethodSpec,
+    PolicySearchMode,
     PolicyTreeMethodSpec,
     VirtualTwinsMethodSpec,
     clone_estimator,
 )
 from causal_pipeline.data import CausalDataset, contrast_columns
+from causal_pipeline.policy_tree import (
+    ExactPolicyTree,
+    capital_reward_matrix,
+    method_name,
+    offset_treatment_rewards,
+)
+from causal_pipeline.virtual_twins import QUALIFYING_UNION_RULE, VIRTUAL_TWINS_METHOD, VirtualTwins
 
 if TYPE_CHECKING:
     from rpy2.robjects import RObject
 
-    PolicyFitModel = PolicyTree | DRPolicyTree | DecisionTreeRegressor | RObject
+    PolicyFitModel = PolicyTree | DRPolicyTree | DecisionTreeRegressor | ExactPolicyTree | RObject
 else:
-    PolicyFitModel = PolicyTree | DRPolicyTree | DecisionTreeRegressor
+    PolicyFitModel = PolicyTree | DRPolicyTree | DecisionTreeRegressor | ExactPolicyTree
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +55,9 @@ class PolicyRule(BaseModel):
     recommended_treatment: JsonValue
     learning_n: int = Field(ge=0)
     subgroup_leaf: int | None = None
+    included_leaves: tuple[int, ...] | None = None
+    learning_effect: float | None = None
+    debiased_effect: float | None = None
 
 
 class FittedPolicy(BaseModel):
@@ -75,6 +87,7 @@ class PolicyService:
         self,
         estimation: CausalDataset,
         predictions: dict[str, pd.DataFrame],
+        robust_scores: pd.DataFrame | None = None,
     ) -> list[FittedPolicy]:
         X_mod = estimation.X_effect_modifiers.copy()
         policies: list[FittedPolicy] = []
@@ -84,6 +97,17 @@ class PolicyService:
                 for estimator_id, df_cate_predictions in predictions.items():
                     policies.append(
                         self.fit_standard_policy_tree(
+                            spec=method,
+                            estimator_id=estimator_id,
+                            dataset=estimation,
+                            X_mod=X_mod,
+                            predictions=df_cate_predictions,
+                        )
+                    )
+            elif method.kind == PolicyKind.EXACT_POLICY_TREE:
+                for estimator_id, df_cate_predictions in predictions.items():
+                    policies.append(
+                        self.fit_exact_policy_tree(
                             spec=method,
                             estimator_id=estimator_id,
                             dataset=estimation,
@@ -102,6 +126,7 @@ class PolicyService:
                             dataset=estimation,
                             X_mod=X_mod,
                             effects=df_cate_predictions,
+                            robust_scores=robust_scores,
                         )
                     )
             elif method.kind == PolicyKind.MOB:
@@ -134,6 +159,58 @@ class PolicyService:
         )
         return FittedPolicy(
             method="policy_tree",
+            source_cate_model=estimator_id,
+            model=tree,
+            rules=rules,
+            feature_names=list(X_mod.columns),
+        )
+
+    def fit_exact_policy_tree(
+        self,
+        spec: ExactPolicyTreeMethodSpec,
+        estimator_id: str,
+        dataset: CausalDataset,
+        X_mod: pd.DataFrame,
+        predictions: pd.DataFrame,
+    ) -> FittedPolicy:
+        logger.info("Fitting exact %s policy tree for %s.", spec.mode.value, estimator_id)
+        control_action = dataset.treatment_values.index(dataset.control_value)
+        if spec.mode == PolicySearchMode.CAPITAL:
+            contrast_name = contrast_columns(dataset.control_value, dataset.treatment_values)[0]
+            rewards = capital_reward_matrix(
+                effects=predictions[contrast_name].to_numpy(dtype=float),
+                treatment_values=dataset.treatment_values,
+                control_value=dataset.control_value,
+                clinical_threshold=spec.clinical_threshold,
+                negative_effect_penalty=spec.negative_effect_penalty,
+            )
+        else:
+            rewards = offset_treatment_rewards(
+                rewards=reward_matrix(
+                    predictions=predictions,
+                    treatment_values=dataset.treatment_values,
+                    control_value=dataset.control_value,
+                ),
+                minimum_effect=spec.minimum_effect,
+                control_action=control_action,
+            )
+        tree = ExactPolicyTree(
+            mode=spec.mode,
+            depth=spec.depth,
+            min_node_size=spec.min_node_size,
+            split_step=spec.split_step,
+            feature_names=list(X_mod.columns),
+        )
+        tree.fit(features=X_mod, rewards=rewards, control_action=control_action)
+        rules = self.extract_exact_policy_rules(
+            tree=tree,
+            X_mod=X_mod,
+            method=method_name(spec.mode),
+            source_cate_model=estimator_id,
+            dataset=dataset,
+        )
+        return FittedPolicy(
+            method=method_name(spec.mode),
             source_cate_model=estimator_id,
             model=tree,
             rules=rules,
@@ -179,22 +256,32 @@ class PolicyService:
         dataset: CausalDataset,
         X_mod: pd.DataFrame,
         effects: pd.DataFrame,
+        robust_scores: pd.DataFrame | None,
     ) -> FittedPolicy:
         logger.info("Fitting virtual twins for %s.", estimator_id)
         tree = clone_estimator(spec.tree)
-        tree.fit(X_mod, effects.values)
-        rules = self.extract_sklearn_tree_rules(
+        if not isinstance(tree, DecisionTreeRegressor):
+            raise TypeError("Virtual twins require a regression tree.")
+        twins = VirtualTwins(
             tree=tree,
+            minimum_effect=spec.minimum_effect,
+            bootstrap_samples=self.bootstrap_samples,
+            random_state=self.random_state,
+        )
+        twins.fit(features=X_mod, effects=effects, robust_scores=robust_scores)
+        if twins.model is None:
+            raise RuntimeError("Virtual twins did not fit a tree.")
+        rules = self.extract_virtual_twin_rules(
+            twins=twins,
             X_mod=X_mod,
             effects=effects,
-            method="virtual_twins",
             source_cate_model=estimator_id,
             dataset=dataset,
         )
         return FittedPolicy(
-            method="virtual_twins",
+            method=VIRTUAL_TWINS_METHOD,
             source_cate_model=estimator_id,
-            model=tree,
+            model=twins.model,
             rules=rules,
             feature_names=list(X_mod.columns),
         )
@@ -272,6 +359,34 @@ class PolicyService:
             )
         return rules
 
+    def extract_exact_policy_rules(
+        self,
+        tree: ExactPolicyTree,
+        X_mod: pd.DataFrame,
+        method: str,
+        source_cate_model: str | None,
+        dataset: CausalDataset,
+    ) -> list[PolicyRule]:
+        leaf_ids = np.asarray(tree.apply(X_mod))
+        actions = np.asarray(tree.predict(X_mod))
+        descriptions = tree.leaf_descriptions()
+        rules = []
+        for rule_id, leaf in enumerate(sorted(set(leaf_ids.tolist()))):
+            mask = leaf_ids == leaf
+            recommended = int(actions[mask][0])
+            rules.append(
+                PolicyRule(
+                    method=method,
+                    source_cate_model=source_cate_model,
+                    rule_id=rule_id,
+                    rule=descriptions[int(leaf)],
+                    recommended_treatment=dataset.treatment_values[recommended],
+                    learning_n=int(mask.sum()),
+                    subgroup_leaf=int(leaf),
+                )
+            )
+        return rules
+
     def extract_sklearn_tree_rules(
         self,
         tree: DecisionTreeRegressor,
@@ -303,12 +418,78 @@ class PolicyService:
             )
         return rules
 
+    def extract_virtual_twin_rules(
+        self,
+        twins: VirtualTwins,
+        X_mod: pd.DataFrame,
+        effects: pd.DataFrame,
+        source_cate_model: str | None,
+        dataset: CausalDataset,
+    ) -> list[PolicyRule]:
+        if twins.model is None:
+            raise RuntimeError("Virtual twins did not fit a tree.")
+        leaf_ids = np.asarray(twins.model.apply(X_mod))
+        qualifying = set(twins.qualifying_leaves)
+        rules = []
+        for leaf in sorted(qualifying):
+            mask = leaf_ids == leaf
+            if not np.any(mask):
+                continue
+            recommended_arm = best_treatment_arm(
+                mean_effects=effects.iloc[mask].mean(axis=0),
+                treatment_values=dataset.treatment_values,
+                control_value=dataset.control_value,
+            )
+            rules.append(
+                PolicyRule(
+                    method=VIRTUAL_TWINS_METHOD,
+                    source_cate_model=source_cate_model,
+                    rule_id=len(rules),
+                    rule=f"leaf_{leaf}",
+                    recommended_treatment=recommended_arm,
+                    learning_n=int(mask.sum()),
+                    subgroup_leaf=int(leaf),
+                )
+            )
+        debiasing = twins.debiasing
+        if debiasing is None or debiasing.empty:
+            return rules
+        treated = [value for value in dataset.treatment_values if value != dataset.control_value]
+        contrast_arms = dict(
+            zip(
+                contrast_columns(dataset.control_value, dataset.treatment_values),
+                treated,
+                strict=True,
+            )
+        )
+        union_n = int(np.isin(leaf_ids, list(qualifying)).sum())
+        for row in debiasing.itertuples(index=False):
+            contrast = str(row.contrast)
+            if contrast not in contrast_arms:
+                continue
+            rules.append(
+                PolicyRule(
+                    method=VIRTUAL_TWINS_METHOD,
+                    source_cate_model=source_cate_model,
+                    rule_id=len(rules),
+                    rule=QUALIFYING_UNION_RULE,
+                    recommended_treatment=contrast_arms[contrast],
+                    learning_n=union_n,
+                    included_leaves=twins.qualifying_leaves,
+                    learning_effect=float(row.naive_effect),
+                    debiased_effect=float(row.debiased_effect),
+                )
+            )
+        return rules
+
     def subgroup_leaf_ids(
         self,
         policy: FittedPolicy,
         X_mod: pd.DataFrame,
     ) -> np.ndarray | None:
         if policy.method == "policy_tree":
+            return np.asarray(policy.model.apply(X_mod))
+        if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
             return np.asarray(policy.model.apply(X_mod))
         if policy.method == "dr_policy_tree":
             return np.asarray(policy.model.policy_tree_.apply(X_mod))
@@ -334,9 +515,12 @@ class PolicyService:
                     subgroup_scores = test_scores
                     test_n = len(test_scores)
                 else:
-                    if rule.subgroup_leaf is None:
+                    if rule.included_leaves is not None:
+                        mask = np.isin(leaf_ids, list(rule.included_leaves))
+                    elif rule.subgroup_leaf is None:
                         continue
-                    mask = leaf_ids == rule.subgroup_leaf
+                    else:
+                        mask = leaf_ids == rule.subgroup_leaf
                     subgroup_scores = test_scores.iloc[mask]
                     test_n = int(mask.sum())
                 if test_n == 0:
@@ -358,6 +542,10 @@ class PolicyService:
                         "effect_estimate": effect,
                         "ci_lower": lower,
                         "ci_upper": upper,
+                        "learning_effect": np.nan if rule.learning_effect is None else rule.learning_effect,
+                        "debiased_learning_effect": (
+                            np.nan if rule.debiased_effect is None else rule.debiased_effect
+                        ),
                     }
                 )
         return pd.DataFrame(rows)

@@ -1,0 +1,6 @@
+flowchart LR
+    U([User]) -->|request| API[API]
+    API --> V{Valid?}
+    V -->|yes| S[Service]
+    S -->|read/write| DB[(Database)]
+    V -->|no| E[Return error]

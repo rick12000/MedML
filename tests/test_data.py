@@ -18,6 +18,8 @@ def test_causal_dataset_exposes_confounder_columns(
 ) -> None:
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     assert list(dataset.X_confounders.columns) == ["x1", "x2"]
+    assert list(dataset.X_adjustment.columns) == ["x1", "x2"]
+    assert list(dataset.X_controls.columns) == ["x2"]
     assert len(dataset.treatment_series) == len(df_synthetic_binary)
 
 
@@ -73,6 +75,14 @@ def test_split_with_policy_allocates_test_rows(
         == total
     )
     assert len(partitions.test.df) > 0
+
+
+def test_ipw_weights_binary_stabilized_uses_marginal_probability() -> None:
+    treatment = np.array([0.0, 0.0, 0.0, 1.0])
+    propensity = np.array([0.2, 0.2, 0.2, 0.8])
+    weights = ipw_weights_binary(treatment, propensity, stabilized=True)
+    assert np.isclose(weights[0], 0.75 / 0.8)
+    assert np.isclose(weights[3], 0.25 / 0.8)
 
 
 def test_ipw_weights_binary_shape_and_positive() -> None:

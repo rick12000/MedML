@@ -1,0 +1,26 @@
+direction: right
+
+client: Client {shape: person}
+platform: Platform {
+  api: API
+  worker: Worker
+  db: Database {shape: cylinder}
+  queue: Queue {shape: queue}
+
+  api -> db: read/write
+  api -> queue: enqueue
+  queue -> worker: consume
+  worker -> db: persist
+}
+client -> platform.api: HTTPS
+
+steps: {
+  request: {
+    client.style.opacity: 1
+    platform.api.style.animated: true
+  }
+  async-work: {
+    platform.queue.style.animated: true
+    platform.worker.style.animated: true
+  }
+}

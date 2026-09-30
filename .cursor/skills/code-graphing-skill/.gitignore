@@ -1,0 +1,4 @@
+.diagram-tools/
+examples/*.svg
+examples/*.png
+examples/complex-flow/

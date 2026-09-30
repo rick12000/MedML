@@ -1,0 +1,8 @@
+direction: right
+
+client: Client { shape: person }
+api: API
+db: Database { shape: cylinder }
+
+client -> api: HTTPS
+api -> db: read/write

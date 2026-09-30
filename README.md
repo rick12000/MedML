@@ -6,7 +6,7 @@ Modular observational causal inference pipeline built as a thin orchestration la
 
 ```text
 causal_pipeline/
-  config.py        # Pydantic configuration models and learner registry
+  config.py        # Pydantic configuration models and estimator cloning
   settings.py      # Project constants and assembled PipelineConfig
   data.py          # CausalDataset, splitting, contrast utilities
   diagnostics.py   # Propensity overlap and covariate balance (SMD)
@@ -42,4 +42,6 @@ Outputs are written under `results/` (partitions, diagnostics, ATE/CATE summarie
 
 ## Policy workflow
 
-Set `policy=PolicyConfig(...)` on `PipelineConfig` and use `train_fraction + validation_fraction + test_fraction = 1` with `test_fraction > 0`. Omit `policy` (or set it to `None`) to skip policy fitting; the test partition is then an empty `DataFrame` with the input schema. Omit `sensitivity` to skip ATE sensitivity analysis.
+Pass instantiated sklearn estimators (for example `RandomForestRegressor(...)`) on estimator specs. The pipeline clones them before fitting so shared config objects stay unfitted.
+
+ATE and CATE estimator lists are optional, but at least one must be non-empty. Diagnostics, sensitivity, CATE evaluation, and policy are optional. Pass `policy=[PolicyTreeMethodSpec(...), ...]` with `test_fraction > 0`; omit `policy` or pass an empty list to skip policy fitting. Policy methods require a held-out test split.

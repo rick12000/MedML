@@ -1,0 +1,30 @@
+---
+applyTo: "**"
+---
+
+# Python environment
+
+Use this virtual environment for Python commands. If this repository is only a Python application, use it for every command.
+
+## Activate
+
+Environment directory: C:\Users\ricca\.venvs\causal-pipeline
+Run activation from the repository root.
+
+PowerShell:
+
+    & "$env:USERPROFILE\.venvs\causal-pipeline\Scripts\Activate.ps1"
+
+cmd:
+
+    call %USERPROFILE%\.venvs\causal-pipeline\Scripts\activate.bat
+
+## Run
+
+From the repository root, with this environment active:
+
+1. If `uv` is on PATH, use `uv pip`. Otherwise use `pip`.
+2. Prefer an editable install of this package: `uv pip install -e . --python "C:\Users\ricca\.venvs\causal-pipeline\Scripts\python.exe"` or, after activation, `pip install -e .`. If the only manifest is `requirements.txt`, use `uv pip install -r requirements.txt --python "C:\Users\ricca\.venvs\causal-pipeline\Scripts\python.exe"` or `pip install -r requirements.txt`.
+3. If that editable install is already done, skip reinstall before later runs.
+4. Run the requested code with this environment.
+5. If install fails on version conflicts, update `pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt`, retry, and report those edits in the final reply.

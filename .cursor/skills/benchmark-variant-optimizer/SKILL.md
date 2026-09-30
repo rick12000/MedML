@@ -1,7 +1,6 @@
 ---
 name: benchmark-variant-optimizer
-description: >
-  Use when a user asks to optimize code against a clear metric such as runtime, latency, memory, accuracy, precision, recall, cost, throughput, or quality score. Handles benchmark-driven comparison of implementation variants and post-review integration of the selected variant. Do NOT use when the optimization metric is missing or unclear.
+description: Compare implementation variants on a stated metric such as runtime, latency, memory, accuracy, precision, recall, cost, throughput, or quality, then integrate the chosen variant. Use when optimizing code against a clear metric.
 ---
 
 # Benchmark Variant Optimizer

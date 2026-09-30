@@ -105,6 +105,19 @@ class CausalDataset(BaseModel):
         return self.df[list(self.data.effect_modifiers)]
 
     @property
+    def X_adjustment(self) -> pd.DataFrame:
+        """Confounders plus any effect modifier that is not already a confounder."""
+        columns = list(dict.fromkeys([*self.confounders, *self.effect_modifiers]))
+        return self.df[columns]
+
+    @property
+    def X_controls(self) -> pd.DataFrame:
+        """Confounders that are not also effect modifiers, for an X/W split."""
+        modifiers = set(self.effect_modifiers)
+        columns = [column for column in self.confounders if column not in modifiers]
+        return self.df[columns]
+
+    @property
     def treatment_series(self) -> pd.Series:
         return self.df[self.data.treatment]
 
@@ -147,7 +160,7 @@ class DataSplitter:
         group_id = data_config.group_id
         treatment_col = data_config.treatment
 
-        if config.policy is None:
+        if not config.policy:
             if group_id is None:
                 df_train, df_validation = train_test_split(
                     df_input,
@@ -236,13 +249,14 @@ def ipw_weights_binary(
     """Horvitz-Thompson weights for binary treatment."""
     treatment = treatment.astype(float)
     propensity = np.clip(propensity, 1e-6, 1.0 - 1e-6)
-    weights = treatment / propensity + (1.0 - treatment) / (1.0 - propensity)
     if stabilized:
-        treated_mean = np.mean(treatment / propensity)
-        control_mean = np.mean((1.0 - treatment) / (1.0 - propensity))
-        denom = treated_mean * treatment + control_mean * (1.0 - treatment)
-        weights = weights / denom
-    return weights
+        treated_probability = float(np.mean(treatment))
+        control_probability = 1.0 - treated_probability
+        return (
+            treatment * treated_probability / propensity
+            + (1.0 - treatment) * control_probability / (1.0 - propensity)
+        )
+    return treatment / propensity + (1.0 - treatment) / (1.0 - propensity)
 
 
 def ipw_weights_multi(

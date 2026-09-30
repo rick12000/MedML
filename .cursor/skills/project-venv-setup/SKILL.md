@@ -1,86 +1,82 @@
 ---
 name: project-venv-setup
-description: >
-  Use when setting up a Python virtual environment for a new or existing project on Windows.
-  Handles tool selection (uv vs conda), venv creation, dependency installation, conflict resolution, and optional `.cursor/rules/env.mdc` for future agents.
-  Do NOT use for non-Python environments or when the user only wants dependency advice without creating an environment.
+description: Create a named Python virtual environment in the user profile with uv or conda and install the project. Use when a repository needs a Python environment. If an env instruction named env already exists, follow that file instead.
 ---
 
 # Project Virtual Environment Setup
 
 ## Workflow
 
-1. Change directory to the repository root (the project workspace).
+1. Before any other step, follow `publish-agent-instructions` for `name: env`. If an instruction with that name already exists, stop this workflow and follow that file. Do not create another environment.
 
-2. On Windows, use the current user's profile when checking tools or installing `uv` (e.g. `C:\Users\<username>`). Run project commands from the repository root unless the install step requires the user profile.
+2. Require packaging at the repository root. At least one of `pyproject.toml`, `requirements.txt`, or `setup.py` must exist. If none exists, abort. Tell the user that no environment could be created and no code could be run because the project does not yet have proper packaging. Do not install tools, create an environment, or write env files.
 
-3. Detect available tooling (from a shell in the user profile or repo root):
+3. Resolve the current user's profile from the environment, not from the repository and not from the current working directory. On Windows use `$env:USERPROFILE` / `%USERPROFILE%` (for example `C:\Users\<username>` from `$env:USERNAME` / `%USERNAME%`). Create the environment under that profile.
+
+4. Detect tooling from a shell started in the user profile:
    - `uv --version`
    - `conda --version`
 
-4. Select the backend:
-   - If `uv` is available → use **uv**.
-   - Else if `conda` is available → use **conda**.
-   - Else install **uv** for the current user (official Windows install script or equivalent), verify `uv --version`, then use **uv**.
+5. Select the backend:
+   - If `uv` is available, use **uv**.
+   - Else if `conda` is available, use **conda**.
+   - Else install **uv** for the current user, verify `uv --version`, then use **uv**.
 
-5. Choose an environment name from project context: repository folder name, `pyproject.toml` `name`, or package name in `setup.py`. Use a short, lowercase, hyphenated identifier (e.g. `my-app`). For **uv**, default location is `.venv` in the repo root unless the project already documents another path. For **conda**, create a named env with that identifier.
+6. Choose an environment name from the repository folder name, the `pyproject.toml` `name`, or the package name in `setup.py`. Use a short, lowercase, hyphenated identifier (for example `my-app`).
 
-6. Create the environment:
-   - **uv**: `uv venv` (or `uv venv <path>` if the repo already standardizes a path).
-   - **conda**: `conda create -n <name> python=<version>` — pick a Python version from `pyproject.toml`, `.python-version`, `runtime.txt`, or CI config; otherwise use a recent stable 3.x.
+7. Create the named environment in the user profile:
+   - **uv**: `uv venv --prompt <name> "$env:USERPROFILE\.venvs\<name>"` (cmd: `uv venv --prompt <name> "%USERPROFILE%\.venvs\<name>"`). The environment directory is `<user-profile>\.venvs\<name>`. Do not create `.venv` in the repository.
+   - **conda**: `conda create -n <name> python=<version>`. Pick the Python version from `pyproject.toml`, `.python-version`, `runtime.txt`, or CI config; otherwise use a recent stable 3.x.
 
-7. Install project dependencies (activate or use tool-native invocations so packages land in the new env):
-   - If `pyproject.toml` exists: prefer editable install — **uv**: `uv pip install -e .` (or `uv sync` when the project uses uv lockfiles); **conda** (env active): `pip install -e .`.
-   - Else if `setup.py` exists: `pip install -e .` (or `uv pip install -e .` under uv).
-   - Else if `requirements.txt` exists: **uv**: `uv pip install -r requirements.txt`; **conda**: `pip install -r requirements.txt`.
-   - Else: inform the user the env is created but no dependency manifest was found; do not invent packages.
+8. Install project dependencies into that environment. Run install commands from the repository root. If `uv` is on PATH, use `uv pip`. Otherwise use `pip`. Prefer an editable install so later runs can skip reinstall.
+   - **uv**, when `pyproject.toml` or `setup.py` exists: `uv pip install -e . --python "$env:USERPROFILE\.venvs\<name>\Scripts\python.exe"`. Use `uv sync` only when the project already uses a uv lockfile, and point it at the same interpreter.
+   - **uv**, when only `requirements.txt` exists: `uv pip install -r requirements.txt --python "$env:USERPROFILE\.venvs\<name>\Scripts\python.exe"`.
+   - **conda**, when `pyproject.toml` or `setup.py` exists: `conda activate <name>`, then `pip install -e .`.
+   - **conda**, when only `requirements.txt` exists: `conda activate <name>`, then `pip install -r requirements.txt`.
 
-8. If install fails due to version conflicts or resolver errors, resolve recursively:
-   - Read the error; adjust conflicting pins in `pyproject.toml`, `requirements.txt`, or `setup.py` / `setup.cfg` as appropriate.
-   - Retry install after each coherent change.
-   - Stop after repeated failure with a short summary of blockers; do not loop indefinitely.
-   - When a retry succeeds, persist the resolution in the same manifest files you changed (updated pins, added bounds, split optional deps if the project structure supports it).
+9. If install fails because of version conflicts or resolver errors, resolve them and retry:
+   - Read the error and adjust the conflicting pins in `pyproject.toml`, `requirements.txt`, `setup.py`, or `setup.cfg`.
+   - Retry after each coherent change.
+   - Stop after repeated failure and summarize the blockers.
+   - When a retry succeeds, keep the resolution in the manifest files you changed.
+   - Report those manifest changes in the final reply.
 
-9. Tell the user the environment is ready. Include:
-   - Environment name and path (uv: `.venv`; conda: env name).
-   - **Activation** (Windows):
-     - uv / venv: `.\.venv\Scripts\Activate.ps1` (PowerShell) or `.\.venv\Scripts\activate.bat` (cmd).
-     - conda: `conda activate <name>`.
-   - **Future dependencies**: editable project — `uv pip install -e .` or `pip install -e .`; requirements file — `uv pip install -r requirements.txt` or `pip install -r requirements.txt`; prefer editable installs for local packages so code changes apply without reinstalling the whole tree.
+10. Tell the user the environment is ready. Include the environment name, the absolute directory, and the activation commands with the name filled in.
+    - **uv** — environment directory `<user-profile>\.venvs\<name>`. Run activation from the repository root.
+      - PowerShell: `& "$env:USERPROFILE\.venvs\<name>\Scripts\Activate.ps1"`
+      - cmd: `call %USERPROFILE%\.venvs\<name>\Scripts\activate.bat`
+    - **conda**: `conda activate <name>`.
 
-10. If `.cursor/` exists at the repository root, create or update `.cursor/rules/env.mdc` with `alwaysApply: true`. Document for future agents:
-    - Which backend (uv vs conda), env name, and venv path.
-    - Exact install/update commands for this repo (editable when `pyproject.toml` or `setup.py` is present).
-    - Preference: use editable installs for the project package; add new deps to the canonical manifest (`pyproject.toml` or `requirements.txt`), then reinstall/sync — avoid ad-hoc global pip into the wrong interpreter.
-    - Tell the user that `env.mdc` was created or updated.
-
-## Rules
-
-- Prefer **uv** over **conda** when both are available.
-- Never install dependencies into the system Python when a project env is the goal.
-- Match manifest style already used in the repo; do not introduce a second competing dependency format without reason.
-- Editable install (`-e`) is the default for installable local packages so agents and developers do not need a full reinstall after every code change.
-- Run install and verification commands in the shell; do not only describe them.
-
-## `env.mdc` template
-
-Use this structure (fill in project-specific values):
+11. Follow `publish-agent-instructions` with this environment's values filled into the body. These files are how the next session reuses the environment instead of repeating this workflow.
+    - `name`: `env`
+    - `description`: `Use this repository's Python virtual environment before installing, running, or testing Python.`
+    - `body`: the template below. For **conda**, the Activate section is only `conda activate <name>`. For **uv**, include the absolute environment directory and both activation commands.
 
 ```markdown
----
-description: Python environment and dependency workflow for this repository
-alwaysApply: true
----
-
 # Python environment
 
-- Tool: uv | conda
-- Env name / path: ...
-- Activate (Windows): ...
+Use this virtual environment for Python commands. If this repository is only a Python application, use it for every command.
 
-## Install and update
+## Activate
 
-- ...
-- Prefer editable install for this package when developing locally.
-- Add or change dependencies in [pyproject.toml | requirements.txt], then run the install command above.
+Environment directory: <user-profile>\.venvs\<name>
+Run activation from the repository root.
+
+PowerShell:
+
+    & "$env:USERPROFILE\.venvs\<name>\Scripts\Activate.ps1"
+
+cmd:
+
+    call %USERPROFILE%\.venvs\<name>\Scripts\activate.bat
+
+## Run
+
+From the repository root, with this environment active:
+
+1. If `uv` is on PATH, use `uv pip`. Otherwise use `pip`.
+2. Prefer an editable install of this package: `uv pip install -e . --python "<env-dir>\Scripts\python.exe"` or, after activation, `pip install -e .`. If the only manifest is `requirements.txt`, use `uv pip install -r requirements.txt --python "<env-dir>\Scripts\python.exe"` or `pip install -r requirements.txt`.
+3. If that editable install is already done, skip reinstall before later runs.
+4. Run the requested code with this environment.
+5. If install fails on version conflicts, update `pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt`, retry, and report those edits in the final reply.
 ```

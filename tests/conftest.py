@@ -1,8 +1,16 @@
-from __future__ import annotations
+from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from causal_pipeline.config import (
     ATEKind,
@@ -10,36 +18,33 @@ from causal_pipeline.config import (
     CATEKind,
     DataConfig,
     DiagnosticConfig,
+    DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
-    LearnerSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
     PipelineConfig,
-    PolicyConfig,
+    PolicyKind,
+    PolicyTreeMethodSpec,
     SplitConfig,
     TreatmentMode,
 )
+from causal_pipeline.settings import DATA_CONFIG
+from causal_pipeline.utils import ensure_directory
 
 
 @pytest.fixture
-def logistic_learner() -> LearnerSpec:
-    return LearnerSpec(name="logistic_regression", params={"max_iter": 500})
+def logistic_learner() -> BaseEstimator:
+    return LogisticRegression(max_iter=500)
 
 
 @pytest.fixture
-def forest_learner() -> LearnerSpec:
-    return LearnerSpec(
-        name="random_forest",
-        params={"n_estimators": 10, "random_state": 0},
-    )
+def forest_learner() -> BaseEstimator:
+    return RandomForestRegressor(n_estimators=10, random_state=0)
 
 
 @pytest.fixture
-def forest_classifier() -> LearnerSpec:
-    return LearnerSpec(
-        name="random_forest_classifier",
-        params={"n_estimators": 10, "random_state": 0},
-    )
+def forest_classifier() -> BaseEstimator:
+    return RandomForestClassifier(n_estimators=10, random_state=0)
 
 
 @pytest.fixture
@@ -73,8 +78,8 @@ def continuous_data_config() -> DataConfig:
 @pytest.fixture
 def pipeline_config_no_policy(
     binary_data_config: DataConfig,
-    logistic_learner: LearnerSpec,
-    forest_learner: LearnerSpec,
+    logistic_learner: BaseEstimator,
+    forest_classifier: BaseEstimator,
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
@@ -84,22 +89,18 @@ def pipeline_config_no_policy(
             test_fraction=0.0,
             random_state=0,
         ),
-        diagnostics=DiagnosticConfig(
-            propensity_learner=logistic_learner,
-            plot_propensity_overlap=False,
-        ),
+        diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
         ate_estimators=[
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
         cate_estimators=[
-            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.S_LEARNER,
+                outcome_learner=forest_classifier,
+            ),
         ],
         sensitivity=None,
-        cate_evaluation=CATEEvaluationConfig(
-            dr_crossfit_folds=3,
-            rate_bootstrap_samples=20,
-            random_state=0,
-        ),
+        cate_evaluation=None,
         policy=None,
         results_dir="results",
     )
@@ -108,8 +109,8 @@ def pipeline_config_no_policy(
 @pytest.fixture
 def pipeline_config_with_policy(
     binary_data_config: DataConfig,
-    logistic_learner: LearnerSpec,
-    forest_learner: LearnerSpec,
+    logistic_learner: BaseEstimator,
+    forest_classifier: BaseEstimator,
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
@@ -119,23 +120,25 @@ def pipeline_config_with_policy(
             test_fraction=0.2,
             random_state=0,
         ),
-        diagnostics=DiagnosticConfig(
-            propensity_learner=logistic_learner,
-            plot_propensity_overlap=False,
-        ),
+        diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
         ate_estimators=[
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
         cate_estimators=[
-            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=forest_learner),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.S_LEARNER,
+                outcome_learner=forest_classifier,
+            ),
         ],
         sensitivity=None,
         cate_evaluation=CATEEvaluationConfig(
+            propensity_learner=logistic_learner,
+            outcome_learner=forest_classifier,
             dr_crossfit_folds=3,
             rate_bootstrap_samples=20,
             random_state=0,
         ),
-        policy=PolicyConfig(),
+        policy=[PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE)],
         results_dir="results",
     )
 
@@ -157,3 +160,52 @@ def df_synthetic_grouped(df_synthetic_binary: pd.DataFrame) -> pd.DataFrame:
     df_grouped = df_synthetic_binary.copy()
     df_grouped["patient_id"] = np.arange(len(df_grouped)) // 5
     return df_grouped
+
+
+@pytest.fixture
+def integration_cache_dir() -> Path:
+    return ensure_directory(Path("cache") / "pytest-integration")
+
+
+@pytest.fixture
+def integration_pipeline_config(integration_cache_dir: Path) -> PipelineConfig:
+    logistic = LogisticRegression(max_iter=500)
+    classifier = RandomForestClassifier(n_estimators=8, random_state=0)
+    regressor = RandomForestRegressor(n_estimators=8, random_state=0)
+    return PipelineConfig(
+        data=DATA_CONFIG,
+        split=SplitConfig(
+            train_fraction=0.7,
+            validation_fraction=0.3,
+            test_fraction=0.0,
+            random_state=0,
+        ),
+        diagnostics=DiagnosticConfig(propensity_learner=logistic),
+        ate_estimators=[
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic),
+            DoublyRobustATEEstimatorSpec(
+                kind=ATEKind.AIPW,
+                outcome_learner=classifier,
+                propensity_learner=logistic,
+            ),
+        ],
+        cate_estimators=[
+            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, outcome_learner=classifier),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.X_LEARNER,
+                outcome_learner=classifier,
+                effect_learner=regressor,
+                propensity_learner=logistic,
+            ),
+        ],
+        sensitivity=None,
+        cate_evaluation=CATEEvaluationConfig(
+            propensity_learner=logistic,
+            outcome_learner=classifier,
+            dr_crossfit_folds=3,
+            rate_bootstrap_samples=8,
+            random_state=0,
+        ),
+        policy=None,
+        results_dir=str(integration_cache_dir),
+    )

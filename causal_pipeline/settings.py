@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
@@ -11,15 +14,18 @@ from causal_pipeline.config import (
     DiagnosticConfig,
     DoublyRobustATEEstimatorSpec,
     DoubleMLATEEstimatorSpec,
+    DRPolicyTreeMethodSpec,
     IPWATEEstimatorSpec,
-    LearnerSpec,
+    MOBMethodSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
     PipelineConfig,
-    PolicyConfig,
+    PolicyKind,
+    PolicyTreeMethodSpec,
     SensitivityConfig,
     SplitConfig,
     TreatmentMode,
+    VirtualTwinsMethodSpec,
 )
 
 
@@ -49,23 +55,15 @@ RANDOM_FOREST_N_ESTIMATORS = 100
 RANDOM_FOREST_RANDOM_STATE = 42
 
 
-LOGISTIC_LEARNER = LearnerSpec(
-    name="logistic_regression",
-    params={"max_iter": LOGISTIC_MAX_ITER},
+LOGISTIC_LEARNER = LogisticRegression(max_iter=LOGISTIC_MAX_ITER)
+LINEAR_REGRESSION_LEARNER = LinearRegression()
+RANDOM_FOREST_LEARNER = RandomForestRegressor(
+    n_estimators=RANDOM_FOREST_N_ESTIMATORS,
+    random_state=RANDOM_FOREST_RANDOM_STATE,
 )
-RANDOM_FOREST_LEARNER = LearnerSpec(
-    name="random_forest",
-    params={
-        "n_estimators": RANDOM_FOREST_N_ESTIMATORS,
-        "random_state": RANDOM_FOREST_RANDOM_STATE,
-    },
-)
-RANDOM_FOREST_CLASSIFIER_LEARNER = LearnerSpec(
-    name="random_forest_classifier",
-    params={
-        "n_estimators": RANDOM_FOREST_N_ESTIMATORS,
-        "random_state": RANDOM_FOREST_RANDOM_STATE,
-    },
+RANDOM_FOREST_CLASSIFIER_LEARNER = RandomForestClassifier(
+    n_estimators=RANDOM_FOREST_N_ESTIMATORS,
+    random_state=RANDOM_FOREST_RANDOM_STATE,
 )
 
 
@@ -81,15 +79,24 @@ DATA_CONFIG = DataConfig(
 )
 
 
-def build_pipeline_config(policy_enabled: bool = False) -> PipelineConfig:
-    if policy_enabled:
+def build_pipeline_config(include_policy: bool = False) -> PipelineConfig:
+    if include_policy:
         split = SplitConfig(
             train_fraction=SPLIT_TRAIN_FRACTION_WITH_POLICY,
             validation_fraction=SPLIT_VALIDATION_FRACTION_WITH_POLICY,
             test_fraction=SPLIT_TEST_FRACTION_WITH_POLICY,
             random_state=SPLIT_RANDOM_STATE,
         )
-        policy = PolicyConfig()
+        policy = [
+            PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE),
+            DRPolicyTreeMethodSpec(
+                kind=PolicyKind.DR_POLICY_TREE,
+                outcome_learner=RANDOM_FOREST_LEARNER,
+                propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+            ),
+            VirtualTwinsMethodSpec(kind=PolicyKind.VIRTUAL_TWINS),
+            MOBMethodSpec(kind=PolicyKind.MOB),
+        ]
     else:
         split = SplitConfig(
             train_fraction=SPLIT_TRAIN_FRACTION_NO_POLICY,
@@ -107,34 +114,58 @@ def build_pipeline_config(policy_enabled: bool = False) -> PipelineConfig:
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=LOGISTIC_LEARNER),
             DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.AIPW,
-                outcome_learner=RANDOM_FOREST_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
             ),
             DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.TMLE,
-                outcome_learner=RANDOM_FOREST_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
             ),
             DoubleMLATEEstimatorSpec(
                 kind=ATEKind.DML_IRM,
-                outcome_learner=RANDOM_FOREST_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
             ),
         ],
         cate_estimators=[
-            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            MetaCATEEstimatorSpec(kind=CATEKind.T_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            MetaCATEEstimatorSpec(kind=CATEKind.X_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            MetaCATEEstimatorSpec(kind=CATEKind.R_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
-            MetaCATEEstimatorSpec(kind=CATEKind.DR_LEARNER, base_learner=RANDOM_FOREST_LEARNER),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.S_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+            ),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.T_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+            ),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.X_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+                effect_learner=RANDOM_FOREST_LEARNER,
+                propensity_learner=LOGISTIC_LEARNER,
+            ),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.R_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+                effect_learner=RANDOM_FOREST_LEARNER,
+                propensity_learner=LOGISTIC_LEARNER,
+            ),
+            MetaCATEEstimatorSpec(
+                kind=CATEKind.DR_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+                effect_learner=RANDOM_FOREST_LEARNER,
+                propensity_learner=LOGISTIC_LEARNER,
+            ),
             CausalForestCATEEstimatorSpec(
                 kind=CATEKind.CAUSAL_FOREST,
-                outcome_learner=RANDOM_FOREST_LEARNER,
+                outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
             ),
         ],
-        sensitivity=SensitivityConfig(),
-        cate_evaluation=CATEEvaluationConfig(),
+        sensitivity=SensitivityConfig(outcome_learner=LINEAR_REGRESSION_LEARNER),
+        cate_evaluation=CATEEvaluationConfig(
+            propensity_learner=LOGISTIC_LEARNER,
+            outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+        ),
         policy=policy,
         results_dir=RESULTS_DIR,
     )

@@ -18,6 +18,10 @@ venv/
 *.pem
 secrets.json
 
+# ─── Analysis outputs / data artefacts ──────────────────────────────────────
+/results/
+/data/
+
 # ─── Application logs / cache (never commit user data) ───────────────────────
 /cache
 backend/cache/

@@ -1,9 +1,6 @@
 ---
 name: pytest-unit-testing
-description: >
-  Use when writing or reviewing Python unit tests, pytest test suites, pytest fixtures, or unittest.mock usage.
-  Handles test target selection, fixture placement, parametrization, mocking boundaries, shaped outputs, mathematical checks, and test failure triage.
-  Do NOT use for non-Python test frameworks or broad QA strategy unless pytest unit tests are part of the task.
+description: Write or review pytest unit tests, fixtures, parametrization, and unittest.mock usage, including conftest placement, shaped outputs, and failure triage. Use for Python pytest tests.
 ---
 
 # Pytest Unit Testing

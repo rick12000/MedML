@@ -14,15 +14,8 @@ def test_diagnostics_runner_produces_balance_table(
     pipeline_config_no_policy,
     df_synthetic_binary: pd.DataFrame,
 ) -> None:
-    config = pipeline_config_no_policy.model_copy(
-        update={
-            "diagnostics": pipeline_config_no_policy.diagnostics.model_copy(
-                update={"plot_propensity_overlap": False},
-            ),
-        },
-    )
-    runner = DiagnosticsRunner(config)
-    dataset = CausalDataset(data=config.data, df=df_synthetic_binary)
+    runner = DiagnosticsRunner(pipeline_config_no_policy.diagnostics)
+    dataset = CausalDataset(data=pipeline_config_no_policy.data, df=df_synthetic_binary)
     result = runner.run(dataset)
     assert not result.covariate_balance.empty
     assert set(result.covariate_balance.columns) >= {
@@ -30,4 +23,17 @@ def test_diagnostics_runner_produces_balance_table(
         "unweighted_smd",
         "weighted_smd",
     }
-    assert len(result.covariate_balance) == len(config.data.confounders)
+    assert len(result.covariate_balance) == len(pipeline_config_no_policy.data.confounders)
+
+
+def test_diagnostics_writes_overlap_plot_under_results_root(
+    pipeline_config_no_policy,
+    df_synthetic_binary: pd.DataFrame,
+    tmp_path,
+) -> None:
+    runner = DiagnosticsRunner(pipeline_config_no_policy.diagnostics)
+    dataset = CausalDataset(data=pipeline_config_no_policy.data, df=df_synthetic_binary)
+    result = runner.run(dataset, results_root=str(tmp_path))
+    overlap_path = tmp_path / "diagnostics" / "propensity_overlap.png"
+    assert overlap_path.is_file()
+    assert result.propensity_overlap_path is not None

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from causallib.estimation import Standardization
 from doubleml import DoubleMLData
 from doubleml.irm import DoubleMLAPOS, DoubleMLIRM
 from doubleml.plm import DoubleMLPLR
@@ -17,6 +18,7 @@ from sklearn.base import BaseEstimator
 from causal_pipeline.config import (
     DEFAULT_ATE_CONFIDENCE_LEVEL,
     DEFAULT_DML_N_FOLDS,
+    DEFAULT_ESTIMAND_ATE,
     ATEEstimatorSpec,
     ATEKind,
     DoublyRobustATEEstimatorSpec,
@@ -43,6 +45,12 @@ from causal_pipeline.utils import write_html
 
 logger = logging.getLogger(__name__)
 
+SENSITIVITY_STRENGTH_CAP = 0.9999
+SENSITIVITY_MULTIPLE_SEARCH_MAX = 10.0
+SENSITIVITY_BISECT_ITERATIONS = 30
+SENSITIVITY_CONFOUNDING_RHO = 1.0
+
+
 class BaseATEEstimator(ABC):
     """Common interface for average treatment effect estimators."""
 
@@ -58,9 +66,7 @@ class BaseATEEstimator(ABC):
 def create_ate_estimator(
     spec: ATEEstimatorSpec,
     data: CausalDataset,
-    sensitivity_outcome_learner: BaseEstimator | None = None,
 ) -> BaseATEEstimator:
-    del sensitivity_outcome_learner
     if spec.kind == ATEKind.IPW:
         return IPWAdapter(spec=spec, data=data)
     if spec.kind == ATEKind.AIPW:
@@ -114,7 +120,7 @@ def factual_outcome_predictions(
     return matrix[rows, columns]
 
 
-def treated_propensity(fitted_propensity: object) -> np.ndarray:
+def treated_propensity(fitted_propensity: np.ndarray) -> np.ndarray:
     """P(T = treated | X) from a 1-d score or an arm-by-column matrix."""
     propensity = np.asarray(fitted_propensity)
     if propensity.ndim == 1:
@@ -137,7 +143,7 @@ class IPWAdapter(BaseATEEstimator):
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         _, propensity = cross_fit_nuisances(
-            X=data.X_adjustment.copy(),
+            covariates=data.X_adjustment.copy(),
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
@@ -155,11 +161,12 @@ class IPWAdapter(BaseATEEstimator):
         if self.treatment is None or self.outcome is None or self.propensity is None:
             raise RuntimeError("Estimator is not fitted.")
         return contrasts_from_arm_scores(
-            arm_scores=_hajek_arm_scores(self.outcome, self.treatment, self.propensity),
+            arm_scores=hajek_scores_by_arm(self.outcome, self.treatment, self.propensity),
             control_value=self.data.control_value,
             treatment_values=self.data.treatment_values,
             level=DEFAULT_ATE_CONFIDENCE_LEVEL,
         )
+
 
 class AIPWAdapter(BaseATEEstimator):
     def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
@@ -179,7 +186,7 @@ class AIPWAdapter(BaseATEEstimator):
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         potential_outcomes, propensity = cross_fit_nuisances(
-            X=data.X_adjustment.copy(),
+            covariates=data.X_adjustment.copy(),
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
@@ -206,7 +213,7 @@ class AIPWAdapter(BaseATEEstimator):
         ):
             raise RuntimeError("Estimator is not fitted.")
         return contrasts_from_arm_scores(
-            arm_scores=_aipw_arm_scores(
+            arm_scores=aipw_scores_by_arm(
                 self.outcome,
                 self.treatment,
                 self.potential_outcomes,
@@ -216,6 +223,7 @@ class AIPWAdapter(BaseATEEstimator):
             treatment_values=self.data.treatment_values,
             level=DEFAULT_ATE_CONFIDENCE_LEVEL,
         )
+
 
 class TMLEAdapter(BaseATEEstimator):
     def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
@@ -235,7 +243,7 @@ class TMLEAdapter(BaseATEEstimator):
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         initial_outcomes, propensity = cross_fit_nuisances(
-            X=data.X_adjustment.copy(),
+            covariates=data.X_adjustment.copy(),
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
@@ -270,7 +278,7 @@ class TMLEAdapter(BaseATEEstimator):
         ):
             raise RuntimeError("Estimator is not fitted.")
         return contrasts_from_arm_scores(
-            arm_scores=_aipw_arm_scores(
+            arm_scores=aipw_scores_by_arm(
                 self.outcome,
                 self.treatment,
                 self.potential_outcomes,
@@ -280,6 +288,7 @@ class TMLEAdapter(BaseATEEstimator):
             treatment_values=self.data.treatment_values,
             level=DEFAULT_ATE_CONFIDENCE_LEVEL,
         )
+
 
 class DoubleMLIRMAdapter(BaseATEEstimator):
     def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
@@ -320,12 +329,13 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         return pd.DataFrame(
             {
                 "contrast": [contrast],
-                "estimand": ["ate"],
+                "estimand": [DEFAULT_ESTIMAND_ATE],
                 "estimate": [float(self.model.coef[0])],
                 "ci_lower": [float(summary.iloc[0, 0])],
                 "ci_upper": [float(summary.iloc[0, 1])],
             }
         )
+
 
 class DoubleMLPLRAdapter(BaseATEEstimator):
     def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
@@ -370,6 +380,7 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
             }
         )
 
+
 class DoubleMLAPOSAdapter(BaseATEEstimator):
     def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
@@ -412,13 +423,14 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             rows.append(
                 {
                     "contrast": name,
-                    "estimand": "ate",
+                    "estimand": DEFAULT_ESTIMAND_ATE,
                     "estimate": float(framework.thetas[index]),
                     "ci_lower": float(intervals.iloc[index, 0]),
                     "ci_upper": float(intervals.iloc[index, 1]),
                 }
             )
         return pd.DataFrame(rows)
+
 
 def binary_treatment_indicator(treatment: pd.Series, control_value: JsonValue) -> pd.Series:
     """Code the control arm as 0 and every other arm as 1 for binary DoubleML models."""
@@ -436,7 +448,7 @@ def contrasts_from_arm_scores(
     control_value: JsonValue,
     treatment_values: list[JsonValue],
     level: float,
-    estimand: str = "ate",
+    estimand: str = DEFAULT_ESTIMAND_ATE,
 ) -> pd.DataFrame:
     control_scores = arm_scores[control_value]
     names = contrast_columns(control_value, treatment_values)
@@ -456,7 +468,7 @@ def contrasts_from_arm_scores(
     return pd.DataFrame(rows)
 
 
-def _hajek_arm_scores(
+def hajek_scores_by_arm(
     outcome: pd.Series,
     treatment: pd.Series,
     propensity: pd.DataFrame,
@@ -474,7 +486,7 @@ def _hajek_arm_scores(
     }
 
 
-def _aipw_arm_scores(
+def aipw_scores_by_arm(
     outcome: pd.Series,
     treatment: pd.Series,
     potential_outcomes: pd.DataFrame,
@@ -499,18 +511,19 @@ def contrasts_from_population_outcomes(
     control_value: JsonValue,
     treatment_values: list[JsonValue],
 ) -> pd.DataFrame:
-    series = _population_series(population)
+    series = population_as_series(population)
     names = contrast_columns(control_value, treatment_values)
     arms = [arm for arm in treatment_values if arm != control_value]
     rows = []
     for name, arm in zip(names, arms, strict=True):
         estimate = float(
-            _population_outcome(series, arm) - _population_outcome(series, control_value),
+            population_outcome_for_arm(series, arm)
+            - population_outcome_for_arm(series, control_value),
         )
         rows.append(
             {
                 "contrast": name,
-                "estimand": "ate",
+                "estimand": DEFAULT_ESTIMAND_ATE,
                 "estimate": estimate,
                 "ci_lower": np.nan,
                 "ci_upper": np.nan,
@@ -519,7 +532,7 @@ def contrasts_from_population_outcomes(
     return pd.DataFrame(rows)
 
 
-def _population_series(population: pd.DataFrame | pd.Series) -> pd.Series:
+def population_as_series(population: pd.DataFrame | pd.Series) -> pd.Series:
     if isinstance(population, pd.DataFrame):
         if population.shape[1] != 1:
             raise ValueError("Population outcome table must be a Series or a single-column DataFrame.")
@@ -527,7 +540,7 @@ def _population_series(population: pd.DataFrame | pd.Series) -> pd.Series:
     return population
 
 
-def _population_outcome(population: pd.Series, arm: JsonValue) -> float:
+def population_outcome_for_arm(population: pd.Series, arm: JsonValue) -> float:
     if arm in population.index:
         return float(population[arm])
     matches = [index for index in population.index if str(index) == str(arm)]
@@ -553,11 +566,9 @@ class ATESensitivityAnalyzer:
     def analyze(
         self,
         estimator: BaseATEEstimator,
-        training_data: CausalDataset,
         estimator_id: str,
         results_root: str,
     ) -> SensitivityResult | None:
-        del training_data
         sensitivity_config = self.sensitivity
         if estimator_supports_sensitivity(estimator):
             return self.analyze_doubleml_native(
@@ -588,7 +599,7 @@ class ATESensitivityAnalyzer:
         if sensitivity_params is None:
             raise RuntimeError("DoubleML sensitivity analysis did not populate sensitivity_params.")
         rv = float(np.ravel(sensitivity_params["rv"])[0])
-        benchmarks = _doubleml_covariate_benchmarks(
+        benchmarks = doubleml_covariate_benchmarks(
             model=model,
             null_effect=sensitivity_config.null_effect,
             level=sensitivity_config.confidence_level,
@@ -617,7 +628,7 @@ class ATESensitivityAnalyzer:
         )
 
 
-def _doubleml_covariate_benchmarks(
+def doubleml_covariate_benchmarks(
     model: DoubleMLIRM | DoubleMLPLR,
     null_effect: float,
     level: float,
@@ -633,7 +644,7 @@ def _doubleml_covariate_benchmarks(
                 "benchmark_treatment_strength": treatment_strength,
                 "benchmark_outcome_strength": outcome_strength,
                 "benchmark_bias": float(benchmark["delta_theta"]),
-                "benchmark_multiple_to_null": _confounding_multiple_to_null(
+                "benchmark_multiple_to_null": confounding_multiple_to_null(
                     model=model,
                     treatment_strength=treatment_strength,
                     outcome_strength=outcome_strength,
@@ -645,7 +656,7 @@ def _doubleml_covariate_benchmarks(
     return pd.DataFrame(rows)
 
 
-def _confounding_multiple_to_null(
+def confounding_multiple_to_null(
     model: DoubleMLIRM | DoubleMLPLR,
     treatment_strength: float,
     outcome_strength: float,
@@ -657,21 +668,21 @@ def _confounding_multiple_to_null(
         return float("inf")
 
     def covers_null(multiple: float) -> bool:
-        lower, upper = _doubleml_point_bounds(
+        lower, upper = doubleml_point_bounds(
             model=model,
-            treatment_strength=min(multiple * treatment_strength, 0.9999),
-            outcome_strength=min(multiple * outcome_strength, 0.9999),
+            treatment_strength=min(multiple * treatment_strength, SENSITIVITY_STRENGTH_CAP),
+            outcome_strength=min(multiple * outcome_strength, SENSITIVITY_STRENGTH_CAP),
             level=level,
         )
         return lower <= null_effect <= upper
 
     if covers_null(0.0):
         return 0.0
-    upper_multiple = 10.0
+    upper_multiple = SENSITIVITY_MULTIPLE_SEARCH_MAX
     if not covers_null(upper_multiple):
         return float("inf")
     lower_multiple = 0.0
-    for _ in range(30):
+    for attempt in range(SENSITIVITY_BISECT_ITERATIONS):
         midpoint = (lower_multiple + upper_multiple) / 2.0
         if covers_null(midpoint):
             upper_multiple = midpoint
@@ -680,7 +691,7 @@ def _confounding_multiple_to_null(
     return float(upper_multiple)
 
 
-def _doubleml_point_bounds(
+def doubleml_point_bounds(
     model: DoubleMLIRM | DoubleMLPLR,
     treatment_strength: float,
     outcome_strength: float,
@@ -689,7 +700,7 @@ def _doubleml_point_bounds(
     result = model._framework._calc_sensitivity_analysis(
         cf_y=outcome_strength,
         cf_d=treatment_strength,
-        rho=1.0,
+        rho=SENSITIVITY_CONFOUNDING_RHO,
         level=level,
     )
     lower = float(np.ravel(result["theta"]["lower"])[0])

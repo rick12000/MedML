@@ -5,19 +5,48 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
-from sklearn.model_selection import StratifiedKFold
 
 from causal_pipeline.config import CATEEvaluationConfig, clone_estimator, predict_outcome_mean
+from causal_pipeline.crossfit import cross_fit_splits
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 from causal_pipeline.utils import save_figure, write_dataframe
 
 logger = logging.getLogger(__name__)
+
+CALIBRATION_FIGURE_SIZE = (5, 5)
+TOC_FIGURE_SIZE = (6, 4)
+RATE_WEIGHTING_AUTOC = "autoc"
+RATE_WEIGHTING_QINI = "qini"
+
+
+def calibration_bin_rows(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    n_bins: int,
+) -> list[dict[str, float]]:
+    order = np.argsort(tau_hat)
+    bins = np.array_split(order, n_bins)
+    rows: list[dict[str, float]] = []
+    for bin_indices in bins:
+        if len(bin_indices) == 0:
+            continue
+        rows.append(
+            {
+                "mean_predicted_cate": float(np.mean(tau_hat[bin_indices])),
+                "mean_robust_proxy": float(np.mean(gamma[bin_indices])),
+                "bin_size": len(bin_indices),
+            }
+        )
+    return rows
 
 
 def rate_input_frame(tau_hat: np.ndarray, gamma: np.ndarray) -> pd.DataFrame:
@@ -39,7 +68,7 @@ class ContrastEvaluation(BaseModel):
 
 
 class CATEEvaluator:
-    """Validation-set CATE evaluation using cross-fitted robust proxy scores."""
+    """CATE metrics from cross-fitted predictions and doubly robust proxy scores."""
 
     def __init__(self, evaluation: CATEEvaluationConfig) -> None:
         self.evaluation = evaluation
@@ -48,40 +77,40 @@ class CATEEvaluator:
         return self.build_multi_arm_robust_scores(dataset)
 
     def build_multi_arm_robust_scores(self, dataset: CausalDataset) -> pd.DataFrame:
-        X = dataset.X_adjustment.copy()
+        covariates = dataset.X_adjustment.copy()
         treatment = dataset.treatment_series
-        outcome = dataset.outcome_series.to_numpy(dtype=float)
+        outcome_values = dataset.outcome_series.to_numpy(dtype=float)
         levels = dataset.treatment_values
-        n_folds = min(self.evaluation.dr_crossfit_folds, int(treatment.value_counts().min()))
-        if n_folds < 2:
-            raise ValueError("Doubly robust scores need at least two units in every treatment arm.")
         clip_min, clip_max = self.evaluation.propensity_clip
-        folds = StratifiedKFold(
-            n_splits=n_folds,
-            shuffle=True,
+        folds = cross_fit_splits(
+            treatment=treatment,
+            n_folds=self.evaluation.dr_crossfit_folds,
             random_state=self.evaluation.random_state,
         )
-        gamma_by_arm = {level: np.zeros(len(outcome)) for level in levels}
+        gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
 
-        for train_idx, test_idx in folds.split(X, treatment):
-            X_train = X.iloc[train_idx].copy()
-            X_test = X.iloc[test_idx].copy()
-            y_train = outcome[train_idx]
-            t_train = treatment.iloc[train_idx]
+        for train_idx, test_idx in folds.split(covariates, treatment):
+            train_covariates = covariates.iloc[train_idx].copy()
+            test_covariates = covariates.iloc[test_idx].copy()
+            train_outcome = outcome_values[train_idx]
+            train_treatment = treatment.iloc[train_idx]
             propensity_learner = clone_estimator(self.evaluation.propensity_learner)
-            propensity_learner.fit(X_train, t_train)
+            propensity_learner.fit(train_covariates, train_treatment)
             propensity = pd.DataFrame(
-                propensity_learner.predict_proba(X_test),
+                propensity_learner.predict_proba(test_covariates),
                 columns=list(propensity_learner.classes_),
             )
             for arm in levels:
                 outcome_learner = clone_estimator(self.evaluation.outcome_learner)
-                mask = t_train.to_numpy() == arm
-                outcome_learner.fit(X_train.iloc[mask].copy(), y_train[mask])
-                mu = predict_outcome_mean(outcome_learner, X_test)
+                arm_mask = train_treatment.to_numpy() == arm
+                outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
+                outcome_mean = predict_outcome_mean(outcome_learner, test_covariates)
                 arm_propensity = np.clip(probability_of_arm(propensity, arm), clip_min, clip_max)
                 observed = treatment.iloc[test_idx].to_numpy() == arm
-                gamma_by_arm[arm][test_idx] = mu + observed * (outcome[test_idx] - mu) / arm_propensity
+                gamma_by_arm[arm][test_idx] = (
+                    outcome_mean
+                    + observed * (outcome_values[test_idx] - outcome_mean) / arm_propensity
+                )
 
         control = dataset.control_value
         contrasts = {}
@@ -130,12 +159,12 @@ class CATEEvaluator:
                 rate_autoc, rate_autoc_p = self.rate_with_bootstrap(
                     tau_hat=tau_hat,
                     gamma=gamma,
-                    weighting="autoc",
+                    weighting=RATE_WEIGHTING_AUTOC,
                 )
                 rate_qini, rate_qini_p = self.rate_with_bootstrap(
                     tau_hat=tau_hat,
                     gamma=gamma,
-                    weighting="qini",
+                    weighting=RATE_WEIGHTING_QINI,
                 )
                 contrast_results.append(
                     ContrastEvaluation(
@@ -159,25 +188,10 @@ class CATEEvaluator:
         n_bins: int,
         save_path: str,
     ) -> pd.DataFrame:
-        order = np.argsort(tau_hat)
-        bins = np.array_split(order, n_bins)
-        rows = []
-        predicted_means = []
-        proxy_means = []
-        for bin_indices in bins:
-            if len(bin_indices) == 0:
-                continue
-            predicted_mean = float(np.mean(tau_hat[bin_indices]))
-            proxy_mean = float(np.mean(gamma[bin_indices]))
-            predicted_means.append(predicted_mean)
-            proxy_means.append(proxy_mean)
-            rows.append(
-                {
-                    "mean_predicted_cate": predicted_mean,
-                    "mean_robust_proxy": proxy_mean,
-                }
-            )
-        fig, axis = plt.subplots(figsize=(5, 5))
+        rows = calibration_bin_rows(tau_hat=tau_hat, gamma=gamma, n_bins=n_bins)
+        predicted_means = [row["mean_predicted_cate"] for row in rows]
+        proxy_means = [row["mean_robust_proxy"] for row in rows]
+        fig, axis = plt.subplots(figsize=CALIBRATION_FIGURE_SIZE)
         axis.scatter(predicted_means, proxy_means)
         limits = [
             min(predicted_means + proxy_means),
@@ -193,7 +207,7 @@ class CATEEvaluator:
 
     def plot_toc(self, tau_hat: np.ndarray, gamma: np.ndarray, save_path: str) -> None:
         toc = get_toc(rate_input_frame(tau_hat, gamma), treatment_effect_col="tau")
-        fig, axis = plt.subplots(figsize=(6, 4))
+        fig, axis = plt.subplots(figsize=TOC_FIGURE_SIZE)
         axis.plot(toc.index.to_numpy(), toc.iloc[:, 0].to_numpy())
         axis.set_xlabel("Top fraction ranked by CATE")
         axis.set_ylabel("TOC")
@@ -224,13 +238,12 @@ def compute_eceth(
     n_bins: int,
 ) -> float:
     """Binned absolute calibration error of a CATE against doubly robust scores."""
-    order = np.argsort(tau_hat)
-    bins = np.array_split(order, n_bins)
-    gaps = []
-    weights = []
-    for bin_indices in bins:
-        if len(bin_indices) == 0:
-            continue
-        gaps.append(abs(float(np.mean(tau_hat[bin_indices])) - float(np.mean(gamma[bin_indices]))))
-        weights.append(len(bin_indices))
+    rows = calibration_bin_rows(tau_hat=tau_hat, gamma=gamma, n_bins=n_bins)
+    if not rows:
+        return 0.0
+    gaps = [
+        abs(row["mean_predicted_cate"] - row["mean_robust_proxy"])
+        for row in rows
+    ]
+    weights = [int(row["bin_size"]) for row in rows]
     return float(np.average(gaps, weights=weights))

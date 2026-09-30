@@ -1,9 +1,0 @@
----
-alwaysApply: true
----
-
-- Do not add any comments to the code, unless essential or if the code is particularly obscure. Code should be self documenting. Only doc strings (google doc) are allowed.
-- Keep __init__.py files empty, always import modules from package root (dir containing package).
-- Do not use .get() on dictionaries, use dict["key"] and do not add fallbacks or catch key errors unless there's a very valid reason for continuing execution in spite of that and the error is logged.
-- Do not add fallback values when things go wrong. This creates silent failures that I can't debug. Fallbacks can be dangerous and should be situational, not a safety blanket.
-- Do not use the _ prefix on any variable or method names, there are no private methods in python.

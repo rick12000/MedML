@@ -28,9 +28,9 @@ class ResultStore:
 
     def save_partitions(self, partitions: DataPartitions) -> None:
         data_dir = ensure_directory(self.root / "data")
-        persist_dataframe(data_dir / "train.parquet", partitions.train.df)
-        persist_dataframe(data_dir / "validation.parquet", partitions.validation.df)
-        persist_dataframe(data_dir / "test.parquet", partitions.test.df)
+        persist_dataframe(data_dir / "estimation.parquet", partitions.estimation.df)
+        if partitions.test is not None:
+            persist_dataframe(data_dir / "test.parquet", partitions.test.df)
         logger.info("Saved data partitions under %s", data_dir)
 
     def save_diagnostics(self, diagnostics: DiagnosticResult) -> None:

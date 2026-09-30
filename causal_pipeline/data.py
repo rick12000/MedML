@@ -19,6 +19,9 @@ from causal_pipeline.config import (
 
 logger = logging.getLogger(__name__)
 
+IPW_WEIGHTS_STABILIZED_DEFAULT = False
+PROPENSITY_CLIP_FLOOR = 1e-6
+
 
 class CausalDataset(BaseModel):
     """Observational cohort: column contract plus validated tabular data."""
@@ -125,13 +128,16 @@ class CausalDataset(BaseModel):
     def outcome_series(self) -> pd.Series:
         return self.df[self.data.outcome]
 
+    def subset(self, positions: np.ndarray) -> CausalDataset:
+        """Copy the rows at these positions without changing the source frame."""
+        return CausalDataset(data=self.data, df=self.df.iloc[positions].reset_index(drop=True))
+
 
 class DataPartitions(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
-    train: CausalDataset
-    validation: CausalDataset
-    test: CausalDataset
+    estimation: CausalDataset
+    test: CausalDataset | None = None
 
 
 def contrast_columns(control_value: JsonValue, treatment_values: list[JsonValue]) -> list[str]:
@@ -146,83 +152,53 @@ def arm_label(value: JsonValue) -> str:
 
 
 class DataSplitter:
-    """Split data into train, validation, and test partitions."""
+    """Keep the full sample, or hold out a test set when policy evaluation is on."""
 
     def split(self, dataset: CausalDataset, config: PipelineConfig) -> DataPartitions:
-        logger.info("Splitting dataset into train, validation, and test partitions.")
-        df_input = dataset.df
-        data_config = dataset.data
-
-        train_fraction = config.split.train_fraction
-        validation_fraction = config.split.validation_fraction
-        test_fraction = config.split.test_fraction
-        random_state = config.split.random_state
-        group_id = data_config.group_id
-        treatment_col = data_config.treatment
-
         if not config.policy:
-            if group_id is None:
-                df_train, df_validation = train_test_split(
-                    df_input,
-                    test_size=validation_fraction,
-                    random_state=random_state,
-                    stratify=df_input[treatment_col]
-                    if data_config.treatment_mode == TreatmentMode.BINARY
-                    else None,
-                )
-            else:
-                df_train, df_validation = self.split_grouped(
-                    df=df_input,
-                    group_id=group_id,
-                    first_fraction=train_fraction,
-                    random_state=random_state,
-                )
-            df_test = df_input.iloc[0:0].copy()
+            logger.info("Using the full sample for cross-fit estimation.")
             return DataPartitions(
-                train=CausalDataset(data=data_config, df=df_train),
-                validation=CausalDataset(data=data_config, df=df_validation),
-                test=CausalDataset(data=data_config, df=df_test),
+                estimation=CausalDataset(data=dataset.data, df=dataset.df.copy()),
             )
 
-        val_test_fraction = validation_fraction + test_fraction
-        if group_id is None:
-            df_train, df_val_test = train_test_split(
-                df_input,
-                test_size=val_test_fraction,
-                random_state=random_state,
-                stratify=df_input[treatment_col]
-                if data_config.treatment_mode == TreatmentMode.BINARY
-                else None,
-            )
-            relative_test = test_fraction / val_test_fraction
-            df_validation, df_test = train_test_split(
-                df_val_test,
-                test_size=relative_test,
-                random_state=random_state,
-                stratify=df_val_test[treatment_col]
-                if data_config.treatment_mode == TreatmentMode.BINARY
-                else None,
-            )
-        else:
-            df_train, df_val_test = self.split_grouped(
-                df=df_input,
-                group_id=group_id,
-                first_fraction=train_fraction,
-                random_state=random_state,
-            )
-            relative_test = test_fraction / val_test_fraction
-            df_validation, df_test = self.split_grouped(
-                df=df_val_test,
-                group_id=group_id,
-                first_fraction=1.0 - relative_test,
-                random_state=random_state + 1,
-            )
-
-        return DataPartitions(
-            train=CausalDataset(data=data_config, df=df_train),
-            validation=CausalDataset(data=data_config, df=df_validation),
-            test=CausalDataset(data=data_config, df=df_test),
+        logger.info("Holding out a test set for policy evaluation.")
+        estimation_frame, test_frame = self.hold_out_test(
+            df=dataset.df,
+            group_id=dataset.group_id,
+            treatment_column=dataset.treatment,
+            treatment_mode=dataset.treatment_mode,
+            test_fraction=config.split.test_fraction,
+            random_state=config.split.random_state,
         )
+        return DataPartitions(
+            estimation=CausalDataset(data=dataset.data, df=estimation_frame),
+            test=CausalDataset(data=dataset.data, df=test_frame),
+        )
+
+    def hold_out_test(
+        self,
+        df: pd.DataFrame,
+        group_id: str | None,
+        treatment_column: str,
+        treatment_mode: TreatmentMode,
+        test_fraction: float,
+        random_state: int,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if group_id is not None:
+            return self.split_grouped(
+                df=df,
+                group_id=group_id,
+                first_fraction=1.0 - test_fraction,
+                random_state=random_state,
+            )
+        estimation, test = train_test_split(
+            df,
+            test_size=test_fraction,
+            random_state=random_state,
+            stratify=df[treatment_column] if treatment_mode == TreatmentMode.BINARY else None,
+            shuffle=True,
+        )
+        return estimation, test
 
     def split_grouped(
         self,
@@ -244,19 +220,19 @@ class DataSplitter:
 def ipw_weights_binary(
     treatment: np.ndarray,
     propensity: np.ndarray,
-    stabilized: bool = False,
+    stabilized: bool = IPW_WEIGHTS_STABILIZED_DEFAULT,
 ) -> np.ndarray:
     """Horvitz-Thompson weights for binary treatment."""
-    treatment = treatment.astype(float)
-    propensity = np.clip(propensity, 1e-6, 1.0 - 1e-6)
+    treatment_values = np.asarray(treatment, dtype=float)
+    propensity_values = np.clip(propensity, PROPENSITY_CLIP_FLOOR, 1.0 - PROPENSITY_CLIP_FLOOR)
     if stabilized:
-        treated_probability = float(np.mean(treatment))
+        treated_probability = float(np.mean(treatment_values))
         control_probability = 1.0 - treated_probability
         return (
-            treatment * treated_probability / propensity
-            + (1.0 - treatment) * control_probability / (1.0 - propensity)
+            treatment_values * treated_probability / propensity_values
+            + (1.0 - treatment_values) * control_probability / (1.0 - propensity_values)
         )
-    return treatment / propensity + (1.0 - treatment) / (1.0 - propensity)
+    return treatment_values / propensity_values + (1.0 - treatment_values) / (1.0 - propensity_values)
 
 
 def ipw_weights_multi(
@@ -269,5 +245,5 @@ def ipw_weights_multi(
     arm_indices = np.array([level_to_index[value] for value in treatment])
     row_indices = np.arange(len(treatment))
     selected = propensity_matrix[row_indices, arm_indices]
-    selected = np.clip(selected, 1e-6, None)
+    selected = np.clip(selected, PROPENSITY_CLIP_FLOOR, None)
     return 1.0 / selected

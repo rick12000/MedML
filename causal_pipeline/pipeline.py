@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -13,8 +14,14 @@ from causal_pipeline.ate import (
     create_ate_estimator,
     estimator_supports_sensitivity,
 )
-from causal_pipeline.cate import BaseCATEEstimator, create_cate_estimator
-from causal_pipeline.config import PipelineConfig
+from causal_pipeline.cate import create_cate_estimator, mean_cate_table
+from causal_pipeline.config import (
+    CATEEstimatorSpec,
+    DEFAULT_DML_N_FOLDS,
+    DEFAULT_ESTIMAND_ATE,
+    PipelineConfig,
+)
+from causal_pipeline.crossfit import cross_fit_predictions
 from causal_pipeline.data import CausalDataset, DataSplitter
 from causal_pipeline.diagnostics import DiagnosticsRunner
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
@@ -23,6 +30,23 @@ from causal_pipeline.results import ResultStore
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+def predict_cate_fold(
+    train: CausalDataset,
+    held_out: CausalDataset,
+    spec: CATEEstimatorSpec,
+) -> pd.DataFrame:
+    estimator = create_cate_estimator(spec=spec, data=train)
+    estimator.fit(data=train)
+    return estimator.predict_effects(data=held_out)
+
+
+def cate_fold_predictor(spec: CATEEstimatorSpec) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
+    def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
+        return predict_cate_fold(train=train, held_out=held_out, spec=spec)
+
+    return predict_fold
 
 
 class CausalPipeline:
@@ -40,11 +64,31 @@ class CausalPipeline:
     ) -> None:
         self.config = config
         self.splitter = splitter or DataSplitter()
-        self.diagnostics_runner = diagnostics_runner
-        self.sensitivity_analyzer = sensitivity_analyzer
-        self.evaluator = evaluator
-        self.policy_service = policy_service
-        self.results = results or ResultStore(config)
+        self.results = results or ResultStore(config=config)
+        if diagnostics_runner is not None:
+            self.diagnostics_runner = diagnostics_runner
+        elif config.diagnostics is not None:
+            self.diagnostics_runner = DiagnosticsRunner(diagnostics=config.diagnostics)
+        else:
+            self.diagnostics_runner = None
+        if sensitivity_analyzer is not None:
+            self.sensitivity_analyzer = sensitivity_analyzer
+        elif config.sensitivity is not None:
+            self.sensitivity_analyzer = ATESensitivityAnalyzer(sensitivity=config.sensitivity)
+        else:
+            self.sensitivity_analyzer = None
+        if evaluator is not None:
+            self.evaluator = evaluator
+        elif config.cate_evaluation is not None:
+            self.evaluator = CATEEvaluator(evaluation=config.cate_evaluation)
+        else:
+            self.evaluator = None
+        if policy_service is not None:
+            self.policy_service = policy_service
+        elif config.policy is not None:
+            self.policy_service = PolicyService(methods=config.policy)
+        else:
+            self.policy_service = None
 
     def run(self, df_input: pd.DataFrame) -> None:
         logger.info("Starting causal pipeline run.")
@@ -52,52 +96,52 @@ class CausalPipeline:
         partitions = self.splitter.split(dataset, self.config)
         self.results.save_partitions(partitions)
 
+        estimation = partitions.estimation
         if self.config.diagnostics is not None:
-            diagnostics_runner = self.diagnostics_runner or DiagnosticsRunner(
-                self.config.diagnostics,
-            )
-            diagnostics = diagnostics_runner.run(
-                partitions.train,
+            if self.diagnostics_runner is None:
+                raise RuntimeError("Diagnostics are configured but no diagnostics runner is available.")
+            diagnostics = self.diagnostics_runner.run(
+                train=estimation,
                 results_root=str(self.results.root),
             )
             self.results.save_diagnostics(diagnostics)
 
-        ate_models = self.fit_ate_estimators(partitions.train)
+        ate_models = self.fit_ate_estimators(estimation)
         ate_results = self.estimate_ate_models(ate_models)
-        sensitivity_summaries = self.run_ate_sensitivity(ate_models, partitions.train)
+        sensitivity_summaries = self.run_ate_sensitivity(ate_models)
 
-        cate_models = self.fit_cate_estimators(partitions.train)
-        cate_ate_results = self.estimate_from_cate_models(cate_models, partitions.validation)
-        validation_predictions = self.predict_cate_models(cate_models, partitions.validation)
-
-        evaluator = None
-        if self.config.cate_evaluation is not None:
-            evaluator = self.evaluator or CATEEvaluator(self.config.cate_evaluation)
+        cate_predictions = self.cross_fit_cate_predictions(estimation)
+        cate_ate_results = {
+            estimator_id: mean_cate_table(predictions)
+            for estimator_id, predictions in cate_predictions.items()
+        }
+        for estimator_id, estimate in cate_ate_results.items():
+            write_dataframe(self.results.cate_dir(estimator_id) / "ate_estimate.csv", estimate)
 
         cate_evaluation: dict[str, list[ContrastEvaluation]] = {}
-        if evaluator is not None and cate_models:
-            validation_scores = evaluator.build_robust_scores(partitions.validation)
-            cate_evaluation = evaluator.evaluate_cate_models(
-                predictions=validation_predictions,
-                robust_scores=validation_scores,
+        if self.evaluator is not None and cate_predictions:
+            robust_scores = self.evaluator.build_robust_scores(dataset=estimation)
+            cate_evaluation = self.evaluator.evaluate_cate_models(
+                predictions=cate_predictions,
+                robust_scores=robust_scores,
                 results_root=self.results.root,
             )
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation)
 
         policy_results = None
         if self.config.policy:
-            if evaluator is None:
+            if self.evaluator is None or partitions.test is None:
                 raise ValueError(
-                    "Policy methods require cate_evaluation so held-out rules can be scored."
+                    "Policy methods require cate_evaluation and a held-out test set."
                 )
-            policy_service = self.policy_service or PolicyService(self.config.policy)
-            policies = policy_service.fit_policy_methods(
-                cate_models=cate_models,
-                validation=partitions.validation,
-                predictions=validation_predictions,
+            if self.policy_service is None:
+                raise RuntimeError("Policy methods are configured but no policy service is available.")
+            policies = self.policy_service.fit_policy_methods(
+                estimation=estimation,
+                predictions=cate_predictions,
             )
-            test_scores = evaluator.build_robust_scores(partitions.test)
-            policy_results = policy_service.evaluate_policies(
+            test_scores = self.evaluator.build_robust_scores(dataset=partitions.test)
+            policy_results = self.policy_service.evaluate_policies(
                 policies=policies,
                 test=partitions.test,
                 test_scores=test_scores,
@@ -147,13 +191,12 @@ class CausalPipeline:
     def run_ate_sensitivity(
         self,
         ate_models: dict[str, BaseATEEstimator],
-        train: CausalDataset,
     ) -> dict[str, pd.DataFrame]:
         if self.config.sensitivity is None or not ate_models:
             return {}
-        analyzer = self.sensitivity_analyzer or ATESensitivityAnalyzer(
-            self.config.sensitivity,
-        )
+        if self.sensitivity_analyzer is None:
+            raise RuntimeError("Sensitivity is configured but no sensitivity analyzer is available.")
+        analyzer = self.sensitivity_analyzer
         summaries = {}
         for estimator_id, model in ate_models.items():
             if not estimator_supports_sensitivity(model):
@@ -161,17 +204,16 @@ class CausalPipeline:
                     "Skipping sensitivity for %s. DoubleML score bounds are the supported analysis.",
                     estimator_id,
                 )
-                self._clear_sensitivity_output(estimator_id)
+                self.clear_sensitivity_output(estimator_id)
                 continue
             logger.info("Running sensitivity analysis for %s.", estimator_id)
             result = analyzer.analyze(
                 estimator=model,
-                training_data=train,
                 estimator_id=estimator_id,
                 results_root=str(self.results.root),
             )
             if result is None:
-                self._clear_sensitivity_output(estimator_id)
+                self.clear_sensitivity_output(estimator_id)
                 continue
             sensitivity_dir = self.results.ate_dir(estimator_id) / "sensitivity"
             write_dataframe(sensitivity_dir / "summary.csv", result.summary)
@@ -179,50 +221,29 @@ class CausalPipeline:
             summaries[estimator_id] = result.summary
         return summaries
 
-    def _clear_sensitivity_output(self, estimator_id: str) -> None:
+    def clear_sensitivity_output(self, estimator_id: str) -> None:
         """Drop a previous sensitivity folder so an unsupported estimator cannot keep an old bound."""
         sensitivity_dir = self.results.ate_dir(estimator_id) / "sensitivity"
         if sensitivity_dir.exists():
             shutil.rmtree(sensitivity_dir)
 
-    def fit_cate_estimators(self, train: CausalDataset) -> dict[str, BaseCATEEstimator]:
-        models: dict[str, BaseCATEEstimator] = {}
+    def cross_fit_cate_predictions(self, estimation: CausalDataset) -> dict[str, pd.DataFrame]:
+        predictions: dict[str, pd.DataFrame] = {}
         if not self.config.cate_estimators:
-            return models
+            return predictions
         for spec in self.config.cate_estimators:
-            logger.info("Fitting CATE estimator %s.", spec.kind.value)
-            estimator = create_cate_estimator(spec=spec, data=train)
-            estimator.fit(train)
-            models[spec.kind.value] = estimator
-        return models
-
-    def estimate_from_cate_models(
-        self,
-        cate_models: dict[str, BaseCATEEstimator],
-        validation: CausalDataset,
-    ) -> dict[str, pd.DataFrame]:
-        results = {}
-        for estimator_id, model in cate_models.items():
-            estimate = model.estimate(validation)
-            results[estimator_id] = estimate
-            write_dataframe(
-                self.results.cate_dir(estimator_id) / "ate_estimate.csv",
-                estimate,
+            estimator_id = spec.kind.value
+            logger.info("Cross-fitting CATE estimator %s.", estimator_id)
+            df_effects = cross_fit_predictions(
+                dataset=estimation,
+                n_folds=DEFAULT_DML_N_FOLDS,
+                random_state=self.config.split.random_state,
+                predict_fold=cate_fold_predictor(spec),
             )
-        return results
-
-    def predict_cate_models(
-        self,
-        cate_models: dict[str, BaseCATEEstimator],
-        validation: CausalDataset,
-    ) -> dict[str, pd.DataFrame]:
-        predictions = {}
-        for estimator_id, model in cate_models.items():
-            df_cate_effects = model.predict_effects(validation)
-            predictions[estimator_id] = df_cate_effects
+            predictions[estimator_id] = df_effects
             write_dataframe(
-                self.results.cate_dir(estimator_id) / "validation_predictions.parquet",
-                df_cate_effects,
+                self.results.cate_dir(estimator_id) / "crossfit_predictions.parquet",
+                df_effects,
             )
         return predictions
 
@@ -262,7 +283,9 @@ class CausalPipeline:
                 row = {
                     "estimator": estimator_id,
                     "contrast": estimate_row["contrast"],
-                    "estimand": estimate_row["estimand"] if "estimand" in estimate_row else "ate",
+                    "estimand": estimate_row["estimand"]
+                    if "estimand" in estimate_row
+                    else DEFAULT_ESTIMAND_ATE,
                     "estimate": estimate_row["estimate"],
                     "ci_lower": estimate_row["ci_lower"],
                     "ci_upper": estimate_row["ci_upper"],

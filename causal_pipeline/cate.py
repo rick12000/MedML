@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,7 @@ from causal_pipeline.config import (
     CausalForestCATEEstimatorSpec,
     CFRNetCATEEstimatorSpec,
     DragonNetCATEEstimatorSpec,
+    JsonValue,
     MetaCATEEstimatorSpec,
     OutcomeType,
     TARNetCATEEstimatorSpec,
@@ -40,7 +42,7 @@ from causal_pipeline.crossfit import cross_fit_propensity_map, learner_random_st
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 
-_META_LEARNER_CLASSES = {
+META_LEARNER_CLASSES = {
     ("s", False): BaseSRegressor,
     ("s", True): BaseSClassifier,
     ("t", False): BaseTRegressor,
@@ -113,9 +115,9 @@ def build_meta_learner(
     outcome_learner: BaseEstimator,
     effect_learner: BaseEstimator | None,
     propensity_learner: BaseEstimator | None,
-    control_name: object,
-) -> object:
-    model_cls = _META_LEARNER_CLASSES[(letter, binary_outcome)]
+    control_name: JsonValue,
+) -> BaseEstimator:
+    model_cls = META_LEARNER_CLASSES[(letter, binary_outcome)]
     if letter in {"s", "t"}:
         return model_cls(learner=clone_estimator(outcome_learner), control_name=control_name)
     if effect_learner is None:
@@ -173,7 +175,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                 raise ValueError(f"{self.letter}-learner requires propensity_learner.")
             require_classifier(self.spec.propensity_learner, "CATE propensity_learner")
             propensity = cross_fit_propensity_map(
-                X=features,
+                covariates=features,
                 treatment=data.treatment_series,
                 learner=self.spec.propensity_learner,
                 treatment_values=data.treatment_values,
@@ -196,10 +198,10 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                 p=propensity,
             )
         if self.letter == "x":
-            self._attach_propensity_model(features, data.treatment_series)
+            self.attach_propensity_model(features, data.treatment_series)
         return self
 
-    def _attach_propensity_model(self, features: pd.DataFrame, treatment: pd.Series) -> None:
+    def attach_propensity_model(self, features: pd.DataFrame, treatment: pd.Series) -> None:
         """X-learner prediction reweights by e(X). Keep that model on the configured learner."""
         if self.spec.propensity_learner is None or self.model is None:
             return
@@ -207,7 +209,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         fitted.fit(features, treatment)
         groups = list(getattr(self.model, "t_groups", []))
         self.model.propensity_model = {
-            group: _ArmProbabilityModel(fitted, group) for group in groups
+            group: ArmProbabilityModel(fitted, group) for group in groups
         }
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
@@ -235,9 +237,12 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             data.outcome_series,
             p=propensity,
             pretrain=True,
-            **_estimate_ate_interval_kwargs(self.model),
+            **estimate_ate_interval_kwargs(self.model),
         )
-        return _table_from_estimate_ate(result, self.contrast_names)
+        return table_from_estimate_ate(
+            parse_meta_learner_ate_result(result),
+            self.contrast_names,
+        )
 
 
 class CausalForestAdapter(BaseCATEEstimator):
@@ -388,38 +393,59 @@ class DragonNetAdapter(BaseCATEEstimator):
         return mean_cate_table(self.predict_effects(data))
 
 
-class _ArmProbabilityModel:
+class ArmProbabilityModel:
     """causalml calls propensity_model.predict and expects P(T = arm | X)."""
 
-    def __init__(self, learner: BaseEstimator, arm: object) -> None:
+    def __init__(self, learner: BaseEstimator, arm: JsonValue) -> None:
         self.learner = learner
         self.arm = arm
 
-    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+    def predict(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
         probabilities = pd.DataFrame(
-            self.learner.predict_proba(X),
+            self.learner.predict_proba(features),
             columns=list(self.learner.classes_),
         )
         return probability_of_arm(probabilities, self.arm)
 
 
-def _estimate_ate_interval_kwargs(model: object) -> dict[str, bool]:
-    parameters = inspect.signature(model.estimate_ate).parameters
+@dataclass(frozen=True)
+class MetaLearnerAteResult:
+    point: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+
+
+def parse_meta_learner_ate_result(raw: tuple | float | np.ndarray) -> MetaLearnerAteResult:
+    if isinstance(raw, tuple):
+        point, lower, upper = raw[0], raw[1], raw[2]
+    else:
+        point = raw
+        lower = np.nan
+        upper = np.nan
+    return MetaLearnerAteResult(
+        point=np.atleast_1d(np.squeeze(point)).astype(float),
+        lower=np.atleast_1d(np.squeeze(lower)).astype(float),
+        upper=np.atleast_1d(np.squeeze(upper)).astype(float),
+    )
+
+
+def estimate_ate_interval_kwargs(model: BaseEstimator) -> dict[str, bool]:
+    estimate_ate = getattr(model, "estimate_ate", None)
+    if estimate_ate is None:
+        return {}
+    parameters = inspect.signature(estimate_ate).parameters
     if "return_ci" in parameters:
         return {"return_ci": True}
     return {}
 
 
-def _table_from_estimate_ate(result: object, contrast_names: list[str]) -> pd.DataFrame:
-    if isinstance(result, tuple):
-        point, lower, upper = result[0], result[1], result[2]
-    else:
-        point = result
-        lower = np.nan
-        upper = np.nan
-    point_values = np.atleast_1d(np.squeeze(point)).astype(float)
-    lower_values = np.atleast_1d(np.squeeze(lower)).astype(float)
-    upper_values = np.atleast_1d(np.squeeze(upper)).astype(float)
+def table_from_estimate_ate(
+    parsed: MetaLearnerAteResult,
+    contrast_names: list[str],
+) -> pd.DataFrame:
+    point_values = parsed.point
+    lower_values = parsed.lower
+    upper_values = parsed.upper
     n_contrasts = min(len(contrast_names), len(point_values))
     return pd.DataFrame(
         {

@@ -41,12 +41,7 @@ DATA_TREATMENT_VALUES = (0, 1)
 
 
 SPLIT_RANDOM_STATE = 42
-SPLIT_TRAIN_FRACTION_NO_POLICY = 0.70
-SPLIT_VALIDATION_FRACTION_NO_POLICY = 0.30
 SPLIT_TEST_FRACTION_NO_POLICY = 0.0
-
-SPLIT_TRAIN_FRACTION_WITH_POLICY = 0.60
-SPLIT_VALIDATION_FRACTION_WITH_POLICY = 0.20
 SPLIT_TEST_FRACTION_WITH_POLICY = 0.20
 
 
@@ -79,11 +74,12 @@ DATA_CONFIG = DataConfig(
 )
 
 
-def build_pipeline_config(include_policy: bool = False) -> PipelineConfig:
+INCLUDE_POLICY_DEFAULT = False
+
+
+def build_pipeline_config(include_policy: bool = INCLUDE_POLICY_DEFAULT) -> PipelineConfig:
     if include_policy:
         split = SplitConfig(
-            train_fraction=SPLIT_TRAIN_FRACTION_WITH_POLICY,
-            validation_fraction=SPLIT_VALIDATION_FRACTION_WITH_POLICY,
             test_fraction=SPLIT_TEST_FRACTION_WITH_POLICY,
             random_state=SPLIT_RANDOM_STATE,
         )
@@ -99,8 +95,6 @@ def build_pipeline_config(include_policy: bool = False) -> PipelineConfig:
         ]
     else:
         split = SplitConfig(
-            train_fraction=SPLIT_TRAIN_FRACTION_NO_POLICY,
-            validation_fraction=SPLIT_VALIDATION_FRACTION_NO_POLICY,
             test_fraction=SPLIT_TEST_FRACTION_NO_POLICY,
             random_state=SPLIT_RANDOM_STATE,
         )

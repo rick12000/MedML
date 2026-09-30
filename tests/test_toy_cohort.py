@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 
 from causal_pipeline.settings import (
@@ -8,10 +10,15 @@ from causal_pipeline.settings import (
 )
 from generate_toy_cohort import generate_observational_cohort
 
+TOY_COHORT_RANDOM_STATE = 0
+
 
 @pytest.mark.parametrize("n_observations", [10, 1000])
 def test_toy_cohort_matches_pipeline_column_contract(n_observations: int) -> None:
-    df = generate_observational_cohort(n_observations, random_state=0)
+    df = generate_observational_cohort(
+        n_observations,
+        random_state=TOY_COHORT_RANDOM_STATE,
+    )
     required = [
         DATA_OUTCOME_COLUMN,
         DATA_TREATMENT_COLUMN,

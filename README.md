@@ -44,4 +44,4 @@ Outputs are written under `results/` (partitions, diagnostics, ATE/CATE summarie
 
 Pass instantiated sklearn estimators (for example `RandomForestRegressor(...)`) on estimator specs. The pipeline clones them before fitting so shared config objects stay unfitted.
 
-ATE and CATE estimator lists are optional, but at least one must be non-empty. Diagnostics, sensitivity, CATE evaluation, and policy are optional. Pass `policy=[PolicyTreeMethodSpec(...), ...]` with `test_fraction > 0`; omit `policy` or pass an empty list to skip policy fitting. Policy methods require a held-out test split.
+ATE and CATE estimator lists are optional, but at least one must be non-empty. Diagnostics, sensitivity, CATE evaluation, and policy are optional. With policy off, every estimator is cross-fit on the full sample. Pass `policy=[PolicyTreeMethodSpec(...), ...]` with `test_fraction` strictly between 0 and 1 to hold out a test set: rules are trained on out-of-fold learning-sample rewards and scored only on that test set. Omit `policy` or pass an empty list to skip policy fitting.

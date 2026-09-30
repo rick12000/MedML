@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, Union
 
 import numpy as np
+import pandas as pd
 from econml.policy import PolicyTree
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sklearn.base import BaseEstimator, clone
@@ -65,6 +66,19 @@ DEFAULT_TMLE_REDUCED: bool = False
 DEFAULT_CFRNET_PENALTY_DISC: float = 0.1
 DEFAULT_POLICY_BOOTSTRAP_SAMPLES: int = 1000
 DEFAULT_POLICY_RANDOM_STATE: int = 42
+DEFAULT_SPLIT_RANDOM_STATE: int = 42
+DEFAULT_RESULTS_DIR: str = "results"
+DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL: ConfidenceLevel = 0.95
+DEFAULT_CATE_EVAL_CROSSFIT_FOLDS: PositiveInt = 5
+DEFAULT_CALIBRATION_BINS: PositiveInt = 10
+DEFAULT_RATE_BOOTSTRAP_SAMPLES: PositiveInt = 1000
+DEFAULT_ESTIMAND_ATE: str = "ate"
+DEFAULT_DIAGNOSTIC_STABILIZED_WEIGHTS: bool = False
+DEFAULT_TEST_FRACTION: Fraction = 0.0
+DEFAULT_NULL_EFFECT: float = 0.0
+DEFAULT_BENCHMARK_MULTIPLIER_MAX: float = 3.0
+DEFAULT_BENCHMARK_GRID_SIZE: PositiveInt = 100
+DEFAULT_LEARNER_RANDOM_STATE: int = 0
 CATE_DEPENDENT_POLICY_KINDS = frozenset({PolicyKind.POLICY_TREE, PolicyKind.VIRTUAL_TWINS})
 
 
@@ -77,15 +91,18 @@ def clone_estimator(estimator: BaseEstimator) -> BaseEstimator:
     return clone(estimator)
 
 
-def predict_outcome_mean(estimator: BaseEstimator, X) -> np.ndarray:
+def predict_outcome_mean(
+    estimator: BaseEstimator,
+    features: pd.DataFrame | np.ndarray,
+) -> np.ndarray:
     """E[Y | X] as class probability for classifiers, otherwise model.predict."""
     if hasattr(estimator, "predict_proba"):
-        proba = np.asarray(estimator.predict_proba(X))
+        proba = np.asarray(estimator.predict_proba(features))
         if proba.ndim == 2:
             if proba.shape[1] != 2:
                 raise ValueError("Only binary outcome classifiers are supported.")
             return proba[:, 1]
-    return np.ravel(estimator.predict(X))
+    return np.ravel(estimator.predict(features))
 
 
 def require_classifier(estimator: BaseEstimator, role: str) -> None:
@@ -222,34 +239,34 @@ CATEEstimatorSpec = Annotated[
 
 
 class SplitConfig(BaseModel):
-    train_fraction: Fraction
-    validation_fraction: Fraction
-    test_fraction: Fraction = 0.0
-    random_state: int = 42
+    """Outer split. Policy off uses the full sample. Policy on holds out a test set."""
+
+    test_fraction: Fraction = DEFAULT_TEST_FRACTION
+    random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
 class DiagnosticConfig(ArbitraryTypesModel):
     propensity_learner: BaseEstimator
-    stabilized_weights: bool = False
+    stabilized_weights: bool = DEFAULT_DIAGNOSTIC_STABILIZED_WEIGHTS
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
 
 
 class SensitivityConfig(ArbitraryTypesModel):
     outcome_learner: BaseEstimator
-    null_effect: float = 0.0
-    benchmark_multiplier_max: float = 3.0
-    benchmark_grid_size: PositiveInt = 100
-    confidence_level: ConfidenceLevel = 0.95
+    null_effect: float = DEFAULT_NULL_EFFECT
+    benchmark_multiplier_max: float = DEFAULT_BENCHMARK_MULTIPLIER_MAX
+    benchmark_grid_size: PositiveInt = DEFAULT_BENCHMARK_GRID_SIZE
+    confidence_level: ConfidenceLevel = DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL
 
 
 class CATEEvaluationConfig(ArbitraryTypesModel):
     propensity_learner: BaseEstimator
     outcome_learner: BaseEstimator
-    dr_crossfit_folds: PositiveInt = 5
+    dr_crossfit_folds: PositiveInt = DEFAULT_CATE_EVAL_CROSSFIT_FOLDS
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
-    calibration_bins: PositiveInt = 10
-    rate_bootstrap_samples: PositiveInt = 1000
-    random_state: int = 42
+    calibration_bins: PositiveInt = DEFAULT_CALIBRATION_BINS
+    rate_bootstrap_samples: PositiveInt = DEFAULT_RATE_BOOTSTRAP_SAMPLES
+    random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
 class PolicyTreeMethodSpec(ArbitraryTypesModel):
@@ -292,7 +309,7 @@ class PipelineConfig(BaseModel):
     sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig | None = None
     policy: list[PolicyMethodSpec] | None = None
-    results_dir: str = "results"
+    results_dir: str = DEFAULT_RESULTS_DIR
 
     @model_validator(mode="after")
     def validate_pipeline_contract(self) -> PipelineConfig:
@@ -322,25 +339,12 @@ class PipelineConfig(BaseModel):
                     "policy_tree and virtual_twins require at least one CATE estimator."
                 )
 
-        train = self.split.train_fraction
-        validation = self.split.validation_fraction
-        test = self.split.test_fraction
-        total = train + validation + test
-
+        test_fraction = self.split.test_fraction
         if policy_configured:
-            if test <= 0.0:
+            if test_fraction <= 0.0 or test_fraction >= 1.0:
                 raise ValueError(
-                    "Policy methods require test_fraction > 0 so fitted rules can be evaluated on a held-out test split."
+                    "Policy methods require a test_fraction strictly between 0 and 1."
                 )
-            if abs(total - 1.0) > 1e-9:
-                raise ValueError(
-                    "When policy methods are configured, train + validation + test must equal 1."
-                )
-        else:
-            if abs(train + validation - 1.0) > 1e-9:
-                raise ValueError(
-                    "Without policy methods, train + validation must equal 1."
-                )
-            if test != 0.0:
-                raise ValueError("Without policy methods, test_fraction must be 0.")
+        elif test_fraction != 0.0:
+            raise ValueError("Without policy methods, test_fraction must be 0.")
         return self

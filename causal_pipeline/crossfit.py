@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from causallib.estimation import IPW, Standardization
 from scipy import stats
+from sklearn.base import BaseEstimator
 from sklearn.model_selection import StratifiedKFold
 
-from causal_pipeline.config import JsonValue, clone_estimator
+from causal_pipeline.config import DEFAULT_LEARNER_RANDOM_STATE, JsonValue, clone_estimator
+from causal_pipeline.data import CausalDataset
 
 PROBABILITY_CLIP_FLOOR = 1e-6
 LOGIT_CLIP = 1e-6
 MINIMUM_CROSSFIT_FOLDS = 2
+TMLE_GLM_MAX_ITER = 100
 
 
 def normal_interval_from_scores(scores: np.ndarray, level: float) -> tuple[float, float, float]:
@@ -38,38 +43,78 @@ def cross_fit_splits(
     return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
 
-def learner_random_state(learner: object) -> int:
+def cross_fit_predictions(
+    dataset: CausalDataset,
+    n_folds: int,
+    random_state: int,
+    predict_fold: Callable[[CausalDataset, CausalDataset], pd.DataFrame],
+) -> pd.DataFrame:
+    """Predict every row from a model fit on the other folds."""
+    splitter = cross_fit_splits(
+        treatment=dataset.treatment_series,
+        n_folds=n_folds,
+        random_state=random_state,
+    )
+    positions = np.arange(len(dataset.df))
+    combined: pd.DataFrame | None = None
+    for train_positions, held_out_positions in splitter.split(positions, dataset.treatment_series):
+        prediction = predict_fold(
+            dataset.subset(train_positions),
+            dataset.subset(held_out_positions),
+        )
+        if len(prediction) != len(held_out_positions):
+            raise ValueError("Fold prediction length does not match the held-out rows.")
+        if combined is None:
+            combined = pd.DataFrame(
+                index=positions,
+                columns=list(prediction.columns),
+                dtype=float,
+            )
+        block = prediction.to_numpy()
+        combined_values = combined.to_numpy(copy=True)
+        combined_values[held_out_positions] = block
+        combined = pd.DataFrame(combined_values, index=combined.index, columns=combined.columns)
+    if combined is None:
+        raise RuntimeError("Cross-fitting produced no predictions.")
+    return combined.reset_index(drop=True)
+
+
+def learner_random_state(learner: BaseEstimator) -> int:
     state = getattr(learner, "random_state", None)
     if isinstance(state, int):
         return state
-    return 0
+    return DEFAULT_LEARNER_RANDOM_STATE
 
 
 def cross_fit_nuisances(
-    X: pd.DataFrame,
+    covariates: pd.DataFrame,
     treatment: pd.Series,
     outcome: pd.Series,
     treatment_values: list[JsonValue],
-    propensity_learner: object,
-    outcome_learner: object | None,
+    propensity_learner: BaseEstimator,
+    outcome_learner: BaseEstimator | None,
     binary_outcome: bool,
     n_folds: int,
     random_state: int,
     clip_bounds: tuple[float, float],
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     """Out-of-fold potential outcomes and propensity, columns aligned to treatment_values."""
-    splitter = cross_fit_splits(treatment, n_folds, random_state)
-    propensity = pd.DataFrame(np.nan, index=X.index, columns=treatment_values)
+    splitter = cross_fit_splits(
+        treatment=treatment,
+        n_folds=n_folds,
+        random_state=random_state,
+    )
+    propensity = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
     outcome_predictions = None
     if outcome_learner is not None:
-        outcome_predictions = pd.DataFrame(np.nan, index=X.index, columns=treatment_values)
+        outcome_predictions = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
 
-    for train_index, test_index in splitter.split(X, treatment):
-        X_train = X.iloc[train_index]
-        X_test = X.iloc[test_index]
+    for train_index, test_index in splitter.split(covariates, treatment):
+        X_train = covariates.iloc[train_index]
+        X_test = covariates.iloc[test_index]
         treatment_train = treatment.iloc[train_index]
         treatment_test = treatment.iloc[test_index]
-        propensity.iloc[test_index] = _fold_propensity(
+        propensity.iloc[test_index] = fold_propensity(
             X_train=X_train,
             treatment_train=treatment_train,
             X_test=X_test,
@@ -79,7 +124,7 @@ def cross_fit_nuisances(
         ).to_numpy()
         if outcome_learner is None or outcome_predictions is None:
             continue
-        outcome_predictions.iloc[test_index] = _fold_potential_outcomes(
+        outcome_predictions.iloc[test_index] = fold_potential_outcomes(
             X_train=X_train,
             treatment_train=treatment_train,
             outcome_train=outcome.iloc[train_index],
@@ -92,11 +137,11 @@ def cross_fit_nuisances(
     return outcome_predictions, propensity
 
 
-def _fold_propensity(
+def fold_propensity(
     X_train: pd.DataFrame,
     treatment_train: pd.Series,
     X_test: pd.DataFrame,
-    propensity_learner: object,
+    propensity_learner: BaseEstimator,
     treatment_values: list[JsonValue],
     clip_bounds: tuple[float, float],
 ) -> pd.DataFrame:
@@ -107,17 +152,17 @@ def _fold_propensity(
     )
     model.fit(X_train, treatment_train)
     matrix = model.compute_propensity_matrix(X_test)
-    aligned = _align_treatment_columns(matrix, treatment_values)
+    aligned = align_treatment_columns(matrix, treatment_values)
     return aligned.div(aligned.sum(axis=1), axis=0)
 
 
-def _fold_potential_outcomes(
+def fold_potential_outcomes(
     X_train: pd.DataFrame,
     treatment_train: pd.Series,
     outcome_train: pd.Series,
     X_test: pd.DataFrame,
     treatment_test: pd.Series,
-    outcome_learner: object,
+    outcome_learner: BaseEstimator,
     treatment_values: list[JsonValue],
     binary_outcome: bool,
 ) -> pd.DataFrame:
@@ -136,24 +181,24 @@ def _fold_potential_outcomes(
     if isinstance(raw.columns, pd.MultiIndex):
         outcome_level = raw.columns.get_level_values(-1).max()
         raw = raw.xs(outcome_level, axis="columns", level=-1)
-    return _align_treatment_columns(raw, treatment_values)
+    return align_treatment_columns(raw, treatment_values)
 
 
-def _align_treatment_columns(frame: pd.DataFrame, treatment_values: list[JsonValue]) -> pd.DataFrame:
+def align_treatment_columns(frame: pd.DataFrame, treatment_values: list[JsonValue]) -> pd.DataFrame:
     renamed = frame.copy()
     if not set(treatment_values).issubset(set(renamed.columns)):
-        renamed.columns = [_match_treatment_label(column, treatment_values) for column in renamed.columns]
+        renamed.columns = [match_treatment_label(column, treatment_values) for column in renamed.columns]
     missing = [value for value in treatment_values if value not in renamed.columns]
     if missing:
         raise KeyError(f"Nuisance predictions are missing treatment arms: {missing}")
     return renamed.loc[:, treatment_values].reset_index(drop=True)
 
 
-def _match_treatment_label(column: object, treatment_values: list[JsonValue]) -> JsonValue:
+def match_treatment_label(column: object, treatment_values: list[JsonValue]) -> JsonValue:
     for value in treatment_values:
         if column == value or str(column) == str(value):
             return value
-    return column
+    raise KeyError(f"Treatment label {column!r} is not in {treatment_values}.")
 
 
 def factual_predictions(
@@ -226,8 +271,8 @@ def target_potential_outcomes(
     initial_scaled = (initial - scale_min) / scale
     initial_scaled = initial_scaled.clip(lower=LOGIT_CLIP, upper=1.0 - LOGIT_CLIP)
     observed_q = factual_predictions(initial_scaled, treatment)
-    offset = _logit(observed_q)
-    clever_fit = _clever_covariate(
+    offset = logit_transform(observed_q)
+    clever_fit = clever_covariate(
         treatment=treatment.to_numpy(),
         propensity=propensity,
         treatment_values=treatment_values,
@@ -240,10 +285,10 @@ def target_potential_outcomes(
         clever_fit,
         offset=offset,
         family=sm.families.Binomial(),
-    ).fit(maxiter=100)
+    ).fit(maxiter=TMLE_GLM_MAX_ITER)
     updated = pd.DataFrame(index=potential_outcomes.index, columns=treatment_values, dtype=float)
     for arm in treatment_values:
-        clever_arm = _clever_covariate(
+        clever_arm = clever_covariate(
             treatment=treatment.to_numpy(),
             propensity=propensity,
             treatment_values=treatment_values,
@@ -251,12 +296,12 @@ def target_potential_outcomes(
             reduced=reduced,
             arm=arm,
         )
-        linear = _logit(initial_scaled[arm].to_numpy()) + clever_arm.to_numpy() @ fluctuation.params.to_numpy()
-        updated[arm] = scale_min + scale * _expit(linear)
+        linear = logit_transform(initial_scaled[arm].to_numpy()) + clever_arm.to_numpy() @ fluctuation.params.to_numpy()
+        updated[arm] = scale_min + scale * expit_transform(linear)
     return updated
 
 
-def _clever_covariate(
+def clever_covariate(
     treatment: np.ndarray,
     propensity: pd.DataFrame,
     treatment_values: list[JsonValue],
@@ -288,19 +333,19 @@ def _clever_covariate(
     return pd.DataFrame(columns)
 
 
-def _logit(probability: np.ndarray) -> np.ndarray:
+def logit_transform(probability: np.ndarray) -> np.ndarray:
     clipped = np.clip(probability, LOGIT_CLIP, 1.0 - LOGIT_CLIP)
     return np.log(clipped / (1.0 - clipped))
 
 
-def _expit(value: np.ndarray) -> np.ndarray:
+def expit_transform(value: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-value))
 
 
 def cross_fit_propensity_map(
-    X: pd.DataFrame,
+    covariates: pd.DataFrame,
     treatment: pd.Series,
-    learner: object,
+    learner: BaseEstimator,
     treatment_values: list[JsonValue],
     control_value: JsonValue,
     n_folds: int,
@@ -309,7 +354,7 @@ def cross_fit_propensity_map(
 ) -> dict[JsonValue, np.ndarray]:
     """Out-of-fold P(T=a | X) for each non-control arm, clipped to (0, 1)."""
     _, propensity = cross_fit_nuisances(
-        X=X,
+        covariates=covariates,
         treatment=treatment,
         outcome=treatment,
         treatment_values=treatment_values,

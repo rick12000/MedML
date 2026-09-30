@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -22,6 +25,10 @@ from causal_pipeline.data import CausalDataset
 from causal_pipeline.utils import save_figure
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
+OVERLAP_HISTOGRAM_BINS = 30
+OVERLAP_FIGURE_WIDTH = 8
+OVERLAP_FIGURE_HEIGHT_BINARY = 4
+OVERLAP_FIGURE_HEIGHT_PER_ARM = 3
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +55,11 @@ class DiagnosticsRunner:
         diagnostic_config = self.diagnostics
 
         propensity_model = clone_estimator(diagnostic_config.propensity_learner)
-        X = train.X_adjustment.copy()
-        propensity_model.fit(X, train.treatment_series)
+        adjustment_covariates = train.X_adjustment.copy()
+        propensity_model.fit(adjustment_covariates, train.treatment_series)
         probabilities = pd.DataFrame(
-            propensity_model.predict_proba(X),
-            index=X.index,
+            propensity_model.predict_proba(adjustment_covariates),
+            index=adjustment_covariates.index,
             columns=list(propensity_model.classes_),
         )
         overlap_path = "diagnostics/propensity_overlap.png"
@@ -70,7 +77,7 @@ class DiagnosticsRunner:
         )
 
         balance = self.covariate_balance(
-            X=X,
+            covariates=adjustment_covariates,
             dataset=train,
             diagnostic_config=diagnostic_config,
         )
@@ -91,7 +98,12 @@ class DiagnosticsRunner:
     ) -> None:
         fig, axes = plt.subplots(
             nrows=1 if treatment_mode == TreatmentMode.BINARY else len(treatment_values),
-            figsize=(8, 4 if treatment_mode == TreatmentMode.BINARY else 3 * len(treatment_values)),
+            figsize=(
+                OVERLAP_FIGURE_WIDTH,
+                OVERLAP_FIGURE_HEIGHT_BINARY
+                if treatment_mode == TreatmentMode.BINARY
+                else OVERLAP_FIGURE_HEIGHT_PER_ARM * len(treatment_values),
+            ),
             squeeze=False,
         )
 
@@ -103,7 +115,7 @@ class DiagnosticsRunner:
                 mask = treatment == arm
                 axis.hist(
                     propensity[mask],
-                    bins=30,
+                    bins=OVERLAP_HISTOGRAM_BINS,
                     alpha=0.5,
                     label=str(arm),
                     density=True,
@@ -119,7 +131,7 @@ class DiagnosticsRunner:
                     mask = treatment == observed_arm
                     axis.hist(
                         arm_probs[mask],
-                        bins=30,
+                        bins=OVERLAP_HISTOGRAM_BINS,
                         alpha=0.5,
                         label=str(observed_arm),
                         density=True,
@@ -134,7 +146,7 @@ class DiagnosticsRunner:
 
     def covariate_balance(
         self,
-        X: pd.DataFrame,
+        covariates: pd.DataFrame,
         dataset: CausalDataset,
         diagnostic_config: DiagnosticConfig,
     ) -> pd.DataFrame:
@@ -146,14 +158,14 @@ class DiagnosticsRunner:
             use_stabilized=diagnostic_config.stabilized_weights,
         )
         treatment = dataset.treatment_series
-        weight_model.fit(X, treatment)
-        weights = weight_model.compute_weights(X, treatment).to_numpy(dtype=float)
+        weight_model.fit(covariates, treatment)
+        weights = weight_model.compute_weights(covariates, treatment).to_numpy(dtype=float)
         treatment_values = treatment.to_numpy()
         if dataset.treatment_mode == TreatmentMode.BINARY:
             treated = treatment_values != dataset.control_value
             rows = []
-            for column in X.columns:
-                values = X[column].astype(float).to_numpy()
+            for column in covariates.columns:
+                values = covariates[column].astype(float).to_numpy()
                 rows.append(
                     {
                         "covariate": column,
@@ -170,8 +182,8 @@ class DiagnosticsRunner:
 
         rows = []
         levels = dataset.treatment_values
-        for column in X.columns:
-            values = X[column].astype(float).to_numpy()
+        for column in covariates.columns:
+            values = covariates[column].astype(float).to_numpy()
             for index_a, arm_a in enumerate(levels):
                 for arm_b in levels[index_a + 1 :]:
                     mask_a = treatment_values == arm_a

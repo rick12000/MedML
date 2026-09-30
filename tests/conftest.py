@@ -1,5 +1,7 @@
-from pathlib import Path
+from __future__ import annotations
+
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,15 +10,17 @@ from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 
-_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
     CATEKind,
     DataConfig,
+    DEFAULT_RESULTS_DIR,
+    DEFAULT_SPLIT_RANDOM_STATE,
     DiagnosticConfig,
     DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
@@ -31,20 +35,35 @@ from causal_pipeline.config import (
 from causal_pipeline.settings import DATA_CONFIG
 from causal_pipeline.utils import ensure_directory
 
+TEST_LOGISTIC_MAX_ITER = 500
+TEST_RANDOM_STATE = 0
+TEST_FOREST_N_ESTIMATORS = 10
+TEST_SYNTHETIC_N_OBSERVATIONS = 200
+TEST_INTEGRATION_FOREST_N_ESTIMATORS = 8
+TEST_POLICY_CROSSFIT_FOLDS = 3
+TEST_POLICY_BOOTSTRAP_SAMPLES = 20
+TEST_INTEGRATION_BOOTSTRAP_SAMPLES = 8
+
 
 @pytest.fixture
 def logistic_learner() -> BaseEstimator:
-    return LogisticRegression(max_iter=500)
+    return LogisticRegression(max_iter=TEST_LOGISTIC_MAX_ITER)
 
 
 @pytest.fixture
 def forest_learner() -> BaseEstimator:
-    return RandomForestRegressor(n_estimators=10, random_state=0)
+    return RandomForestRegressor(
+        n_estimators=TEST_FOREST_N_ESTIMATORS,
+        random_state=TEST_RANDOM_STATE,
+    )
 
 
 @pytest.fixture
 def forest_classifier() -> BaseEstimator:
-    return RandomForestClassifier(n_estimators=10, random_state=0)
+    return RandomForestClassifier(
+        n_estimators=TEST_FOREST_N_ESTIMATORS,
+        random_state=TEST_RANDOM_STATE,
+    )
 
 
 @pytest.fixture
@@ -84,10 +103,8 @@ def pipeline_config_no_policy(
     return PipelineConfig(
         data=binary_data_config,
         split=SplitConfig(
-            train_fraction=0.7,
-            validation_fraction=0.3,
             test_fraction=0.0,
-            random_state=0,
+            random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
         diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
         ate_estimators=[
@@ -102,7 +119,7 @@ def pipeline_config_no_policy(
         sensitivity=None,
         cate_evaluation=None,
         policy=None,
-        results_dir="results",
+        results_dir=DEFAULT_RESULTS_DIR,
     )
 
 
@@ -114,12 +131,7 @@ def pipeline_config_with_policy(
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
-        split=SplitConfig(
-            train_fraction=0.6,
-            validation_fraction=0.2,
-            test_fraction=0.2,
-            random_state=0,
-        ),
+        split=SplitConfig(test_fraction=0.2, random_state=DEFAULT_SPLIT_RANDOM_STATE),
         diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
         ate_estimators=[
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
@@ -134,25 +146,31 @@ def pipeline_config_with_policy(
         cate_evaluation=CATEEvaluationConfig(
             propensity_learner=logistic_learner,
             outcome_learner=forest_classifier,
-            dr_crossfit_folds=3,
-            rate_bootstrap_samples=20,
-            random_state=0,
+            dr_crossfit_folds=TEST_POLICY_CROSSFIT_FOLDS,
+            rate_bootstrap_samples=TEST_POLICY_BOOTSTRAP_SAMPLES,
+            random_state=TEST_RANDOM_STATE,
         ),
         policy=[PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE)],
-        results_dir="results",
+        results_dir=DEFAULT_RESULTS_DIR,
     )
 
 
 @pytest.fixture
 def df_synthetic_binary() -> pd.DataFrame:
-    rng = np.random.default_rng(0)
-    n_observations = 200
-    treatment = rng.integers(0, 2, size=n_observations)
-    x1 = rng.normal(size=n_observations)
-    x2 = rng.normal(size=n_observations)
-    logit = -0.3 + 0.8 * treatment + 0.4 * x1
-    outcome = (logit + rng.normal(size=n_observations) > 0).astype(int)
-    return pd.DataFrame({"y": outcome, "t": treatment, "x1": x1, "x2": x2})
+    rng = np.random.default_rng(TEST_RANDOM_STATE)
+    treatment = rng.integers(0, 2, size=TEST_SYNTHETIC_N_OBSERVATIONS)
+    covariate_one = rng.normal(size=TEST_SYNTHETIC_N_OBSERVATIONS)
+    covariate_two = rng.normal(size=TEST_SYNTHETIC_N_OBSERVATIONS)
+    logit = -0.3 + 0.8 * treatment + 0.4 * covariate_one
+    outcome = (logit + rng.normal(size=TEST_SYNTHETIC_N_OBSERVATIONS) > 0).astype(int)
+    return pd.DataFrame(
+        {
+            "y": outcome,
+            "t": treatment,
+            "x1": covariate_one,
+            "x2": covariate_two,
+        }
+    )
 
 
 @pytest.fixture
@@ -169,16 +187,20 @@ def integration_cache_dir() -> Path:
 
 @pytest.fixture
 def integration_pipeline_config(integration_cache_dir: Path) -> PipelineConfig:
-    logistic = LogisticRegression(max_iter=500)
-    classifier = RandomForestClassifier(n_estimators=8, random_state=0)
-    regressor = RandomForestRegressor(n_estimators=8, random_state=0)
+    logistic = LogisticRegression(max_iter=TEST_LOGISTIC_MAX_ITER)
+    classifier = RandomForestClassifier(
+        n_estimators=TEST_INTEGRATION_FOREST_N_ESTIMATORS,
+        random_state=TEST_RANDOM_STATE,
+    )
+    regressor = RandomForestRegressor(
+        n_estimators=TEST_INTEGRATION_FOREST_N_ESTIMATORS,
+        random_state=TEST_RANDOM_STATE,
+    )
     return PipelineConfig(
         data=DATA_CONFIG,
         split=SplitConfig(
-            train_fraction=0.7,
-            validation_fraction=0.3,
             test_fraction=0.0,
-            random_state=0,
+            random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
         diagnostics=DiagnosticConfig(propensity_learner=logistic),
         ate_estimators=[
@@ -202,9 +224,9 @@ def integration_pipeline_config(integration_cache_dir: Path) -> PipelineConfig:
         cate_evaluation=CATEEvaluationConfig(
             propensity_learner=logistic,
             outcome_learner=classifier,
-            dr_crossfit_folds=3,
-            rate_bootstrap_samples=8,
-            random_state=0,
+            dr_crossfit_folds=TEST_POLICY_CROSSFIT_FOLDS,
+            rate_bootstrap_samples=TEST_INTEGRATION_BOOTSTRAP_SAMPLES,
+            random_state=TEST_RANDOM_STATE,
         ),
         policy=None,
         results_dir=str(integration_cache_dir),

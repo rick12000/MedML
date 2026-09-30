@@ -16,9 +16,6 @@ from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
 
 from causal_pipeline.config import (
-    DEFAULT_ATE_CONFIDENCE_LEVEL,
-    DEFAULT_DML_N_FOLDS,
-    DEFAULT_ESTIMAND_ATE,
     ATEEstimatorSpec,
     ATEKind,
     DoublyRobustATEEstimatorSpec,
@@ -106,7 +103,7 @@ def factual_outcome_predictions(
     outcome_model: Standardization,
     X: pd.DataFrame,
     treatment: pd.Series,
-    treatment_values: list[JsonValue],
+    treatment_arms: list[JsonValue],
 ) -> np.ndarray:
     """Predicted outcome under each unit's observed treatment arm."""
     matrix = np.asarray(outcome_model.estimate_individual_outcome(X, treatment))
@@ -114,7 +111,7 @@ def factual_outcome_predictions(
         return matrix
     if matrix.ndim != 2:
         raise ValueError(f"Unexpected outcome prediction shape: {matrix.shape}")
-    level_to_column = {level: index for index, level in enumerate(treatment_values)}
+    level_to_column = {level: index for index, level in enumerate(treatment_arms)}
     columns = np.array([level_to_column[value] for value in treatment.to_numpy()])
     rows = np.arange(len(treatment))
     return matrix[rows, columns]
@@ -150,8 +147,11 @@ class IPWAdapter(BaseATEEstimator):
             propensity_learner=self.spec.propensity_learner,
             outcome_learner=None,
             binary_outcome=data.outcome_type == OutcomeType.BINARY,
-            n_folds=DEFAULT_DML_N_FOLDS,
-            random_state=learner_random_state(self.spec.propensity_learner),
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                self.spec.propensity_learner,
+                self.spec.random_state,
+            ),
             clip_bounds=self.spec.clip_bounds,
         )
         self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
@@ -164,7 +164,8 @@ class IPWAdapter(BaseATEEstimator):
             arm_scores=hajek_scores_by_arm(self.outcome, self.treatment, self.propensity),
             control_value=self.data.control_value,
             treatment_values=self.data.treatment_values,
-            level=DEFAULT_ATE_CONFIDENCE_LEVEL,
+            level=self.spec.confidence_level,
+            estimand=self.spec.estimand,
         )
 
 
@@ -193,8 +194,11 @@ class AIPWAdapter(BaseATEEstimator):
             propensity_learner=self.spec.propensity_learner,
             outcome_learner=self.spec.outcome_learner,
             binary_outcome=binary_outcome,
-            n_folds=DEFAULT_DML_N_FOLDS,
-            random_state=learner_random_state(self.spec.propensity_learner),
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                self.spec.propensity_learner,
+                self.spec.random_state,
+            ),
             clip_bounds=self.spec.clip_bounds,
         )
         if potential_outcomes is None:
@@ -221,7 +225,8 @@ class AIPWAdapter(BaseATEEstimator):
             ),
             control_value=self.data.control_value,
             treatment_values=self.data.treatment_values,
-            level=DEFAULT_ATE_CONFIDENCE_LEVEL,
+            level=self.spec.confidence_level,
+            estimand=self.spec.estimand,
         )
 
 
@@ -250,8 +255,11 @@ class TMLEAdapter(BaseATEEstimator):
             propensity_learner=self.spec.propensity_learner,
             outcome_learner=self.spec.outcome_learner,
             binary_outcome=binary_outcome,
-            n_folds=DEFAULT_DML_N_FOLDS,
-            random_state=learner_random_state(self.spec.propensity_learner),
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                self.spec.propensity_learner,
+                self.spec.random_state,
+            ),
             clip_bounds=self.spec.clip_bounds,
         )
         if initial_outcomes is None:
@@ -286,7 +294,8 @@ class TMLEAdapter(BaseATEEstimator):
             ),
             control_value=self.data.control_value,
             treatment_values=self.data.treatment_values,
-            level=DEFAULT_ATE_CONFIDENCE_LEVEL,
+            level=self.spec.confidence_level,
+            estimand=self.spec.estimand,
         )
 
 
@@ -329,7 +338,7 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         return pd.DataFrame(
             {
                 "contrast": [contrast],
-                "estimand": [DEFAULT_ESTIMAND_ATE],
+                "estimand": [self.spec.estimand],
                 "estimate": [float(self.model.coef[0])],
                 "ci_lower": [float(summary.iloc[0, 0])],
                 "ci_upper": [float(summary.iloc[0, 1])],
@@ -423,7 +432,7 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             rows.append(
                 {
                     "contrast": name,
-                    "estimand": DEFAULT_ESTIMAND_ATE,
+                    "estimand": self.spec.estimand,
                     "estimate": float(framework.thetas[index]),
                     "ci_lower": float(intervals.iloc[index, 0]),
                     "ci_upper": float(intervals.iloc[index, 1]),
@@ -448,7 +457,7 @@ def contrasts_from_arm_scores(
     control_value: JsonValue,
     treatment_values: list[JsonValue],
     level: float,
-    estimand: str = DEFAULT_ESTIMAND_ATE,
+    estimand: str,
 ) -> pd.DataFrame:
     control_scores = arm_scores[control_value]
     names = contrast_columns(control_value, treatment_values)
@@ -510,6 +519,7 @@ def contrasts_from_population_outcomes(
     population: pd.DataFrame | pd.Series,
     control_value: JsonValue,
     treatment_values: list[JsonValue],
+    estimand: str,
 ) -> pd.DataFrame:
     series = population_as_series(population)
     names = contrast_columns(control_value, treatment_values)
@@ -523,7 +533,7 @@ def contrasts_from_population_outcomes(
         rows.append(
             {
                 "contrast": name,
-                "estimand": DEFAULT_ESTIMAND_ATE,
+                "estimand": estimand,
                 "estimate": estimate,
                 "ci_lower": np.nan,
                 "ci_upper": np.nan,

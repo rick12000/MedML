@@ -89,7 +89,11 @@ def test_ipw_weights_binary_stabilized_uses_marginal_probability() -> None:
 def test_ipw_weights_binary_shape_and_positive() -> None:
     treatment = np.array([0, 1, 1, 0])
     propensity = np.array([0.4, 0.6, 0.7, 0.3])
-    weights = ipw_weights_binary(treatment=treatment, propensity=propensity)
+    weights = ipw_weights_binary(
+        treatment=treatment,
+        propensity=propensity,
+        stabilized=False,
+    )
     assert weights.shape == treatment.shape
     assert np.all(weights > 0)
 

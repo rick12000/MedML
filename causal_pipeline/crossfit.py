@@ -12,7 +12,7 @@ from scipy import stats
 from sklearn.base import BaseEstimator
 from sklearn.model_selection import StratifiedKFold
 
-from causal_pipeline.config import DEFAULT_LEARNER_RANDOM_STATE, JsonValue, clone_estimator
+from causal_pipeline.config import JsonValue, clone_estimator
 from causal_pipeline.data import CausalDataset
 
 PROBABILITY_CLIP_FLOOR = 1e-6
@@ -79,11 +79,12 @@ def cross_fit_predictions(
     return combined.reset_index(drop=True)
 
 
-def learner_random_state(learner: BaseEstimator) -> int:
+def learner_random_state(learner: BaseEstimator, fallback: int) -> int:
+    """Use the learner seed when it has one. Otherwise use the caller-supplied seed."""
     state = getattr(learner, "random_state", None)
     if isinstance(state, int):
         return state
-    return DEFAULT_LEARNER_RANDOM_STATE
+    return fallback
 
 
 def cross_fit_nuisances(

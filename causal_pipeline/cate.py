@@ -24,8 +24,6 @@ from econml.dml import CausalForestDML
 from sklearn.base import BaseEstimator
 
 from causal_pipeline.config import (
-    DEFAULT_DML_N_FOLDS,
-    DEFAULT_PROPENSITY_CLIP,
     CATEEstimatorSpec,
     CATEKind,
     CausalForestCATEEstimatorSpec,
@@ -171,18 +169,22 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         features = data.X_adjustment.copy()
         propensity = None
         if self.letter in {"x", "r", "dr"}:
-            if self.spec.propensity_learner is None:
+            propensity_learner = self.spec.propensity_learner
+            if propensity_learner is None:
                 raise ValueError(f"{self.letter}-learner requires propensity_learner.")
-            require_classifier(self.spec.propensity_learner, "CATE propensity_learner")
+            require_classifier(propensity_learner, "CATE propensity_learner")
             propensity = cross_fit_propensity_map(
                 covariates=features,
                 treatment=data.treatment_series,
-                learner=self.spec.propensity_learner,
+                learner=propensity_learner,
                 treatment_values=data.treatment_values,
                 control_value=data.control_value,
-                n_folds=DEFAULT_DML_N_FOLDS,
-                random_state=learner_random_state(self.spec.propensity_learner),
-                clip_bounds=DEFAULT_PROPENSITY_CLIP,
+                n_folds=self.spec.n_folds,
+                random_state=learner_random_state(
+                    propensity_learner,
+                    self.spec.random_state,
+                ),
+                clip_bounds=self.spec.clip_bounds,
             )
         if propensity is None:
             self.model.fit(

@@ -11,6 +11,12 @@ from causal_pipeline.config import (
     CATEKind,
     CausalForestCATEEstimatorSpec,
     DataConfig,
+    DEFAULT_ATE_CONFIDENCE_LEVEL,
+    DEFAULT_DML_N_FOLDS,
+    DEFAULT_LEARNER_RANDOM_STATE,
+    DEFAULT_POLICY_BOOTSTRAP_SAMPLES,
+    DEFAULT_POLICY_RANDOM_STATE,
+    DEFAULT_PROPENSITY_CLIP,
     DiagnosticConfig,
     DoublyRobustATEEstimatorSpec,
     DoubleMLATEEstimatorSpec,
@@ -76,6 +82,14 @@ DATA_CONFIG = DataConfig(
 
 INCLUDE_POLICY_DEFAULT = False
 
+ATE_CROSSFIT_FOLDS = DEFAULT_DML_N_FOLDS
+ATE_CONFIDENCE_LEVEL = DEFAULT_ATE_CONFIDENCE_LEVEL
+ATE_CROSSFIT_RANDOM_STATE = DEFAULT_LEARNER_RANDOM_STATE
+CATE_CROSSFIT_FOLDS = DEFAULT_DML_N_FOLDS
+CATE_PROPENSITY_CLIP = DEFAULT_PROPENSITY_CLIP
+POLICY_BOOTSTRAP_SAMPLES = DEFAULT_POLICY_BOOTSTRAP_SAMPLES
+POLICY_RANDOM_STATE = DEFAULT_POLICY_RANDOM_STATE
+
 
 def build_pipeline_config(include_policy: bool = INCLUDE_POLICY_DEFAULT) -> PipelineConfig:
     if include_policy:
@@ -105,21 +119,35 @@ def build_pipeline_config(include_policy: bool = INCLUDE_POLICY_DEFAULT) -> Pipe
         split=split,
         diagnostics=DiagnosticConfig(propensity_learner=LOGISTIC_LEARNER),
         ate_estimators=[
-            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=LOGISTIC_LEARNER),
+            IPWATEEstimatorSpec(
+                kind=ATEKind.IPW,
+                propensity_learner=LOGISTIC_LEARNER,
+                n_folds=ATE_CROSSFIT_FOLDS,
+                confidence_level=ATE_CONFIDENCE_LEVEL,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
+            ),
             DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.AIPW,
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
+                n_folds=ATE_CROSSFIT_FOLDS,
+                confidence_level=ATE_CONFIDENCE_LEVEL,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
             ),
             DoublyRobustATEEstimatorSpec(
                 kind=ATEKind.TMLE,
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
+                n_folds=ATE_CROSSFIT_FOLDS,
+                confidence_level=ATE_CONFIDENCE_LEVEL,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
             ),
             DoubleMLATEEstimatorSpec(
                 kind=ATEKind.DML_IRM,
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 propensity_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
+                n_folds=ATE_CROSSFIT_FOLDS,
+                confidence_level=ATE_CONFIDENCE_LEVEL,
             ),
         ],
         cate_estimators=[
@@ -136,18 +164,27 @@ def build_pipeline_config(include_policy: bool = INCLUDE_POLICY_DEFAULT) -> Pipe
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 effect_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
+                n_folds=CATE_CROSSFIT_FOLDS,
+                clip_bounds=CATE_PROPENSITY_CLIP,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
             ),
             MetaCATEEstimatorSpec(
                 kind=CATEKind.R_LEARNER,
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 effect_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
+                n_folds=CATE_CROSSFIT_FOLDS,
+                clip_bounds=CATE_PROPENSITY_CLIP,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
             ),
             MetaCATEEstimatorSpec(
                 kind=CATEKind.DR_LEARNER,
                 outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
                 effect_learner=RANDOM_FOREST_LEARNER,
                 propensity_learner=LOGISTIC_LEARNER,
+                n_folds=CATE_CROSSFIT_FOLDS,
+                clip_bounds=CATE_PROPENSITY_CLIP,
+                random_state=ATE_CROSSFIT_RANDOM_STATE,
             ),
             CausalForestCATEEstimatorSpec(
                 kind=CATEKind.CAUSAL_FOREST,
@@ -161,5 +198,8 @@ def build_pipeline_config(include_policy: bool = INCLUDE_POLICY_DEFAULT) -> Pipe
             outcome_learner=RANDOM_FOREST_CLASSIFIER_LEARNER,
         ),
         policy=policy,
+        cate_crossfit_folds=CATE_CROSSFIT_FOLDS,
+        policy_bootstrap_samples=POLICY_BOOTSTRAP_SAMPLES,
+        policy_random_state=POLICY_RANDOM_STATE,
         results_dir=RESULTS_DIR,
     )

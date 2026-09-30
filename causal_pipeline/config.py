@@ -152,6 +152,10 @@ class IPWATEEstimatorSpec(ArbitraryTypesModel):
     propensity_learner: BaseEstimator
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     use_stabilized: bool = DEFAULT_IPW_USE_STABILIZED
+    n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
+    confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
+    random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+    estimand: str = DEFAULT_ESTIMAND_ATE
 
 
 class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
@@ -160,6 +164,10 @@ class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
     propensity_learner: BaseEstimator
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     reduced: bool = DEFAULT_TMLE_REDUCED
+    n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
+    confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
+    random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+    estimand: str = DEFAULT_ESTIMAND_ATE
 
 
 class DoubleMLATEEstimatorSpec(ArbitraryTypesModel):
@@ -169,6 +177,7 @@ class DoubleMLATEEstimatorSpec(ArbitraryTypesModel):
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     n_rep: PositiveInt = DEFAULT_DML_N_REP
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
+    estimand: str = DEFAULT_ESTIMAND_ATE
 
 
 ATEEstimatorSpec = Annotated[
@@ -191,6 +200,9 @@ class MetaCATEEstimatorSpec(ArbitraryTypesModel):
     outcome_learner: BaseEstimator
     effect_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
+    n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
+    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    random_state: int = DEFAULT_LEARNER_RANDOM_STATE
 
     @model_validator(mode="after")
     def validate_effect_learner(self) -> MetaCATEEstimatorSpec:
@@ -309,6 +321,9 @@ class PipelineConfig(BaseModel):
     sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig | None = None
     policy: list[PolicyMethodSpec] | None = None
+    cate_crossfit_folds: PositiveInt = DEFAULT_DML_N_FOLDS
+    policy_bootstrap_samples: PositiveInt = DEFAULT_POLICY_BOOTSTRAP_SAMPLES
+    policy_random_state: int = DEFAULT_POLICY_RANDOM_STATE
     results_dir: str = DEFAULT_RESULTS_DIR
 
     @model_validator(mode="after")

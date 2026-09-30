@@ -17,8 +17,6 @@ from causal_pipeline.ate import (
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table
 from causal_pipeline.config import (
     CATEEstimatorSpec,
-    DEFAULT_DML_N_FOLDS,
-    DEFAULT_ESTIMAND_ATE,
     PipelineConfig,
 )
 from causal_pipeline.crossfit import cross_fit_predictions
@@ -86,7 +84,11 @@ class CausalPipeline:
         if policy_service is not None:
             self.policy_service = policy_service
         elif config.policy is not None:
-            self.policy_service = PolicyService(methods=config.policy)
+            self.policy_service = PolicyService(
+                methods=config.policy,
+                bootstrap_samples=config.policy_bootstrap_samples,
+                random_state=config.policy_random_state,
+            )
         else:
             self.policy_service = None
 
@@ -236,7 +238,7 @@ class CausalPipeline:
             logger.info("Cross-fitting CATE estimator %s.", estimator_id)
             df_effects = cross_fit_predictions(
                 dataset=estimation,
-                n_folds=DEFAULT_DML_N_FOLDS,
+                n_folds=self.config.cate_crossfit_folds,
                 random_state=self.config.split.random_state,
                 predict_fold=cate_fold_predictor(spec),
             )
@@ -283,9 +285,7 @@ class CausalPipeline:
                 row = {
                     "estimator": estimator_id,
                     "contrast": estimate_row["contrast"],
-                    "estimand": estimate_row["estimand"]
-                    if "estimand" in estimate_row
-                    else DEFAULT_ESTIMAND_ATE,
+                    "estimand": estimate_row["estimand"],
                     "estimate": estimate_row["estimate"],
                     "ci_lower": estimate_row["ci_lower"],
                     "ci_upper": estimate_row["ci_upper"],

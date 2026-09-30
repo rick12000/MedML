@@ -19,7 +19,6 @@ from causal_pipeline.config import (
 
 logger = logging.getLogger(__name__)
 
-IPW_WEIGHTS_STABILIZED_DEFAULT = False
 PROPENSITY_CLIP_FLOOR = 1e-6
 
 
@@ -220,7 +219,7 @@ class DataSplitter:
 def ipw_weights_binary(
     treatment: np.ndarray,
     propensity: np.ndarray,
-    stabilized: bool = IPW_WEIGHTS_STABILIZED_DEFAULT,
+    stabilized: bool,
 ) -> np.ndarray:
     """Horvitz-Thompson weights for binary treatment."""
     treatment_values = np.asarray(treatment, dtype=float)

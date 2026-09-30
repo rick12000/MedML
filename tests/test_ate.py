@@ -65,7 +65,7 @@ def test_factual_outcome_predictions_match_observed_arm() -> None:
         outcome_model=model,
         X=covariates,
         treatment=treatment,
-        treatment_values=[0, 1],
+        treatment_arms=[0, 1],
     )
     potential = np.asarray(model.estimate_individual_outcome(covariates, treatment))
     expected = potential[np.arange(n_observations), treatment.to_numpy()]
@@ -119,6 +119,7 @@ def test_population_contrasts_accept_integer_or_string_index(index_key: int | st
         population=population,
         control_value=0,
         treatment_values=[0, 1],
+        estimand="ate",
     )
     assert table.shape[0] == 1
     assert list(table["contrast"]) == ["1_vs_0"]

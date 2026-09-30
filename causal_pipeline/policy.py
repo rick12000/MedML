@@ -12,8 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.config import (
-    DEFAULT_POLICY_BOOTSTRAP_SAMPLES,
-    DEFAULT_POLICY_RANDOM_STATE,
     DRPolicyTreeMethodSpec,
     JsonValue,
     MOBMethodSpec,
@@ -66,8 +64,8 @@ class PolicyService:
     def __init__(
         self,
         methods: list[PolicyMethodSpec],
-        bootstrap_samples: int = DEFAULT_POLICY_BOOTSTRAP_SAMPLES,
-        random_state: int = DEFAULT_POLICY_RANDOM_STATE,
+        bootstrap_samples: int,
+        random_state: int,
     ) -> None:
         self.methods = methods
         self.bootstrap_samples = bootstrap_samples

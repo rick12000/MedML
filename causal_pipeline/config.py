@@ -24,6 +24,16 @@ class OutcomeType(StrEnum):
     BINARY = "binary"
 
 
+class OutcomeFavorability(StrEnum):
+    HIGHER_IS_BETTER = "higher_is_better"
+    LOWER_IS_BETTER = "lower_is_better"
+
+
+class IPWWeighting(StrEnum):
+    HAJEK = "hajek"
+    HORVITZ_THOMPSON = "horvitz_thompson"
+
+
 class TreatmentMode(StrEnum):
     BINARY = "binary"
     MULTI = "multi"
@@ -69,7 +79,6 @@ DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
 DEFAULT_DML_N_FOLDS: int = 5
 DEFAULT_DML_N_REP: int = 1
 DEFAULT_ATE_CONFIDENCE_LEVEL: float = 0.95
-DEFAULT_IPW_USE_STABILIZED: bool = False
 DEFAULT_TMLE_REDUCED: bool = False
 DEFAULT_CFRNET_PENALTY_DISC: float = 0.1
 DEFAULT_POLICY_BOOTSTRAP_SAMPLES: int = 1000
@@ -137,6 +146,7 @@ class DataConfig(BaseModel):
     group_id: ColumnName | None = None
 
     outcome_type: OutcomeType
+    outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER
     treatment_mode: TreatmentMode
 
     control_value: JsonValue
@@ -168,7 +178,7 @@ class IPWATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.IPW]
     propensity_learner: BaseEstimator
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
-    use_stabilized: bool = DEFAULT_IPW_USE_STABILIZED
+    weighting: IPWWeighting = IPWWeighting.HAJEK
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE

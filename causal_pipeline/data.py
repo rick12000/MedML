@@ -20,6 +20,7 @@ from causal_pipeline.config import (
 logger = logging.getLogger(__name__)
 
 PROPENSITY_CLIP_FLOOR = 1e-6
+GROUP_HOLDOUT_ATTEMPTS = 20
 
 
 class CausalDataset(BaseModel):
@@ -165,7 +166,7 @@ class DataSplitter:
             df=dataset.df,
             group_id=dataset.group_id,
             treatment_column=dataset.treatment,
-            treatment_mode=dataset.treatment_mode,
+            treatment_values=dataset.treatment_values,
             test_fraction=config.split.test_fraction,
             random_state=config.split.random_state,
         )
@@ -179,7 +180,7 @@ class DataSplitter:
         df: pd.DataFrame,
         group_id: str | None,
         treatment_column: str,
-        treatment_mode: TreatmentMode,
+        treatment_values: list[JsonValue],
         test_fraction: float,
         random_state: int,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -187,6 +188,8 @@ class DataSplitter:
             return self.split_grouped(
                 df=df,
                 group_id=group_id,
+                treatment_column=treatment_column,
+                treatment_values=treatment_values,
                 first_fraction=1.0 - test_fraction,
                 random_state=random_state,
             )
@@ -194,26 +197,59 @@ class DataSplitter:
             df,
             test_size=test_fraction,
             random_state=random_state,
-            stratify=df[treatment_column] if treatment_mode == TreatmentMode.BINARY else None,
+            stratify=df[treatment_column],
             shuffle=True,
         )
+        require_declared_arms(estimation, treatment_column, treatment_values)
+        require_declared_arms(test, treatment_column, treatment_values)
         return estimation, test
 
     def split_grouped(
         self,
         df: pd.DataFrame,
         group_id: str,
+        treatment_column: str,
+        treatment_values: list[JsonValue],
         first_fraction: float,
         random_state: int,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        splitter = GroupShuffleSplit(
-            n_splits=1,
-            test_size=1.0 - first_fraction,
-            random_state=random_state,
-        )
         groups = df[group_id]
-        train_idx, test_idx = next(splitter.split(df, groups=groups))
-        return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        for attempt in range(GROUP_HOLDOUT_ATTEMPTS):
+            splitter = GroupShuffleSplit(
+                n_splits=1,
+                test_size=1.0 - first_fraction,
+                random_state=random_state + attempt,
+            )
+            train_idx, test_idx = next(splitter.split(df, groups=groups))
+            estimation = df.iloc[train_idx].copy()
+            test = df.iloc[test_idx].copy()
+            estimation_complete = declared_arms_present(estimation, treatment_column, treatment_values)
+            test_complete = declared_arms_present(test, treatment_column, treatment_values)
+            if estimation_complete and test_complete:
+                return estimation, test
+        raise ValueError(
+            "Grouped holdout did not place every treatment arm on both sides "
+            f"in {GROUP_HOLDOUT_ATTEMPTS} attempts."
+        )
+
+
+def declared_arms_present(
+    frame: pd.DataFrame,
+    treatment_column: str,
+    treatment_values: list[JsonValue],
+) -> bool:
+    observed = set(frame[treatment_column].unique())
+    return set(treatment_values).issubset(observed)
+
+
+def require_declared_arms(
+    frame: pd.DataFrame,
+    treatment_column: str,
+    treatment_values: list[JsonValue],
+) -> None:
+    if not declared_arms_present(frame, treatment_column, treatment_values):
+        missing = set(treatment_values) - set(frame[treatment_column].unique())
+        raise ValueError(f"Holdout is missing treatment arms: {missing}")
 
 
 def ipw_weights_binary(

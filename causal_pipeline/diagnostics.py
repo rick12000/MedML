@@ -11,17 +11,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from causallib.estimation import IPW
 from causallib.utils.stat_utils import calc_weighted_standardized_mean_differences
 from pydantic import BaseModel, ConfigDict
 
 from causal_pipeline.config import (
+    DEFAULT_DML_N_FOLDS,
     DiagnosticConfig,
     JsonValue,
     TreatmentMode,
-    clone_estimator,
 )
-from causal_pipeline.data import CausalDataset
+from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
+from causal_pipeline.data import CausalDataset, ipw_weights_multi
 from causal_pipeline.utils import save_figure
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
@@ -54,14 +54,21 @@ class DiagnosticsRunner:
         logger.info("Running causal diagnostics on training data.")
         diagnostic_config = self.diagnostics
 
-        propensity_model = clone_estimator(diagnostic_config.propensity_learner)
         adjustment_covariates = train.X_adjustment.copy()
-        propensity_model.fit(adjustment_covariates, train.treatment_series)
-        probabilities = pd.DataFrame(
-            propensity_model.predict_proba(adjustment_covariates),
-            index=adjustment_covariates.index,
-            columns=list(propensity_model.classes_),
+        _, propensity = cross_fit_nuisances(
+            covariates=adjustment_covariates,
+            treatment=train.treatment_series,
+            outcome=train.outcome_series,
+            treatment_values=train.treatment_values,
+            propensity_learner=diagnostic_config.propensity_learner,
+            outcome_learner=None,
+            binary_outcome=False,
+            n_folds=DEFAULT_DML_N_FOLDS,
+            random_state=learner_random_state(diagnostic_config.propensity_learner, 0),
+            clip_bounds=diagnostic_config.propensity_clip,
+            groups=dataset_groups(train),
         )
+        probabilities = propensity
         overlap_path = "diagnostics/propensity_overlap.png"
         save_path = None
         if results_root is not None:
@@ -79,7 +86,11 @@ class DiagnosticsRunner:
         balance = self.covariate_balance(
             covariates=adjustment_covariates,
             dataset=train,
-            diagnostic_config=diagnostic_config,
+            weights=overlap_weights(
+                dataset=train,
+                propensity=probabilities,
+                stabilized=diagnostic_config.stabilized_weights,
+            ),
         )
 
         return DiagnosticResult(
@@ -148,18 +159,9 @@ class DiagnosticsRunner:
         self,
         covariates: pd.DataFrame,
         dataset: CausalDataset,
-        diagnostic_config: DiagnosticConfig,
+        weights: np.ndarray,
     ) -> pd.DataFrame:
-        clip_min, clip_max = diagnostic_config.propensity_clip
-        weight_model = IPW(
-            learner=clone_estimator(diagnostic_config.propensity_learner),
-            clip_min=clip_min,
-            clip_max=clip_max,
-            use_stabilized=diagnostic_config.stabilized_weights,
-        )
         treatment = dataset.treatment_series
-        weight_model.fit(covariates, treatment)
-        weights = weight_model.compute_weights(covariates, treatment).to_numpy(dtype=float)
         treatment_values = treatment.to_numpy()
         if dataset.treatment_mode == TreatmentMode.BINARY:
             treated = treatment_values != dataset.control_value
@@ -208,6 +210,27 @@ class DiagnosticsRunner:
             max_abs_weighted_smd=("weighted_smd", lambda values: float(np.max(np.abs(values)))),
         )
         return pairwise.merge(aggregate, on="covariate", how="left")
+
+
+def overlap_weights(
+    dataset: CausalDataset,
+    propensity: pd.DataFrame,
+    stabilized: bool,
+) -> np.ndarray:
+    """Inverse-probability weights from an already cross-fit propensity."""
+    levels = dataset.treatment_values
+    matrix = propensity.loc[:, levels].to_numpy(dtype=float)
+    weights = ipw_weights_multi(
+        treatment=dataset.treatment_series.to_numpy(),
+        propensity_matrix=matrix,
+        treatment_levels=levels,
+    )
+    if not stabilized:
+        return weights
+    treatment = dataset.treatment_series.to_numpy()
+    marginal = {arm: float(np.mean(treatment == arm)) for arm in levels}
+    scale = np.array([marginal[value] for value in treatment], dtype=float)
+    return weights * scale
 
 
 def probability_of_arm(probabilities: pd.DataFrame, arm: JsonValue) -> np.ndarray:

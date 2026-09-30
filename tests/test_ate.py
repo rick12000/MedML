@@ -8,18 +8,22 @@ from sklearn.base import BaseEstimator
 from sklearn.linear_model import LinearRegression
 
 from causal_pipeline.ate import (
+    DoubleMLIRMAdapter,
     contrasts_from_population_outcomes,
-    initialize_ate_estimator,
     doubleml_dataframe,
     factual_outcome_predictions,
+    initialize_ate_estimator,
     treated_propensity,
 )
 from causal_pipeline.config import (
     ATEKind,
     DataConfig,
+    DoubleMLATEEstimatorSpec,
     DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
+    OutcomeType,
     PipelineConfig,
+    TreatmentMode,
 )
 from causal_pipeline.data import CausalDataset, DataSplitter
 
@@ -73,6 +77,39 @@ def test_factual_outcome_predictions_match_observed_arm() -> None:
     assert np.allclose(factual, expected)
 
 
+def test_doubleml_irm_rejects_multi_arm_treatment(
+    logistic_learner: BaseEstimator,
+) -> None:
+    config = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=["x1"],
+        effect_modifiers=["x1"],
+        outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.MULTI,
+        control_value=0,
+        treatment_values=[0, 1, 2],
+    )
+    frame = pd.DataFrame(
+        {
+            "y": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "t": [0, 1, 2, 0, 1, 2],
+            "x1": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+        }
+    )
+    dataset = CausalDataset(data=config, df=frame)
+    estimator = DoubleMLIRMAdapter(
+        spec=DoubleMLATEEstimatorSpec(
+            kind=ATEKind.DML_IRM,
+            outcome_learner=LinearRegression(),
+            propensity_learner=logistic_learner,
+        ),
+        data=dataset,
+    )
+    with pytest.raises(ValueError):
+        estimator.fit(data=dataset)
+
+
 def test_ipw_estimate_is_finite_after_split(
     binary_data_config: DataConfig,
     logistic_learner: BaseEstimator,
@@ -86,7 +123,16 @@ def test_ipw_estimate_is_finite_after_split(
     estimator.fit(data=partitions.estimation)
     table = estimator.estimate()
     assert table.shape[0] == 1
-    assert list(table.columns) == ["contrast", "estimand", "estimate", "ci_lower", "ci_upper"]
+    assert list(table.columns) == [
+        "contrast",
+        "estimand",
+        "estimate",
+        "ci_lower",
+        "ci_upper",
+        "clip_lower",
+        "clip_upper",
+        "variance_assumption",
+    ]
     assert np.isfinite(table["estimate"].iloc[0])
     assert table["ci_lower"].iloc[0] <= table["estimate"].iloc[0] <= table["ci_upper"].iloc[0]
 

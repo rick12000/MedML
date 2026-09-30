@@ -32,6 +32,6 @@ def test_toy_cohort_pipeline_writes_summaries_to_cache(
     assert {"ipw", "aipw"}.issubset(set(ate_summary["estimator"]))
     assert {"s_learner", "x_learner"}.issubset(set(cate_summary["estimator"]))
     assert ate_summary["estimate"].notna().all()
-    assert cate_summary["ate_estimate"].notna().all()
+    assert cate_summary["mean_crossfit_cate"].notna().all()
     assert (integration_cache_dir / "diagnostics" / "propensity_overlap.png").is_file()
     assert (integration_cache_dir / "data" / "estimation.parquet").is_file()

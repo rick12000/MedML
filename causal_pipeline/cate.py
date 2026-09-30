@@ -36,7 +36,7 @@ from causal_pipeline.config import (
     clone_estimator,
     require_classifier,
 )
-from causal_pipeline.crossfit import cross_fit_propensity_map, learner_random_state
+from causal_pipeline.crossfit import cross_fit_propensity_map, dataset_groups, learner_random_state
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 
@@ -90,6 +90,22 @@ def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseC
     if spec.kind == CATEKind.DRAGONNET:
         return DragonNetAdapter(spec=spec, data=data)
     raise ValueError(f"Unsupported CATE kind: {spec.kind}")
+
+
+def reject_grouped_internal_crossfit(data: CausalDataset, estimator_name: str) -> None:
+    """causalml and the neural libraries cross-fit by row and cannot keep groups intact."""
+    if data.group_id is not None:
+        raise NotImplementedError(
+            f"{estimator_name} runs an internal row-wise cross-fit that cannot keep groups together."
+        )
+
+
+def binary_library_treatment(data: CausalDataset) -> np.ndarray:
+    """Code control as 0 and the single treated arm as 1 for libraries that assume that coding."""
+    non_control = [arm for arm in data.treatment_values if arm != data.control_value]
+    if len(non_control) != 1:
+        raise ValueError("TARNet, CFRNet, and DragonNet support one treated arm.")
+    return (data.treatment_series.to_numpy() != data.control_value).astype(int)
 
 
 def mean_cate_table(predictions: pd.DataFrame) -> pd.DataFrame:
@@ -155,6 +171,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> MetaLearnerAdapter:
+        reject_grouped_internal_crossfit(data, f"{self.letter}-learner")
         binary = self.data.outcome_type == OutcomeType.BINARY
         if binary:
             require_classifier(self.spec.outcome_learner, "CATE outcome_learner")
@@ -185,6 +202,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                     self.spec.random_state,
                 ),
                 clip_bounds=self.spec.clip_bounds,
+                groups=dataset_groups(data),
             )
         if propensity is None:
             self.model.fit(
@@ -218,10 +236,15 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         if self.model is None:
             raise RuntimeError("Estimator is not fitted.")
         effects = self.model.predict(data.X_adjustment.copy())
+        learned_arms = list(getattr(self.model, "t_groups", []))
+        columns = (
+            contrast_columns(self.data.control_value, [self.data.control_value, *learned_arms])
+            if learned_arms
+            else self.contrast_names
+        )
         if effects.ndim == 1:
-            return pd.DataFrame({self.contrast_names[0]: effects})
-        columns = self.contrast_names[: effects.shape[1]]
-        return pd.DataFrame(effects, columns=columns)
+            return pd.DataFrame({columns[0]: effects})
+        return pd.DataFrame(effects, columns=columns[: effects.shape[1]])
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
         if self.model is None:
@@ -275,6 +298,7 @@ class CausalForestAdapter(BaseCATEEstimator):
             T=data.treatment_series,
             X=features if features.shape[1] else None,
             W=controls if controls.shape[1] else None,
+            groups=dataset_groups(data),
         )
         return self
 
@@ -282,30 +306,43 @@ class CausalForestAdapter(BaseCATEEstimator):
         if self.model is None:
             raise RuntimeError("Estimator is not fitted.")
         features = data.X_effect_modifiers.copy()
-        effects = self.model.effect(features if features.shape[1] else None)
-        if effects.ndim == 1:
-            return pd.DataFrame({self.contrast_names[0]: effects})
-        columns = self.contrast_names[: effects.shape[1]]
-        return pd.DataFrame(effects, columns=columns)
+        feature_frame = features if features.shape[1] else None
+        columns = {}
+        for name, arm in zip(
+            self.contrast_names,
+            [value for value in self.data.treatment_values if value != self.data.control_value],
+            strict=True,
+        ):
+            effect = self.model.effect(feature_frame, T0=self.data.control_value, T1=arm)
+            columns[name] = np.ravel(effect)
+        return pd.DataFrame(columns)
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
         if self.model is None:
             raise RuntimeError("Estimator is not fitted.")
         features = data.X_effect_modifiers.copy()
-        inference = self.model.ate_inference(features if features.shape[1] else None)
-        lower, upper = inference.conf_int_mean()
-        point = np.atleast_1d(np.squeeze(inference.mean_point))
-        lower_bound = np.atleast_1d(np.squeeze(lower))
-        upper_bound = np.atleast_1d(np.squeeze(upper))
-        n_contrasts = min(len(self.contrast_names), len(point), len(lower_bound), len(upper_bound))
-        return pd.DataFrame(
-            {
-                "contrast": self.contrast_names[:n_contrasts],
-                "estimate": [float(value) for value in point[:n_contrasts]],
-                "ci_lower": [float(value) for value in lower_bound[:n_contrasts]],
-                "ci_upper": [float(value) for value in upper_bound[:n_contrasts]],
-            }
-        )
+        feature_frame = features if features.shape[1] else None
+        rows = []
+        for name, arm in zip(
+            self.contrast_names,
+            [value for value in self.data.treatment_values if value != self.data.control_value],
+            strict=True,
+        ):
+            inference = self.model.ate_inference(
+                feature_frame,
+                T0=self.data.control_value,
+                T1=arm,
+            )
+            lower, upper = inference.conf_int_mean()
+            rows.append(
+                {
+                    "contrast": name,
+                    "estimate": float(np.squeeze(inference.mean_point)),
+                    "ci_lower": float(np.squeeze(lower)),
+                    "ci_upper": float(np.squeeze(upper)),
+                }
+            )
+        return pd.DataFrame(rows)
 
 
 class TARNetAdapter(BaseCATEEstimator):
@@ -319,11 +356,12 @@ class TARNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> TARNetAdapter:
+        reject_grouped_internal_crossfit(data, "TARNet")
         from catenets.models.jax import TARNet
 
         self.model = TARNet()
         features = data.X_adjustment.to_numpy()
-        self.model.fit(features, data.outcome_series.to_numpy(), data.treatment_series.to_numpy())
+        self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
@@ -347,11 +385,12 @@ class CFRNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> CFRNetAdapter:
+        reject_grouped_internal_crossfit(data, "CFRNet")
         from catenets.models.jax import CFRNet
 
         self.model = CFRNet(penalty_disc=self.spec.penalty_disc)
         features = data.X_adjustment.to_numpy()
-        self.model.fit(features, data.outcome_series.to_numpy(), data.treatment_series.to_numpy())
+        self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
@@ -375,12 +414,13 @@ class DragonNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> DragonNetAdapter:
+        reject_grouped_internal_crossfit(data, "DragonNet")
         from causalml.inference.jax import DragonNet
 
         self.model = DragonNet()
         self.model.fit(
             data.X_adjustment.to_numpy(),
-            data.treatment_series.to_numpy(),
+            binary_library_treatment(data),
             data.outcome_series.to_numpy(),
         )
         return self

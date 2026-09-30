@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,6 +17,7 @@ from causal_pipeline.config import (
     ExactPolicyTreeMethodSpec,
     JsonValue,
     MOBMethodSpec,
+    OutcomeFavorability,
     PolicyKind,
     PolicyMethodSpec,
     PolicySearchMode,
@@ -43,6 +45,17 @@ logger = logging.getLogger(__name__)
 
 BOOTSTRAP_CI_LOWER_PERCENTILE = 2.5
 BOOTSTRAP_CI_UPPER_PERCENTILE = 97.5
+INTERVAL_STATUS_DEFINITIONAL = "definitional"
+INTERVAL_STATUS_BOOTSTRAP = "percentile_bootstrap"
+MOB_ARM_COLUMN = "mob_non_control"
+
+
+@dataclass(frozen=True)
+class SubgroupInterval:
+    estimate: float
+    ci_lower: float
+    ci_upper: float
+    interval_status: str
 
 
 class PolicyRule(BaseModel):
@@ -94,14 +107,14 @@ class PolicyService:
 
         for method in self.methods:
             if method.kind == PolicyKind.POLICY_TREE:
-                for estimator_id, df_cate_predictions in predictions.items():
+                for estimator_id in predictions:
                     policies.append(
                         self.fit_standard_policy_tree(
                             spec=method,
                             estimator_id=estimator_id,
                             dataset=estimation,
                             X_mod=X_mod,
-                            predictions=df_cate_predictions,
+                            robust_scores=robust_scores,
                         )
                     )
             elif method.kind == PolicyKind.EXACT_POLICY_TREE:
@@ -140,13 +153,16 @@ class PolicyService:
         estimator_id: str,
         dataset: CausalDataset,
         X_mod: pd.DataFrame,
-        predictions: pd.DataFrame,
+        robust_scores: pd.DataFrame | None,
     ) -> FittedPolicy:
         logger.info("Fitting standard PolicyTree for %s.", estimator_id)
+        if robust_scores is None:
+            raise ValueError("The policy tree reward is the cross-fit doubly robust score.")
         reward = reward_matrix(
-            predictions=predictions,
+            predictions=robust_scores,
             treatment_values=dataset.treatment_values,
             control_value=dataset.control_value,
+            direction=reward_direction(dataset.data.outcome_favorability),
         )
         tree = clone_estimator(spec.tree)
         tree.fit(X_mod, reward)
@@ -175,10 +191,11 @@ class PolicyService:
     ) -> FittedPolicy:
         logger.info("Fitting exact %s policy tree for %s.", spec.mode.value, estimator_id)
         control_action = dataset.treatment_values.index(dataset.control_value)
+        direction = reward_direction(dataset.data.outcome_favorability)
         if spec.mode == PolicySearchMode.CAPITAL:
             contrast_name = contrast_columns(dataset.control_value, dataset.treatment_values)[0]
             rewards = capital_reward_matrix(
-                effects=predictions[contrast_name].to_numpy(dtype=float),
+                effects=direction * predictions[contrast_name].to_numpy(dtype=float),
                 treatment_values=dataset.treatment_values,
                 control_value=dataset.control_value,
                 clinical_threshold=spec.clinical_threshold,
@@ -190,6 +207,7 @@ class PolicyService:
                     predictions=predictions,
                     treatment_values=dataset.treatment_values,
                     control_value=dataset.control_value,
+                    direction=direction,
                 ),
                 minimum_effect=spec.minimum_effect,
                 control_action=control_action,
@@ -223,23 +241,28 @@ class PolicyService:
         dataset: CausalDataset,
     ) -> FittedPolicy:
         logger.info("Fitting DRPolicyTree.")
+        levels = control_first_arms(dataset.treatment_values, dataset.control_value)
         tree = DRPolicyTree(
             model_regression=clone_estimator(spec.outcome_learner),
             model_propensity=clone_estimator(spec.propensity_learner),
+            categories=levels,
         )
         controls = dataset.X_controls.copy()
+        groups = dataset.df[dataset.group_id] if dataset.group_id is not None else None
         tree.fit(
             Y=dataset.outcome_series.copy(),
             T=dataset.treatment_series.copy(),
             X=dataset.X_effect_modifiers.copy(),
             W=controls if controls.shape[1] else None,
+            groups=groups,
         )
         rules = self.extract_policy_tree_rules(
-            tree=tree.policy_tree_,
+            tree=tree.policy_model_,
             X_mod=dataset.X_effect_modifiers,
             method="dr_policy_tree",
             source_cate_model=None,
             dataset=dataset,
+            action_levels=levels,
         )
         return FittedPolicy(
             method="dr_policy_tree",
@@ -297,32 +320,38 @@ class PolicyService:
 
         if len(dataset.treatment_values) != 2:
             raise NotImplementedError("MOB policies are implemented for binary treatment.")
-        pandas2ri.activate()
+        from rpy2.robjects.conversion import localconverter
+
         importr("partykit")
         learning_frame = dataset.df.copy()
-        ro.globalenv["learning_data"] = pandas2ri.py2rpy(learning_frame)
+        learning_frame[MOB_ARM_COLUMN] = (
+            learning_frame[dataset.treatment] != dataset.control_value
+        ).astype(int)
         formula = mob_formula(dataset)
         family = "family = binomial()," if dataset.outcome_type.value == "binary" else ""
         tree_function = "glmtree" if dataset.outcome_type.value == "binary" else "lmtree"
-        ro.r(
-            f"""
-            mob_fit <- partykit::{tree_function}(
-                {formula},
-                data = learning_data,
-                {family}
-                control = partykit::mob_control()
+        with localconverter(pandas2ri.converter):
+            ro.globalenv["learning_data"] = ro.conversion.py2rpy(learning_frame)
+            ro.r(
+                f"""
+                mob_fit <- partykit::{tree_function}(
+                    {formula},
+                    data = learning_data,
+                    {family}
+                    control = partykit::mob_control()
+                )
+                mob_nodes <- predict(mob_fit, type = "node")
+                mob_coef <- as.data.frame(coef(mob_fit))
+                mob_coef$node <- as.integer(rownames(coef(mob_fit)))
+                """
             )
-            mob_nodes <- predict(mob_fit, type = "node")
-            mob_coef <- as.data.frame(coef(mob_fit))
-            mob_coef$node <- as.integer(rownames(coef(mob_fit)))
-            """
-        )
-        leaf_ids = np.asarray(ro.r("mob_nodes"), dtype=int)
-        coefficients = pandas2ri.rpy2py(ro.r("mob_coef"))
+            leaf_ids = np.asarray(ro.r("mob_nodes"), dtype=int)
+            coefficients = ro.conversion.rpy2py(ro.r("mob_coef"))
         rules = mob_policy_rules(
             leaf_ids=leaf_ids,
             coefficients=coefficients,
             dataset=dataset,
+            direction=reward_direction(dataset.data.outcome_favorability),
         )
         return FittedPolicy(
             method="mob",
@@ -339,9 +368,11 @@ class PolicyService:
         method: str,
         source_cate_model: str | None,
         dataset: CausalDataset,
+        action_levels: list[JsonValue] | None = None,
     ) -> list[PolicyRule]:
         leaf_ids = np.asarray(tree.apply(X_mod))
         actions = np.asarray(tree.predict(X_mod))
+        levels = dataset.treatment_values if action_levels is None else action_levels
         rules = []
         for rule_id, leaf in enumerate(sorted(set(leaf_ids))):
             mask = leaf_ids == leaf
@@ -352,7 +383,7 @@ class PolicyService:
                     source_cate_model=source_cate_model,
                     rule_id=rule_id,
                     rule=f"leaf_{leaf}",
-                    recommended_treatment=dataset.treatment_values[recommended],
+                    recommended_treatment=levels[recommended],
                     learning_n=int(mask.sum()),
                     subgroup_leaf=int(leaf),
                 )
@@ -404,6 +435,7 @@ class PolicyService:
                 mean_effects=effects.iloc[mask].mean(axis=0),
                 treatment_values=dataset.treatment_values,
                 control_value=dataset.control_value,
+                direction=reward_direction(dataset.data.outcome_favorability),
             )
             rules.append(
                 PolicyRule(
@@ -439,6 +471,7 @@ class PolicyService:
                 mean_effects=effects.iloc[mask].mean(axis=0),
                 treatment_values=dataset.treatment_values,
                 control_value=dataset.control_value,
+                direction=reward_direction(dataset.data.outcome_favorability),
             )
             rules.append(
                 PolicyRule(
@@ -492,7 +525,7 @@ class PolicyService:
         if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
             return np.asarray(policy.model.apply(X_mod))
         if policy.method == "dr_policy_tree":
-            return np.asarray(policy.model.policy_tree_.apply(X_mod))
+            return np.asarray(policy.model.policy_model_.apply(X_mod))
         if policy.method == "virtual_twins":
             return np.asarray(policy.model.apply(X_mod))
         if policy.method == "mob":
@@ -525,7 +558,7 @@ class PolicyService:
                     test_n = int(mask.sum())
                 if test_n == 0:
                     continue
-                effect, lower, upper = self.bootstrap_subgroup_effect(
+                interval = self.bootstrap_subgroup_effect(
                     subgroup_scores=subgroup_scores,
                     recommended_treatment=rule.recommended_treatment,
                     control_value=test.control_value,
@@ -539,25 +572,34 @@ class PolicyService:
                         "recommended_treatment": rule.recommended_treatment,
                         "test_n": test_n,
                         "test_prevalence": test_n / n_test,
-                        "effect_estimate": effect,
-                        "ci_lower": lower,
-                        "ci_upper": upper,
+                        "effect_estimate": interval.estimate,
+                        "ci_lower_given_rule": interval.ci_lower,
+                        "ci_upper_given_rule": interval.ci_upper,
+                        "interval_status": interval.interval_status,
                         "learning_effect": np.nan if rule.learning_effect is None else rule.learning_effect,
                         "debiased_learning_effect": (
                             np.nan if rule.debiased_effect is None else rule.debiased_effect
                         ),
                     }
                 )
-        return pd.DataFrame(rows)
+        summary = pd.DataFrame(rows)
+        if not summary.empty:
+            summary["n_rules_scored"] = len(summary)
+        return summary
 
     def bootstrap_subgroup_effect(
         self,
         subgroup_scores: pd.DataFrame,
         recommended_treatment: JsonValue,
         control_value: JsonValue,
-    ) -> tuple[float, float, float]:
+    ) -> SubgroupInterval:
         if recommended_treatment == control_value:
-            return 0.0, 0.0, 0.0
+            return SubgroupInterval(
+                estimate=0.0,
+                ci_lower=float("nan"),
+                ci_upper=float("nan"),
+                interval_status=INTERVAL_STATUS_DEFINITIONAL,
+            )
         column = contrast_column_name(recommended_treatment, control_value, list(subgroup_scores.columns))
         values = subgroup_scores[column].to_numpy(dtype=float)
         point = float(np.mean(values))
@@ -568,18 +610,37 @@ class PolicyService:
             bootstrap.append(float(np.mean(values[indices])))
         lower = float(np.percentile(bootstrap, BOOTSTRAP_CI_LOWER_PERCENTILE))
         upper = float(np.percentile(bootstrap, BOOTSTRAP_CI_UPPER_PERCENTILE))
-        return point, lower, upper
+        return SubgroupInterval(
+            estimate=point,
+            ci_lower=lower,
+            ci_upper=upper,
+            interval_status=INTERVAL_STATUS_BOOTSTRAP,
+        )
+
+
+def reward_direction(favorability: OutcomeFavorability) -> float:
+    if favorability == OutcomeFavorability.LOWER_IS_BETTER:
+        return -1.0
+    return 1.0
+
+
+def control_first_arms(
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+) -> list[JsonValue]:
+    return [control_value] + [arm for arm in treatment_values if arm != control_value]
 
 
 def reward_matrix(
     predictions: pd.DataFrame,
     treatment_values: list[JsonValue],
     control_value: JsonValue,
+    direction: float = 1.0,
 ) -> np.ndarray:
     reward = np.zeros((len(predictions), len(treatment_values)))
     non_control = [value for value in treatment_values if value != control_value]
     for name, arm in zip(contrast_columns(control_value, treatment_values), non_control, strict=True):
-        reward[:, treatment_values.index(arm)] = predictions[name].to_numpy(dtype=float)
+        reward[:, treatment_values.index(arm)] = direction * predictions[name].to_numpy(dtype=float)
     return reward
 
 
@@ -587,11 +648,12 @@ def best_treatment_arm(
     mean_effects: pd.Series,
     treatment_values: list[JsonValue],
     control_value: JsonValue,
+    direction: float = 1.0,
 ) -> JsonValue:
     scores = {control_value: 0.0}
     non_control = [value for value in treatment_values if value != control_value]
     for name, arm in zip(contrast_columns(control_value, treatment_values), non_control, strict=True):
-        scores[arm] = float(mean_effects[name])
+        scores[arm] = direction * float(mean_effects[name])
     return max(scores, key=scores.get)
 
 
@@ -607,11 +669,15 @@ def contrast_column_name(
 
 
 def mob_formula(dataset: CausalDataset) -> str:
-    modifiers = set(dataset.effect_modifiers)
-    regressors = [dataset.treatment] + [column for column in dataset.confounders if column not in modifiers]
-    partitions = list(dataset.effect_modifiers)
+    """Regress on every confounder. Partition only on modifiers that are not confounders."""
+    confounders = set(dataset.confounders)
+    regressors = [MOB_ARM_COLUMN] + list(dataset.confounders)
+    partitions = [column for column in dataset.effect_modifiers if column not in confounders]
     if not partitions:
-        raise ValueError("MOB requires at least one effect modifier to partition on.")
+        raise ValueError(
+            "MOB needs an effect modifier that is not also a confounder. "
+            "Confounders stay in the leaf regression, including those listed as effect modifiers."
+        )
     return f"{dataset.outcome} ~ {' + '.join(regressors)} | {' + '.join(partitions)}"
 
 
@@ -619,10 +685,14 @@ def mob_policy_rules(
     leaf_ids: np.ndarray,
     coefficients: pd.DataFrame,
     dataset: CausalDataset,
+    direction: float = 1.0,
 ) -> list[PolicyRule]:
-    treatment_column = dataset.treatment
     coefficient_column = next(
-        (column for column in coefficients.columns if column == treatment_column or column.startswith(treatment_column)),
+        (
+            column
+            for column in coefficients.columns
+            if column == MOB_ARM_COLUMN or str(column).startswith(MOB_ARM_COLUMN)
+        ),
         None,
     )
     if coefficient_column is None or "node" not in coefficients.columns:
@@ -633,7 +703,7 @@ def mob_policy_rules(
         node_rows = coefficients.loc[coefficients["node"] == int(leaf)]
         if node_rows.empty:
             raise RuntimeError(f"No MOB coefficient row for terminal node {leaf}.")
-        recommend_treated = float(node_rows.iloc[0][coefficient_column]) > 0.0
+        recommend_treated = direction * float(node_rows.iloc[0][coefficient_column]) > 0.0
         rules.append(
             PolicyRule(
                 method="mob",
@@ -651,8 +721,9 @@ def mob_policy_rules(
 def mob_leaf_ids(policy: FittedPolicy, X_mod: pd.DataFrame) -> np.ndarray:
     import rpy2.robjects as ro
     from rpy2.robjects import pandas2ri
+    from rpy2.robjects.conversion import localconverter
 
-    pandas2ri.activate()
-    ro.globalenv["mob_score_data"] = pandas2ri.py2rpy(X_mod)
-    ro.globalenv["mob_fit"] = policy.model
-    return np.asarray(ro.r('predict(mob_fit, newdata = mob_score_data, type = "node")'), dtype=int)
+    with localconverter(pandas2ri.converter):
+        ro.globalenv["mob_score_data"] = ro.conversion.py2rpy(X_mod)
+        ro.globalenv["mob_fit"] = policy.model
+        return np.asarray(ro.r('predict(mob_fit, newdata = mob_score_data, type = "node")'), dtype=int)

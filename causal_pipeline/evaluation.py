@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scipy.stats import t as student_t
 
 from causal_pipeline.config import CATEEvaluationConfig, clone_estimator, predict_outcome_mean
-from causal_pipeline.crossfit import cross_fit_splits
+from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 from causal_pipeline.utils import save_figure, write_dataframe
@@ -86,14 +86,15 @@ class CATEEvaluator:
         outcome_values = dataset.outcome_series.to_numpy(dtype=float)
         levels = dataset.treatment_values
         clip_min, clip_max = self.evaluation.propensity_clip
-        folds = cross_fit_splits(
+        gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
+
+        for train_idx, test_idx in cross_fit_splits(
+            features=covariates,
             treatment=treatment,
             n_folds=self.evaluation.dr_crossfit_folds,
             random_state=self.evaluation.random_state,
-        )
-        gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
-
-        for train_idx, test_idx in folds.split(covariates, treatment):
+            groups=dataset_groups(dataset),
+        ):
             train_covariates = covariates.iloc[train_idx].copy()
             test_covariates = covariates.iloc[test_idx].copy()
             train_outcome = outcome_values[train_idx]
@@ -131,6 +132,7 @@ class CATEEvaluator:
         predictions: dict[str, pd.DataFrame],
         robust_scores: pd.DataFrame,
         results_root: Path,
+        held_out: bool = False,
     ) -> dict[str, list[ContrastEvaluation]]:
         results: dict[str, list[ContrastEvaluation]] = {}
         for estimator_id, df_cate_predictions in predictions.items():
@@ -148,7 +150,8 @@ class CATEEvaluator:
                     bootstrap_samples=self.evaluation.eceth_bootstrap_samples,
                     random_state=self.evaluation.random_state,
                 )
-                calibration_path = f"cate/{estimator_id}/{contrast}/calibration.png"
+                marker = "test_" if held_out else ""
+                calibration_path = f"cate/{estimator_id}/{contrast}/{marker}calibration.png"
                 calibration_file = results_root / calibration_path
                 df_calibration = self.plot_calibration(
                     tau_hat=tau_hat,
@@ -157,7 +160,7 @@ class CATEEvaluator:
                     save_path=str(calibration_file),
                 )
                 write_dataframe(calibration_file.with_suffix(".csv"), df_calibration)
-                toc_path = f"cate/{estimator_id}/{contrast}/toc.png"
+                toc_path = f"cate/{estimator_id}/{contrast}/{marker}toc.png"
                 self.plot_toc(
                     tau_hat=tau_hat,
                     gamma=gamma,

@@ -159,6 +159,11 @@ class CausalPipeline:
                 robust_scores=estimation_scores,
             )
             test_scores = self.evaluator.build_robust_scores(dataset=partitions.test)
+            test_cate_evaluation = self.evaluate_held_out_cate(
+                estimation=estimation,
+                test=partitions.test,
+                test_scores=test_scores,
+            )
             policy_results = self.policy_service.evaluate_policies(
                 policies=policies,
                 test=partitions.test,
@@ -167,7 +172,11 @@ class CausalPipeline:
             self.results.write_dataframe("policy/summary.csv", policy_results)
 
         ate_summary = self.build_ate_summary(ate_results, sensitivity_summaries)
-        cate_summary = self.build_cate_summary(cate_ate_results, cate_evaluation)
+        cate_summary = self.build_cate_summary(
+            cate_ate_results,
+            cate_evaluation,
+            test_cate_evaluation if self.config.policy else {},
+        )
         self.results.write_summaries(
             ate_summary=ate_summary,
             cate_summary=cate_summary,
@@ -347,9 +356,32 @@ class CausalPipeline:
             )
         return predictions
 
+    def evaluate_held_out_cate(
+        self,
+        estimation: CausalDataset,
+        test: CausalDataset,
+        test_scores: pd.DataFrame,
+    ) -> dict[str, list[ContrastEvaluation]]:
+        """Score CATE models fit on the estimation sample against test-set robust scores."""
+        if self.evaluator is None or not self.config.cate_estimators:
+            return {}
+        predictions = {
+            spec.kind.value: predict_cate_fold(train=estimation, held_out=test, spec=spec)
+            for spec in self.config.cate_estimators
+        }
+        evaluation = self.evaluator.evaluate_cate_models(
+            predictions=predictions,
+            robust_scores=test_scores,
+            results_root=self.results.root,
+            held_out=True,
+        )
+        self.persist_cate_evaluation(cate_evaluation=evaluation, table_name="test_evaluation.csv")
+        return evaluation
+
     def persist_cate_evaluation(
         self,
         cate_evaluation: dict[str, list[ContrastEvaluation]],
+        table_name: str = "evaluation.csv",
     ) -> None:
         for estimator_id, contrasts in cate_evaluation.items():
             for contrast_result in contrasts:
@@ -368,7 +400,7 @@ class CausalPipeline:
                         "rate_qini_pvalue": [contrast_result.rate_qini_pvalue],
                     }
                 )
-                write_dataframe(contrast_dir / "evaluation.csv", df_cate_evaluation)
+                write_dataframe(contrast_dir / table_name, df_cate_evaluation)
 
     def build_ate_summary(
         self,
@@ -390,17 +422,20 @@ class CausalPipeline:
                     "estimate": estimate_row["estimate"],
                     "ci_lower": estimate_row["ci_lower"],
                     "ci_upper": estimate_row["ci_upper"],
-                    "robustness_value": None,
+                    "robustness_value_point": None,
+                    "robustness_value_interval": None,
                     "benchmark_variable": None,
                     "benchmark_multiple_to_null": None,
+                    "benchmark_multiple_to_null_interval": None,
                 }
                 if sensitivity is not None and not sensitivity.empty:
-                    row["robustness_value"] = sensitivity["robustness_value"].iloc[0]
+                    row["robustness_value_point"] = sensitivity["robustness_value_point"].iloc[0]
+                    row["robustness_value_interval"] = sensitivity["robustness_value_interval"].iloc[0]
                     row["benchmark_variable"] = sensitivity["benchmark_variable"].iloc[0]
-                    if "benchmark_multiple_to_null" in sensitivity.columns:
-                        row["benchmark_multiple_to_null"] = sensitivity[
-                            "benchmark_multiple_to_null"
-                        ].iloc[0]
+                    row["benchmark_multiple_to_null"] = sensitivity["benchmark_multiple_to_null"].iloc[0]
+                    row["benchmark_multiple_to_null_interval"] = sensitivity[
+                        "benchmark_multiple_to_null_interval"
+                    ].iloc[0]
                 rows.append(row)
         return pd.DataFrame(rows)
 
@@ -408,6 +443,7 @@ class CausalPipeline:
         self,
         cate_ate_results: dict[str, pd.DataFrame],
         cate_evaluation: dict[str, list[ContrastEvaluation]],
+        test_cate_evaluation: dict[str, list[ContrastEvaluation]] | None = None,
     ) -> pd.DataFrame:
         rows = []
         for estimator_id, ate_table in cate_ate_results.items():
@@ -419,6 +455,10 @@ class CausalPipeline:
             evaluation_by_contrast = {
                 item.contrast: item for item in contrast_evaluations
             }
+            held_out_by_contrast = {
+                item.contrast: item
+                for item in (test_cate_evaluation or {}).get(estimator_id, [])
+            }
             for _, ate_row in ate_table.iterrows():
                 contrast = ate_row["contrast"]
                 evaluation = (
@@ -426,13 +466,12 @@ class CausalPipeline:
                     if contrast in evaluation_by_contrast
                     else None
                 )
+                held_out = held_out_by_contrast[contrast] if contrast in held_out_by_contrast else None
                 rows.append(
                     {
                         "estimator": estimator_id,
                         "contrast": contrast,
-                        "ate_estimate": ate_row["estimate"],
-                        "ate_ci_lower": ate_row["ci_lower"],
-                        "ate_ci_upper": ate_row["ci_upper"],
+                        "mean_crossfit_cate": ate_row["estimate"],
                         "eceth": evaluation.eceth if evaluation else None,
                         "eceth_standard_error": evaluation.eceth_standard_error if evaluation else None,
                         "eceth_pvalue": evaluation.eceth_pvalue if evaluation else None,
@@ -445,6 +484,9 @@ class CausalPipeline:
                         "rate_qini_pvalue": evaluation.rate_qini_pvalue
                         if evaluation
                         else None,
+                        "test_eceth": held_out.eceth if held_out else None,
+                        "test_rate_autoc": held_out.rate_autoc if held_out else None,
+                        "test_rate_qini": held_out.rate_qini if held_out else None,
                     }
                 )
         return pd.DataFrame(rows)

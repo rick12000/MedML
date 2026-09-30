@@ -10,7 +10,7 @@ import statsmodels.api as sm
 from causallib.estimation import IPW, Standardization
 from scipy import stats
 from sklearn.base import BaseEstimator
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
 from causal_pipeline.config import JsonValue, clone_estimator
 from causal_pipeline.data import CausalDataset
@@ -19,28 +19,66 @@ PROBABILITY_CLIP_FLOOR = 1e-6
 LOGIT_CLIP = 1e-6
 MINIMUM_CROSSFIT_FOLDS = 2
 TMLE_GLM_MAX_ITER = 100
+SIMPLEX_PROJECTION_ITERATIONS = 20
+SIMPLEX_SUM_TOLERANCE = 1e-10
+VARIANCE_PROPENSITY_TREATED_AS_KNOWN = "propensity_treated_as_known"
 
 
-def normal_interval_from_scores(scores: np.ndarray, level: float) -> tuple[float, float, float]:
+def normal_interval_from_scores(
+    scores: np.ndarray,
+    level: float,
+    groups: np.ndarray | None = None,
+) -> tuple[float, float, float]:
     """Mean of an influence function and its normal confidence interval."""
     estimate = float(np.mean(scores))
-    standard_error = float(np.std(scores, ddof=1) / np.sqrt(scores.size))
+    if groups is None:
+        standard_error = float(np.std(scores, ddof=1) / np.sqrt(scores.size))
+    else:
+        standard_error = cluster_robust_standard_error(scores=scores, groups=groups)
     quantile = float(stats.norm.ppf(0.5 + level / 2.0))
     return estimate, estimate - quantile * standard_error, estimate + quantile * standard_error
 
 
+def cluster_robust_standard_error(scores: np.ndarray, groups: np.ndarray) -> float:
+    """Liang-Zeger standard error for a mean when rows are independent across groups."""
+    totals = pd.DataFrame({"score": scores, "group": groups}).groupby("group")["score"].sum()
+    n_groups = len(totals)
+    if n_groups < MINIMUM_CROSSFIT_FOLDS:
+        raise ValueError("Cluster-robust intervals need at least two groups.")
+    centered = totals.to_numpy(dtype=float) - float(totals.mean())
+    scale = n_groups / (n_groups - 1) * float(np.sum(centered**2))
+    return float(np.sqrt(scale) / len(scores))
+
+
 def cross_fit_splits(
+    features: pd.DataFrame | np.ndarray,
     treatment: pd.Series,
     n_folds: int,
     random_state: int,
-) -> StratifiedKFold:
+    groups: pd.Series | np.ndarray | None = None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return train and held-out positions. The requested fold count is not reduced."""
     arm_counts = treatment.value_counts()
-    n_splits = min(n_folds, int(arm_counts.min()))
-    if n_splits < MINIMUM_CROSSFIT_FOLDS:
+    smallest_arm = int(arm_counts.min())
+    if n_folds < MINIMUM_CROSSFIT_FOLDS:
+        raise ValueError("Cross-fitting requires at least two folds.")
+    if smallest_arm < n_folds:
         raise ValueError(
-            "Cross-fitting requires at least two observations in every treatment arm."
+            f"Cross-fitting requested {n_folds} folds, but the smallest treatment arm has {smallest_arm} rows."
         )
-    return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    if groups is None:
+        splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        return list(splitter.split(features, treatment))
+    group_values = np.asarray(groups)
+    if len(group_values) != len(treatment):
+        raise ValueError("Group ids must have one entry per row.")
+    n_groups = int(pd.Series(group_values).nunique())
+    if n_groups < n_folds:
+        raise ValueError(
+            f"Cross-fitting requested {n_folds} folds, but there are only {n_groups} groups."
+        )
+    grouped = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    return list(grouped.split(features, treatment, group_values))
 
 
 def cross_fit_predictions(
@@ -50,14 +88,15 @@ def cross_fit_predictions(
     predict_fold: Callable[[CausalDataset, CausalDataset], pd.DataFrame],
 ) -> pd.DataFrame:
     """Predict every row from a model fit on the other folds."""
-    splitter = cross_fit_splits(
+    positions = np.arange(len(dataset.df))
+    combined: pd.DataFrame | None = None
+    for train_positions, held_out_positions in cross_fit_splits(
+        features=positions,
         treatment=dataset.treatment_series,
         n_folds=n_folds,
         random_state=random_state,
-    )
-    positions = np.arange(len(dataset.df))
-    combined: pd.DataFrame | None = None
-    for train_positions, held_out_positions in splitter.split(positions, dataset.treatment_series):
+        groups=dataset_groups(dataset),
+    ):
         prediction = predict_fold(
             dataset.subset(train_positions),
             dataset.subset(held_out_positions),
@@ -98,19 +137,21 @@ def cross_fit_nuisances(
     n_folds: int,
     random_state: int,
     clip_bounds: tuple[float, float],
+    groups: pd.Series | np.ndarray | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     """Out-of-fold potential outcomes and propensity, columns aligned to treatment_values."""
-    splitter = cross_fit_splits(
-        treatment=treatment,
-        n_folds=n_folds,
-        random_state=random_state,
-    )
     propensity = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
     outcome_predictions = None
     if outcome_learner is not None:
         outcome_predictions = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
 
-    for train_index, test_index in splitter.split(covariates, treatment):
+    for train_index, test_index in cross_fit_splits(
+        features=covariates,
+        treatment=treatment,
+        n_folds=n_folds,
+        random_state=random_state,
+        groups=groups,
+    ):
         X_train = covariates.iloc[train_index]
         X_test = covariates.iloc[test_index]
         treatment_train = treatment.iloc[train_index]
@@ -229,6 +270,17 @@ def hajek_influence(
     return arm_mean + outcome.size * weight * (outcome - arm_mean) / weight_sum
 
 
+def horvitz_thompson_influence(
+    outcome: np.ndarray,
+    treatment: np.ndarray,
+    propensity: np.ndarray,
+    arm: JsonValue,
+) -> np.ndarray:
+    """Horvitz-Thompson terms for the mean of Y under arm assignment."""
+    observed = treatment == arm
+    return observed.astype(float) * outcome / propensity
+
+
 def aipw_arm_scores(
     outcome: np.ndarray,
     treatment: np.ndarray,
@@ -241,12 +293,44 @@ def aipw_arm_scores(
 
 
 def clip_propensity(propensity: pd.DataFrame, clip_bounds: tuple[float, float]) -> pd.DataFrame:
-    clipped = propensity.clip(lower=clip_bounds[0], upper=clip_bounds[1])
-    if clipped.shape[1] >= 2:
-        clipped = clipped.div(clipped.sum(axis=1), axis=0)
-        clipped = clipped.clip(lower=PROBABILITY_CLIP_FLOOR)
-        clipped = clipped.div(clipped.sum(axis=1), axis=0)
-    return clipped
+    """Project each row onto the probability simplex inside the clip bounds."""
+    lower, upper = clip_bounds
+    if propensity.shape[1] < 2:
+        return propensity.clip(lower=lower, upper=upper)
+    n_arms = propensity.shape[1]
+    if n_arms * lower > 1.0:
+        raise ValueError(
+            f"Propensity clip floor {lower} is infeasible for {n_arms} arms."
+        )
+    if n_arms * upper < 1.0:
+        raise ValueError(
+            f"Propensity clip ceiling {upper} is infeasible for {n_arms} arms."
+        )
+    projected = project_capped_simplex(
+        values=propensity.to_numpy(dtype=float),
+        lower=lower,
+        upper=upper,
+    )
+    return pd.DataFrame(projected, index=propensity.index, columns=propensity.columns)
+
+
+def project_capped_simplex(values: np.ndarray, lower: float, upper: float) -> np.ndarray:
+    projected = np.clip(np.array(values, dtype=float, copy=True), lower, upper)
+    for iteration in range(SIMPLEX_PROJECTION_ITERATIONS):
+        totals = projected.sum(axis=1)
+        if np.all(np.abs(totals - 1.0) <= SIMPLEX_SUM_TOLERANCE):
+            return projected
+        excess = totals - 1.0
+        room_down = np.maximum(projected - lower, 0.0)
+        room_up = np.maximum(upper - projected, 0.0)
+        room = np.where(excess[:, None] > 0.0, room_down, room_up)
+        room_sum = room.sum(axis=1)
+        movable = room_sum > SIMPLEX_SUM_TOLERANCE
+        share = np.zeros_like(projected)
+        share[movable] = room[movable] / room_sum[movable, None]
+        projected = projected - excess[:, None] * share
+        projected = np.clip(projected, lower, upper)
+    return projected
 
 
 def target_potential_outcomes(
@@ -268,8 +352,7 @@ def target_potential_outcomes(
     if scale == 0.0:
         return potential_outcomes.copy()
     outcome_scaled = (outcome_values - scale_min) / scale
-    initial = potential_outcomes.clip(lower=LOGIT_CLIP, upper=1.0 - LOGIT_CLIP)
-    initial_scaled = (initial - scale_min) / scale
+    initial_scaled = (potential_outcomes - scale_min) / scale
     initial_scaled = initial_scaled.clip(lower=LOGIT_CLIP, upper=1.0 - LOGIT_CLIP)
     observed_q = factual_predictions(initial_scaled, treatment)
     offset = logit_transform(observed_q)
@@ -352,8 +435,9 @@ def cross_fit_propensity_map(
     n_folds: int,
     random_state: int,
     clip_bounds: tuple[float, float],
+    groups: pd.Series | np.ndarray | None = None,
 ) -> dict[JsonValue, np.ndarray]:
-    """Out-of-fold P(T=a | X) for each non-control arm, clipped to (0, 1)."""
+    """Out-of-fold P(T=a | T in {a, control}, X) for each non-control arm."""
     _, propensity = cross_fit_nuisances(
         covariates=covariates,
         treatment=treatment,
@@ -365,7 +449,34 @@ def cross_fit_propensity_map(
         n_folds=n_folds,
         random_state=random_state,
         clip_bounds=clip_bounds,
+        groups=groups,
     )
     clipped = clip_propensity(propensity, clip_bounds)
-    arms = [arm for arm in clipped.columns if arm != control_value]
-    return {arm: clipped[arm].to_numpy(dtype=float) for arm in arms}
+    return one_versus_control_propensity(propensity=clipped, control_value=control_value)
+
+
+def dataset_groups(dataset: CausalDataset) -> pd.Series | None:
+    if dataset.group_id is None:
+        return None
+    return dataset.df[dataset.group_id]
+
+
+def one_versus_control_propensity(
+    propensity: pd.DataFrame,
+    control_value: JsonValue,
+) -> dict[JsonValue, np.ndarray]:
+    """Conditional arm probability on the arm-versus-control subsample."""
+    control = propensity[control_value].to_numpy(dtype=float)
+    conditional: dict[JsonValue, np.ndarray] = {}
+    for arm in propensity.columns:
+        if arm == control_value:
+            continue
+        arm_probability = propensity[arm].to_numpy(dtype=float)
+        denominator = arm_probability + control
+        conditional[arm] = np.divide(
+            arm_probability,
+            denominator,
+            out=np.full(len(arm_probability), PROBABILITY_CLIP_FLOOR),
+            where=denominator > 0.0,
+        )
+    return conditional

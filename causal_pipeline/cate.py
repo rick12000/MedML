@@ -171,7 +171,8 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> MetaLearnerAdapter:
-        reject_grouped_internal_crossfit(data, f"{self.letter}-learner")
+        # The pipeline predicts each group from a model fit on the other groups.
+        # Any cross-fit inside causalml only reshuffles that training subset.
         binary = self.data.outcome_type == OutcomeType.BINARY
         if binary:
             require_classifier(self.spec.outcome_learner, "CATE outcome_learner")

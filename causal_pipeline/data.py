@@ -151,6 +151,18 @@ def arm_label(value: JsonValue) -> str:
     return str(value).replace(".", "p")
 
 
+def minimum_groups_for_crossfit(config: PipelineConfig) -> int:
+    """Groups required on each side so every configured cross-fit can keep groups intact."""
+    fold_counts = [config.cate_crossfit_folds]
+    if config.cate_evaluation is not None:
+        fold_counts.append(config.cate_evaluation.dr_crossfit_folds)
+    for spec in config.ate_estimators or []:
+        fold_count = getattr(spec, "n_folds", None)
+        if isinstance(fold_count, int):
+            fold_counts.append(fold_count)
+    return max(fold_counts)
+
+
 class DataSplitter:
     """Keep the full sample, or hold out a test set when policy evaluation is on."""
 
@@ -169,6 +181,7 @@ class DataSplitter:
             treatment_values=dataset.treatment_values,
             test_fraction=config.split.test_fraction,
             random_state=config.split.random_state,
+            minimum_groups=minimum_groups_for_crossfit(config),
         )
         return DataPartitions(
             estimation=CausalDataset(data=dataset.data, df=estimation_frame),
@@ -183,6 +196,7 @@ class DataSplitter:
         treatment_values: list[JsonValue],
         test_fraction: float,
         random_state: int,
+        minimum_groups: int,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         if group_id is not None:
             return self.split_grouped(
@@ -192,6 +206,7 @@ class DataSplitter:
                 treatment_values=treatment_values,
                 first_fraction=1.0 - test_fraction,
                 random_state=random_state,
+                minimum_groups=minimum_groups,
             )
         estimation, test = train_test_split(
             df,
@@ -212,8 +227,15 @@ class DataSplitter:
         treatment_values: list[JsonValue],
         first_fraction: float,
         random_state: int,
+        minimum_groups: int,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         groups = df[group_id]
+        n_groups = int(groups.nunique())
+        if n_groups < 2 * minimum_groups:
+            raise ValueError(
+                f"Cross-fitting needs at least {minimum_groups} groups on each side of the holdout, "
+                f"but the cohort has {n_groups} groups."
+            )
         for attempt in range(GROUP_HOLDOUT_ATTEMPTS):
             splitter = GroupShuffleSplit(
                 n_splits=1,
@@ -225,11 +247,18 @@ class DataSplitter:
             test = df.iloc[test_idx].copy()
             estimation_complete = declared_arms_present(estimation, treatment_column, treatment_values)
             test_complete = declared_arms_present(test, treatment_column, treatment_values)
-            if estimation_complete and test_complete:
+            estimation_groups = int(estimation[group_id].nunique())
+            test_groups = int(test[group_id].nunique())
+            if (
+                estimation_complete
+                and test_complete
+                and estimation_groups >= minimum_groups
+                and test_groups >= minimum_groups
+            ):
                 return estimation, test
         raise ValueError(
-            "Grouped holdout did not place every treatment arm on both sides "
-            f"in {GROUP_HOLDOUT_ATTEMPTS} attempts."
+            "Grouped holdout did not leave every treatment arm and at least "
+            f"{minimum_groups} groups on both sides in {GROUP_HOLDOUT_ATTEMPTS} attempts."
         )
 
 

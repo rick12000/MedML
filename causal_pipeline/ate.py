@@ -7,10 +7,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import numpy as np
+from joblib import Parallel, delayed
 import pandas as pd
 from causallib.estimation import Standardization
 from doubleml import DoubleMLData
-from doubleml.irm import DoubleMLAPOS, DoubleMLIRM
+from doubleml.irm import DoubleMLAPO, DoubleMLAPOS, DoubleMLIRM
 from doubleml.plm import DoubleMLPLR
 from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
@@ -429,6 +430,90 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         )
 
 
+class ClusterCapableDoubleMLAPOS(DoubleMLAPOS):
+    """DoubleMLAPOS with the cluster sample splitting the other DoubleML models use.
+
+    The installed DoubleMLAPOS calls the shared cluster splitter but never sets
+    ``_n_folds_per_cluster``, and it copies only the row partition onto each
+    potential-outcome model. Clustered data then cannot be fit. This subclass
+    records the same fold counts as ``DoubleML`` and passes the cluster
+    partition through.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        draw_sample_splitting = bool(kwargs.pop("draw_sample_splitting", True))
+        super().__init__(*args, draw_sample_splitting=False, **kwargs)
+        if self._is_cluster_data:
+            self._n_folds_per_cluster = self._n_folds
+            self._n_folds = self._n_folds ** self._dml_data.n_cluster_vars
+        if draw_sample_splitting:
+            self.draw_sample_splitting()
+            self._initialize_dml_model()
+
+    def _initialize_models(self) -> list[DoubleMLAPO]:
+        if not self._is_cluster_data:
+            return super()._initialize_models()
+        modellist: list[DoubleMLAPO] = []
+        model_arguments = {
+            "obj_dml_data": self._dml_data,
+            "ml_g": self._learner["ml_g"],
+            "ml_m": self._learner["ml_m"],
+            "score": self.score,
+            "n_folds": self.n_folds,
+            "n_rep": self.n_rep,
+            "weights": self.weights,
+            "ps_processor_config": self.ps_processor_config,
+            "normalize_ipw": self.normalize_ipw,
+            "draw_sample_splitting": False,
+        }
+        for level_index in range(self.n_treatment_levels):
+            model = DoubleMLAPO(treatment_level=self._treatment_levels[level_index], **model_arguments)
+            model.set_sample_splitting(
+                all_smpls=self.smpls,
+                all_smpls_cluster=self._smpls_cluster,
+            )
+            modellist.append(model)
+        return modellist
+
+    def fit(
+        self,
+        n_jobs_models: int | None = None,
+        n_jobs_cv: int | None = None,
+        store_predictions: bool = True,
+        store_models: bool = False,
+        external_predictions: dict | None = None,
+    ) -> ClusterCapableDoubleMLAPOS:
+        if not self._is_cluster_data:
+            return super().fit(
+                n_jobs_models=n_jobs_models,
+                n_jobs_cv=n_jobs_cv,
+                store_predictions=store_predictions,
+                store_models=store_models,
+                external_predictions=external_predictions,
+            )
+        # DoubleMLAPOS.fit concatenates one framework per treatment level.
+        # That concatenation is not implemented for clustered scores, so the
+        # level-specific models are kept and contrasts are formed later.
+        if external_predictions is not None:
+            self._check_external_predictions(external_predictions)
+            external_by_level = self._rename_external_predictions(external_predictions)
+        else:
+            external_by_level = None
+        fitted_models = Parallel(n_jobs=n_jobs_models, verbose=0, pre_dispatch="2*n_jobs")(
+            delayed(self._fit_model)(
+                level_index,
+                n_jobs_cv,
+                store_predictions,
+                store_models,
+                external_by_level,
+            )
+            for level_index in range(self.n_treatment_levels)
+        )
+        for level_index, fitted in enumerate(fitted_models):
+            self._modellist[level_index] = fitted
+        return self
+
+
 class DoubleMLAPOSAdapter(BaseATEEstimator):
     def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
@@ -447,7 +532,7 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         require_classifier(ml_m, "DoubleML APOS propensity_learner")
         if data.outcome_type == OutcomeType.BINARY:
             require_classifier(ml_g, "DoubleML APOS outcome_learner")
-        self.model = DoubleMLAPOS(
+        self.model = ClusterCapableDoubleMLAPOS(
             dml_data,
             ml_g=ml_g,
             ml_m=ml_m,
@@ -461,21 +546,54 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
     def estimate(self) -> pd.DataFrame:
         if self.model is None:
             raise RuntimeError("Estimator is not fitted.")
-        framework = self.model.causal_contrast(reference_levels=self.data.control_value)
-        intervals = framework.confint(level=self.spec.confidence_level)
-        names = contrast_columns(self.data.control_value, self.data.treatment_values)
-        rows = []
-        for index, name in enumerate(names):
-            rows.append(
-                {
-                    "contrast": name,
-                    "estimand": self.spec.estimand,
-                    "estimate": float(framework.thetas[index]),
-                    "ci_lower": float(intervals.iloc[index, 0]),
-                    "ci_upper": float(intervals.iloc[index, 1]),
-                }
-            )
-        return pd.DataFrame(rows)
+        return apos_contrast_table(
+            model=self.model,
+            control_value=self.data.control_value,
+            treatment_values=self.data.treatment_values,
+            level=self.spec.confidence_level,
+            estimand=self.spec.estimand,
+        )
+
+
+def apos_contrast_table(
+    model: ClusterCapableDoubleMLAPOS,
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+    level: float,
+    estimand: str,
+) -> pd.DataFrame:
+    """Difference of potential outcomes, one contrast at a time.
+
+    ``DoubleMLAPOS.causal_contrast`` concatenates those differences, and the
+    installed DoubleML build cannot concatenate clustered frameworks. Each
+    contrast is already a single clustered framework, so the interval comes
+    from that difference directly.
+    """
+    levels = list(model.treatment_levels)
+    reference = model.modellist[treatment_level_index(levels, control_value)].framework
+    names = contrast_columns(control_value, treatment_values)
+    arms = [value for value in treatment_values if value != control_value]
+    rows = []
+    for name, arm in zip(names, arms, strict=True):
+        contrast = model.modellist[treatment_level_index(levels, arm)].framework - reference
+        intervals = contrast.confint(level=level)
+        rows.append(
+            {
+                "contrast": name,
+                "estimand": estimand,
+                "estimate": float(np.ravel(contrast.thetas)[0]),
+                "ci_lower": float(intervals.iloc[0, 0]),
+                "ci_upper": float(intervals.iloc[0, 1]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def treatment_level_index(levels: list[object], arm: JsonValue) -> int:
+    for index, level in enumerate(levels):
+        if level == arm:
+            return index
+    raise KeyError(arm)
 
 
 def binary_treatment_indicator(treatment: pd.Series, control_value: JsonValue) -> pd.Series:

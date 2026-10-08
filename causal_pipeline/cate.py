@@ -33,12 +33,12 @@ from causal_pipeline.config import (
     MetaCATEEstimatorSpec,
     OutcomeType,
     TARNetCATEEstimatorSpec,
-    clone_estimator,
     require_classifier,
 )
 from causal_pipeline.crossfit import cross_fit_propensity_map, dataset_groups, learner_random_state
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
+from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
 
 META_LEARNER_CLASSES = {
     ("s", False): BaseSRegressor,
@@ -133,28 +133,28 @@ def build_meta_learner(
 ) -> BaseEstimator:
     model_cls = META_LEARNER_CLASSES[(letter, binary_outcome)]
     if letter in {"s", "t"}:
-        return model_cls(learner=clone_estimator(outcome_learner), control_name=control_name)
+        return model_cls(learner=clone_scaled_estimator(outcome_learner), control_name=control_name)
     if effect_learner is None:
         raise ValueError(f"{letter}-learner requires effect_learner.")
     if letter == "x":
         return model_cls(
-            outcome_learner=clone_estimator(outcome_learner),
-            effect_learner=clone_estimator(effect_learner),
+            outcome_learner=clone_scaled_estimator(outcome_learner),
+            effect_learner=clone_scaled_estimator(effect_learner),
             control_name=control_name,
         )
     if letter == "r":
         if propensity_learner is None:
             raise ValueError("R-learner requires propensity_learner.")
         return model_cls(
-            outcome_learner=clone_estimator(outcome_learner),
-            effect_learner=clone_estimator(effect_learner),
-            propensity_learner=clone_estimator(propensity_learner),
+            outcome_learner=clone_scaled_estimator(outcome_learner),
+            effect_learner=clone_scaled_estimator(effect_learner),
+            propensity_learner=clone_scaled_estimator(propensity_learner),
             control_name=control_name,
         )
     return model_cls(
-        control_outcome_learner=clone_estimator(outcome_learner),
-        treatment_outcome_learner=clone_estimator(outcome_learner),
-        treatment_effect_learner=clone_estimator(effect_learner),
+        control_outcome_learner=clone_scaled_estimator(outcome_learner),
+        treatment_outcome_learner=clone_scaled_estimator(outcome_learner),
+        treatment_effect_learner=clone_scaled_estimator(effect_learner),
         control_name=control_name,
     )
 
@@ -226,7 +226,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         """X-learner prediction reweights by e(X). Keep that model on the configured learner."""
         if self.spec.propensity_learner is None or self.model is None:
             return
-        fitted = clone_estimator(self.spec.propensity_learner)
+        fitted = clone_scaled_estimator(self.spec.propensity_learner)
         fitted.fit(features, treatment)
         groups = list(getattr(self.model, "t_groups", []))
         self.model.propensity_model = {
@@ -287,8 +287,8 @@ class CausalForestAdapter(BaseCATEEstimator):
             require_classifier(self.spec.outcome_learner, "Causal forest outcome_learner")
         require_classifier(self.spec.propensity_learner, "Causal forest propensity_learner")
         self.model = CausalForestDML(
-            model_y=clone_estimator(self.spec.outcome_learner),
-            model_t=clone_estimator(self.spec.propensity_learner),
+            model_y=clone_scaled_estimator(self.spec.outcome_learner),
+            model_t=clone_scaled_estimator(self.spec.propensity_learner),
             discrete_treatment=True,
             discrete_outcome=binary_outcome,
         )
@@ -351,6 +351,7 @@ class TARNetAdapter(BaseCATEEstimator):
         self.spec = spec
         self.data = data
         self.model = None
+        self.scaler = None
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -361,14 +362,14 @@ class TARNetAdapter(BaseCATEEstimator):
         from catenets.models.jax import TARNet
 
         self.model = TARNet()
-        features = data.X_adjustment.to_numpy()
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
         self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
-        if self.model is None:
+        if self.model is None or self.scaler is None:
             raise RuntimeError("Estimator is not fitted.")
-        effects = self.model.predict(data.X_adjustment.to_numpy()).flatten()
+        effects = self.model.predict(transform_covariates(self.scaler, data.X_adjustment)).flatten()
         return pd.DataFrame({self.contrast_names[0]: effects})
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
@@ -380,6 +381,7 @@ class CFRNetAdapter(BaseCATEEstimator):
         self.spec = spec
         self.data = data
         self.model = None
+        self.scaler = None
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -390,14 +392,14 @@ class CFRNetAdapter(BaseCATEEstimator):
         from catenets.models.jax import CFRNet
 
         self.model = CFRNet(penalty_disc=self.spec.penalty_disc)
-        features = data.X_adjustment.to_numpy()
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
         self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
-        if self.model is None:
+        if self.model is None or self.scaler is None:
             raise RuntimeError("Estimator is not fitted.")
-        effects = self.model.predict(data.X_adjustment.to_numpy()).flatten()
+        effects = self.model.predict(transform_covariates(self.scaler, data.X_adjustment)).flatten()
         return pd.DataFrame({self.contrast_names[0]: effects})
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
@@ -409,6 +411,7 @@ class DragonNetAdapter(BaseCATEEstimator):
         self.spec = spec
         self.data = data
         self.model = None
+        self.scaler = None
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -419,17 +422,18 @@ class DragonNetAdapter(BaseCATEEstimator):
         from causalml.inference.jax import DragonNet
 
         self.model = DragonNet()
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
         self.model.fit(
-            data.X_adjustment.to_numpy(),
+            features,
             binary_library_treatment(data),
             data.outcome_series.to_numpy(),
         )
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
-        if self.model is None:
+        if self.model is None or self.scaler is None:
             raise RuntimeError("Estimator is not fitted.")
-        effects = self.model.predict_tau(data.X_adjustment.to_numpy()).flatten()
+        effects = self.model.predict_tau(transform_covariates(self.scaler, data.X_adjustment)).flatten()
         return pd.DataFrame({self.contrast_names[0]: effects})
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:

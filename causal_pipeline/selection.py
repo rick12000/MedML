@@ -32,7 +32,8 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
 
-from causal_pipeline.config import JsonValue, clone_estimator, predict_outcome_mean, require_classifier
+from causal_pipeline.config import JsonValue, predict_outcome_mean, require_classifier
+from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 from causal_pipeline.utils import save_figure
@@ -157,7 +158,7 @@ def transport_included_effects(
         arm_mask = treatment.to_numpy() == arm
         if int(arm_mask.sum()) == 0:
             raise ValueError(f"No included patients received treatment {arm}.")
-        outcome_model = clone_estimator(outcome_learner)
+        outcome_model = clone_scaled_estimator(outcome_learner)
         outcome_model.fit(included.iloc[np.flatnonzero(arm_mask)].copy(), outcome[arm_mask])
         mu_excluded = predict_outcome_mean(outcome_model, excluded)
         mu_included = predict_outcome_mean(outcome_model, included)
@@ -197,7 +198,7 @@ def fit_inclusion_probability(
             np.zeros(len(excluded), dtype=int),
         ]
     )
-    model = clone_estimator(sampling_learner)
+    model = clone_scaled_estimator(sampling_learner)
     model.fit(stacked, labels)
     probabilities = pd.DataFrame(
         model.predict_proba(included),
@@ -211,7 +212,7 @@ def fit_propensity(
     treatment: pd.Series,
     propensity_learner: BaseEstimator,
 ) -> pd.DataFrame:
-    model = clone_estimator(propensity_learner)
+    model = clone_scaled_estimator(propensity_learner)
     model.fit(included, treatment)
     return pd.DataFrame(
         model.predict_proba(included),

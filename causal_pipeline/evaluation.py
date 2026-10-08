@@ -15,7 +15,8 @@ from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.stats import t as student_t
 
-from causal_pipeline.config import CATEEvaluationConfig, clone_estimator, predict_outcome_mean
+from causal_pipeline.config import CATEEvaluationConfig, predict_outcome_mean
+from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
@@ -99,14 +100,14 @@ class CATEEvaluator:
             test_covariates = covariates.iloc[test_idx].copy()
             train_outcome = outcome_values[train_idx]
             train_treatment = treatment.iloc[train_idx]
-            propensity_learner = clone_estimator(self.evaluation.propensity_learner)
+            propensity_learner = clone_scaled_estimator(self.evaluation.propensity_learner)
             propensity_learner.fit(train_covariates, train_treatment)
             propensity = pd.DataFrame(
                 propensity_learner.predict_proba(test_covariates),
                 columns=list(propensity_learner.classes_),
             )
             for arm in levels:
-                outcome_learner = clone_estimator(self.evaluation.outcome_learner)
+                outcome_learner = clone_scaled_estimator(self.evaluation.outcome_learner)
                 arm_mask = train_treatment.to_numpy() == arm
                 outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
                 outcome_mean = predict_outcome_mean(outcome_learner, test_covariates)

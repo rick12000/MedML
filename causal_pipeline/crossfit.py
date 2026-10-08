@@ -12,7 +12,8 @@ from scipy import stats
 from sklearn.base import BaseEstimator
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
-from causal_pipeline.config import JsonValue, clone_estimator
+from causal_pipeline.config import JsonValue
+from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import CausalDataset
 
 PROBABILITY_CLIP_FLOOR = 1e-6
@@ -188,7 +189,7 @@ def fold_propensity(
     clip_bounds: tuple[float, float],
 ) -> pd.DataFrame:
     model = IPW(
-        learner=clone_estimator(propensity_learner),
+        learner=clone_scaled_estimator(propensity_learner),
         clip_min=clip_bounds[0],
         clip_max=clip_bounds[1],
     )
@@ -209,7 +210,7 @@ def fold_potential_outcomes(
     binary_outcome: bool,
 ) -> pd.DataFrame:
     model = Standardization(
-        clone_estimator(outcome_learner),
+        clone_scaled_estimator(outcome_learner),
         encode_treatment=True,
         predict_proba=binary_outcome,
     )

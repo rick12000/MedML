@@ -26,7 +26,6 @@ from causal_pipeline.config import (
     JsonValue,
     OutcomeType,
     SensitivityConfig,
-    clone_estimator,
     require_classifier,
 )
 from causal_pipeline.crossfit import (
@@ -42,6 +41,7 @@ from causal_pipeline.crossfit import (
     target_potential_outcomes,
 )
 from causal_pipeline.data import CausalDataset, contrast_columns
+from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_html
 
 logger = logging.getLogger(__name__)
@@ -356,8 +356,8 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_g = clone_estimator(self.spec.outcome_learner)
-        ml_m = clone_estimator(self.spec.propensity_learner)
+        ml_g = clone_scaled_estimator(self.spec.outcome_learner)
+        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
         require_classifier(ml_m, "DoubleML IRM propensity_learner")
         if data.outcome_type == OutcomeType.BINARY:
             require_classifier(ml_g, "DoubleML IRM outcome_learner")
@@ -401,8 +401,8 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_l = clone_estimator(self.spec.outcome_learner)
-        ml_m = clone_estimator(self.spec.propensity_learner)
+        ml_l = clone_scaled_estimator(self.spec.outcome_learner)
+        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
         require_classifier(ml_m, "DoubleML PLR propensity_learner")
         self.model = DoubleMLPLR(
             dml_data,
@@ -527,8 +527,8 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_g = clone_estimator(self.spec.outcome_learner)
-        ml_m = clone_estimator(self.spec.propensity_learner)
+        ml_g = clone_scaled_estimator(self.spec.outcome_learner)
+        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
         require_classifier(ml_m, "DoubleML APOS propensity_learner")
         if data.outcome_type == OutcomeType.BINARY:
             require_classifier(ml_g, "DoubleML APOS outcome_learner")

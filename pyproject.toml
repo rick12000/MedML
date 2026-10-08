@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "causal-pipeline"
+name = "medml"
 version = "0.1.0"
 description = "Modular observational causal inference pipeline"
 readme = "README.md"

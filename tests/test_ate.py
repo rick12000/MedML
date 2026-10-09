@@ -22,10 +22,9 @@ from causal_pipeline.config import (
     DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
     OutcomeType,
-    PipelineConfig,
     TreatmentMode,
 )
-from causal_pipeline.data import CausalDataset, DataSplitter
+from causal_pipeline.data import CausalDataset
 
 
 def test_doubleml_dataframe_aligns_non_contiguous_indexes() -> None:
@@ -110,52 +109,56 @@ def test_doubleml_irm_rejects_multi_arm_treatment(
         estimator.fit(data=dataset)
 
 
-def test_ipw_estimate_is_finite_after_split(
-    binary_data_config: DataConfig,
-    logistic_learner: BaseEstimator,
-    df_synthetic_binary: pd.DataFrame,
-    pipeline_config_no_policy: PipelineConfig,
-) -> None:
-    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
-    partitions = DataSplitter().split(dataset=dataset, config=pipeline_config_no_policy)
-    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner)
-    estimator = initialize_ate_estimator(spec=spec, data=partitions.estimation)
-    estimator.fit(data=partitions.estimation)
-    table = estimator.estimate()
-    assert table.shape[0] == 1
-    assert list(table.columns) == [
-        "contrast",
-        "estimand",
-        "estimate",
-        "ci_lower",
-        "ci_upper",
-        "clip_lower",
-        "clip_upper",
-        "variance_assumption",
-    ]
-    assert np.isfinite(table["estimate"].iloc[0])
-    assert table["ci_lower"].iloc[0] <= table["estimate"].iloc[0] <= table["ci_upper"].iloc[0]
+ATE_RECOVERY_TOLERANCE = 0.05
+RECOVERY_FOLDS = 5
 
 
-def test_aipw_estimate_is_finite_on_binary_outcome(
-    binary_data_config: DataConfig,
+@pytest.mark.parametrize("architecture", ["linear", "forest"])
+@pytest.mark.parametrize("kind", list(ATEKind))
+def test_ate_recovers_a_known_constant_effect(
+    kind: ATEKind,
+    architecture: str,
+    recovery_data_config: DataConfig,
+    constant_effect_cohort: tuple[pd.DataFrame, float],
+    linear_learner: BaseEstimator,
     logistic_learner: BaseEstimator,
-    forest_classifier: BaseEstimator,
-    df_synthetic_binary: pd.DataFrame,
+    recovery_regressor: BaseEstimator,
+    recovery_classifier: BaseEstimator,
 ) -> None:
-    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
-    spec = DoublyRobustATEEstimatorSpec(
-        kind=ATEKind.AIPW,
-        outcome_learner=forest_classifier,
-        propensity_learner=logistic_learner,
-    )
+    frame, truth = constant_effect_cohort
+    dataset = CausalDataset(data=recovery_data_config, df=frame)
+    outcome_learner = linear_learner if architecture == "linear" else recovery_regressor
+    propensity_learner = logistic_learner if architecture == "linear" else recovery_classifier
+    if kind == ATEKind.IPW:
+        spec = IPWATEEstimatorSpec(
+            kind=kind,
+            propensity_learner=propensity_learner,
+            n_folds=RECOVERY_FOLDS,
+        )
+    elif kind in {ATEKind.AIPW, ATEKind.TMLE}:
+        spec = DoublyRobustATEEstimatorSpec(
+            kind=kind,
+            outcome_learner=outcome_learner,
+            propensity_learner=propensity_learner,
+            n_folds=RECOVERY_FOLDS,
+        )
+    else:
+        spec = DoubleMLATEEstimatorSpec(
+            kind=kind,
+            outcome_learner=outcome_learner,
+            propensity_learner=propensity_learner,
+            n_folds=RECOVERY_FOLDS,
+        )
     estimator = initialize_ate_estimator(spec=spec, data=dataset)
+    # DoubleML draws RepeatedKFold splits from NumPy's global RNG.
+    np.random.seed(0)
     estimator.fit(data=dataset)
     table = estimator.estimate()
+    estimate = float(table["estimate"].iloc[0])
     assert table.shape[0] == 1
-    assert np.isfinite(table["estimate"].iloc[0])
-    assert estimator.outcome_predictions is not None
-    assert estimator.outcome_predictions.shape == (len(df_synthetic_binary),)
+    assert np.isfinite(estimate)
+    assert table["ci_lower"].iloc[0] <= estimate <= table["ci_upper"].iloc[0]
+    assert abs(estimate - truth) < ATE_RECOVERY_TOLERANCE
 
 
 @pytest.mark.parametrize("index_key", [1, "1"])

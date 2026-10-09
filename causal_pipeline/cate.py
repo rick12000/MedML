@@ -138,8 +138,10 @@ def build_meta_learner(
         raise ValueError(f"{letter}-learner requires effect_learner.")
     if letter == "x":
         return model_cls(
-            outcome_learner=clone_scaled_estimator(outcome_learner),
-            effect_learner=clone_scaled_estimator(effect_learner),
+            control_outcome_learner=clone_scaled_estimator(outcome_learner),
+            treatment_outcome_learner=clone_scaled_estimator(outcome_learner),
+            control_effect_learner=clone_scaled_estimator(effect_learner),
+            treatment_effect_learner=clone_scaled_estimator(effect_learner),
             control_name=control_name,
         )
     if letter == "r":

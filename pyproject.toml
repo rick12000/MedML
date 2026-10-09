@@ -32,7 +32,7 @@ include = ["causal_pipeline*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "scripts"]
+pythonpath = ["."]
 markers = [
-    "integration: end-to-end pipeline tests that write under cache/",
+    "integration: end-to-end pipeline tests",
 ]

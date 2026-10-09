@@ -23,7 +23,6 @@ from causal_pipeline.config import (
     predict_outcome_mean,
     require_classifier,
 )
-from settings import build_pipeline_config
 
 
 def test_pipeline_config_accepts_valid_no_policy_split(
@@ -201,24 +200,3 @@ def test_multi_treatment_config_rejects_two_arms() -> None:
             treatment_values=[0, 1],
         )
 
-
-def test_default_binary_config_uses_classifiers_for_outcome_and_propensity() -> None:
-    config = build_pipeline_config()
-    assert config.data.outcome_type == OutcomeType.BINARY
-    require_classifier(estimator=config.diagnostics.propensity_learner, role="diagnostics")
-    require_classifier(
-        estimator=config.cate_evaluation.propensity_learner,
-        role="evaluation propensity",
-    )
-    require_classifier(
-        estimator=config.cate_evaluation.outcome_learner,
-        role="evaluation outcome",
-    )
-    for spec in config.ate_estimators:
-        require_classifier(estimator=spec.propensity_learner, role=spec.kind.value)
-        if hasattr(spec, "outcome_learner") and spec.kind != ATEKind.DML_PLR:
-            require_classifier(estimator=spec.outcome_learner, role=spec.kind.value)
-    for spec in config.cate_estimators:
-        require_classifier(estimator=spec.outcome_learner, role=spec.kind.value)
-        if spec.kind == CATEKind.CAUSAL_FOREST:
-            require_classifier(estimator=spec.propensity_learner, role=spec.kind.value)

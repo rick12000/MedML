@@ -15,26 +15,18 @@ causal_pipeline/
   policy.py        # Policy trees, virtual twins, MOB (R), test evaluation
   results.py       # ResultStore persistence
   pipeline.py      # CausalPipeline orchestration
-settings.py         # Example run configuration (not part of the package)
-run_analysis.py      # Example entrypoint
-scripts/generate_toy_cohort.py
-tests/
+tests/               # Unit tests
+tests/integration/   # End-to-end pipeline tests
 ```
 
 ## Quick start
 
 ```bash
 pip install -e ".[dev]"
-pytest tests
+pytest
 ```
 
-Place a prepared cohort at `data/analysis.parquet`, then:
-
-```bash
-python run_analysis.py
-```
-
-Outputs are written under `results/` (partitions, diagnostics, ATE/CATE summaries, optional policy artifacts).
+`CausalPipeline` takes a `PipelineConfig` and a cohort dataframe. Unit tests check estimator recovery on simulated data with a known treatment effect. Integration tests run the full pipeline and write artifacts to a temporary directory.
 
 ## Optional dependencies
 

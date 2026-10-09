@@ -7,6 +7,7 @@ from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
+from causal_pipeline.cate import create_cate_estimator
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
@@ -24,6 +25,8 @@ from causal_pipeline.config import (
     SplitConfig,
     TreatmentMode,
 )
+from causal_pipeline.data import CausalDataset
+from causal_pipeline.evaluation import CATEEvaluator
 
 TEST_LOGISTIC_MAX_ITER = 500
 TEST_RANDOM_STATE = 0
@@ -195,6 +198,53 @@ def heterogeneous_effect_cohort() -> tuple[pd.DataFrame, np.ndarray]:
         cohort_frame(covariate_one, covariate_two, treatment, outcome),
         treatment_effect,
     )
+
+
+@pytest.fixture(scope="module")
+def recovered_linear_cate() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """T-learner predictions and doubly robust scores on the linear conditional-effect design."""
+    covariate_one, covariate_two, treatment, generator = draw_confounded_treatment(
+        n_observations=RECOVERY_SAMPLE_SIZE,
+        random_state=RECOVERY_RANDOM_STATE + 1,
+    )
+    treatment_effect = HETEROGENEOUS_EFFECT_INTERCEPT + HETEROGENEOUS_EFFECT_SLOPE * covariate_one
+    outcome = (
+        treatment_effect * treatment
+        + 0.6 * covariate_one
+        + 0.3 * covariate_two
+        + generator.normal(scale=HETEROGENEOUS_EFFECT_NOISE, size=RECOVERY_SAMPLE_SIZE)
+    )
+    frame = cohort_frame(covariate_one, covariate_two, treatment, outcome)
+    data_config = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=["x1", "x2"],
+        effect_modifiers=["x1"],
+        outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.BINARY,
+        control_value=0,
+        treatment_values=[0, 1],
+    )
+    dataset = CausalDataset(data=data_config, df=frame)
+    estimator = create_cate_estimator(
+        spec=MetaCATEEstimatorSpec(
+            kind=CATEKind.T_LEARNER,
+            outcome_learner=LinearRegression(),
+        ),
+        data=dataset,
+    )
+    estimator.fit(data=dataset)
+    predicted = estimator.predict_effects(data=dataset).iloc[:, 0].to_numpy(dtype=float)
+    evaluation = CATEEvaluationConfig(
+        propensity_learner=LogisticRegression(max_iter=TEST_LOGISTIC_MAX_ITER),
+        outcome_learner=LinearRegression(),
+        dr_crossfit_folds=5,
+        calibration_bins=5,
+        random_state=TEST_RANDOM_STATE,
+    )
+    scores = CATEEvaluator(evaluation=evaluation).build_robust_scores(dataset=dataset)
+    proxy = scores.iloc[:, 0].to_numpy(dtype=float)
+    return predicted, proxy, treatment_effect
 
 
 @pytest.fixture

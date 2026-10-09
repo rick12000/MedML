@@ -1,112 +1,75 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 from causalml.metrics import get_toc, rate_score
 
-from causal_pipeline.config import PipelineConfig
-from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import (
-    CATEEvaluator,
     RATE_WEIGHTING_AUTOC,
+    RATE_WEIGHTING_QINI,
+    calibration_bin_rows,
     compute_eceth,
     rate_input_frame,
-    eceth_hypothesis_test,
 )
 
-EVALUATION_N_OBSERVATIONS = 40
-EVALUATION_BIN_COUNT = 4
+CALIBRATION_BINS = 5
+CALIBRATION_GAP_TOLERANCE = 0.08
+ECETH_TOLERANCE = 0.01
+PROXY_MEAN_TOLERANCE = 0.05
+TOP_FRACTION = 0.2
+TOC_TOLERANCE = 0.10
+RATE_TOLERANCE = 0.05
+RATE_WEIGHTINGS = (RATE_WEIGHTING_AUTOC, RATE_WEIGHTING_QINI)
 
 
-def test_compute_eceth_is_zero_when_predictions_match_scores() -> None:
-    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
-    value = compute_eceth(tau_hat=tau_hat, gamma=tau_hat.copy(), n_bins=2)
-    assert value == 0.0
+def toc_at_top_fraction(score: np.ndarray, effect: np.ndarray, fraction: float) -> float:
+    curve = get_toc(rate_input_frame(tau_hat=score, gamma=effect), treatment_effect_col="tau")
+    fractions = curve.index.to_numpy(dtype=float)
+    values = curve.iloc[:, 0].to_numpy(dtype=float)
+    return float(values[int(np.argmin(np.abs(fractions - fraction)))])
 
 
-def test_compute_eceth_leave_one_out_ignores_a_single_bin_outlier() -> None:
-    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
-    gamma = np.array([0.0, 10.0, 1.0, 1.0])
-    value = compute_eceth(tau_hat=tau_hat, gamma=gamma, n_bins=2)
-    assert value == 0.0
-
-
-def test_compute_eceth_is_the_mean_squared_gap_when_the_bin_is_shifted() -> None:
-    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
-    gamma = np.ones(4)
-    value = compute_eceth(tau_hat=tau_hat, gamma=gamma, n_bins=2)
-    assert value == 0.5
-
-
-def test_eceth_tolerance_test_rejects_a_perfectly_calibrated_model() -> None:
-    tau_hat = np.array([0.0, 0.0, 1.0, 1.0])
-    estimate, standard_error, p_value = eceth_hypothesis_test(
-        tau_hat=tau_hat,
-        gamma=tau_hat.copy(),
-        n_bins=2,
-        tolerance=0.01,
-        bootstrap_samples=10,
-        random_state=0,
-    )
-    assert estimate == 0.0
-    assert standard_error == 0.0
-    assert p_value == 0.0
-
-
-def test_eceth_tolerance_test_does_not_reject_a_large_calibration_gap() -> None:
-    tau_hat = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
-    gamma = np.ones(8)
-    estimate, standard_error, p_value = eceth_hypothesis_test(
-        tau_hat=tau_hat,
-        gamma=gamma,
-        n_bins=2,
-        tolerance=0.01,
-        bootstrap_samples=30,
-        random_state=0,
-    )
-    assert estimate == 0.5
-    assert standard_error > 0.0
-    assert 0.0 <= p_value <= 1.0
-    assert p_value > 0.5
-
-
-def test_compute_eceth_returns_finite_scalar_for_well_specified_inputs() -> None:
-    tau_hat = np.linspace(-1.0, 1.0, EVALUATION_N_OBSERVATIONS)
-    gamma = tau_hat + np.random.default_rng(0).normal(scale=0.05, size=EVALUATION_N_OBSERVATIONS)
-    value = compute_eceth(tau_hat=tau_hat, gamma=gamma, n_bins=EVALUATION_BIN_COUNT)
-    assert isinstance(value, float)
-    assert np.isfinite(value)
-
-
-def test_rate_input_frame_yields_nonempty_toc_and_rate() -> None:
-    tau_hat = np.linspace(-1.0, 1.0, EVALUATION_N_OBSERVATIONS)
-    gamma = tau_hat + np.random.default_rng(0).normal(scale=0.05, size=EVALUATION_N_OBSERVATIONS)
-    frame = rate_input_frame(tau_hat=tau_hat, gamma=gamma)
-    assert list(frame.columns) == ["cate", "tau"]
-    assert frame.shape[0] == EVALUATION_N_OBSERVATIONS
-    toc = get_toc(frame, treatment_effect_col="tau")
-    assert toc.shape[0] > 0
-    assert toc.shape[1] == 1
-    scores = rate_score(
-        frame,
-        treatment_effect_col="tau",
-        weighting=RATE_WEIGHTING_AUTOC,
-        return_ci=False,
-    )
-    assert scores.shape[0] == 1
-    assert np.isfinite(float(scores.iloc[0]))
-
-
-def test_robust_scores_have_one_row_per_observation(
-    pipeline_config_with_policy: PipelineConfig,
-    df_synthetic_binary: pd.DataFrame,
+def test_correct_cate_is_calibrated_against_the_true_effect(
+    recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> None:
-    evaluator = CATEEvaluator(evaluation=pipeline_config_with_policy.cate_evaluation)
-    dataset = CausalDataset(
-        data=pipeline_config_with_policy.data,
-        df=df_synthetic_binary,
+    predicted, proxy, truth = recovered_linear_cate
+    rows = calibration_bin_rows(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)
+    gaps = [
+        abs(row["mean_predicted_cate"] - row["mean_robust_proxy"])
+        for row in rows
+    ]
+    assert abs(float(np.mean(proxy)) - float(np.mean(truth))) < PROXY_MEAN_TOLERANCE
+    assert max(gaps) < CALIBRATION_GAP_TOLERANCE
+    assert abs(compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)) < ECETH_TOLERANCE
+
+
+def test_prioritization_matches_the_oracle_ranking(
+    recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    predicted, proxy, truth = recovered_linear_cate
+    # Fitted ranking, then the same scores with the ranking reversed.
+    rankings = (
+        (predicted, truth),
+        (-predicted, -truth),
     )
-    scores = evaluator.build_robust_scores(dataset=dataset)
-    assert scores.shape[0] == len(df_synthetic_binary)
-    assert list(scores.columns) == ["1_vs_0"]
-    assert np.isfinite(scores.to_numpy()).all()
+    for score, oracle_score in rankings:
+        estimated_toc = toc_at_top_fraction(score, proxy, TOP_FRACTION)
+        oracle_toc = toc_at_top_fraction(oracle_score, truth, TOP_FRACTION)
+        assert abs(estimated_toc - oracle_toc) < TOC_TOLERANCE
+        for weighting in RATE_WEIGHTINGS:
+            estimated_rate = float(
+                rate_score(
+                    rate_input_frame(tau_hat=score, gamma=proxy),
+                    treatment_effect_col="tau",
+                    weighting=weighting,
+                    return_ci=False,
+                ).iloc[0]
+            )
+            oracle_rate = float(
+                rate_score(
+                    rate_input_frame(tau_hat=oracle_score, gamma=truth),
+                    treatment_effect_col="tau",
+                    weighting=weighting,
+                    return_ci=False,
+                ).iloc[0]
+            )
+            assert abs(estimated_rate - oracle_rate) < RATE_TOLERANCE

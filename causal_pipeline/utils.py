@@ -8,7 +8,7 @@ from typing import Protocol
 import pandas as pd
 from matplotlib.figure import Figure
 
-FIGURE_DPI = 150
+FIGURE_DPI = 300
 TEXT_ENCODING = "utf-8"
 DATAFRAME_INDEX = False
 
@@ -55,7 +55,13 @@ def write_text(path: str | Path, text: str) -> Path:
 def save_figure(path: str | Path, figure: Figure) -> Path:
     destination = Path(path)
     ensure_directory(destination.parent)
-    figure.savefig(destination, dpi=FIGURE_DPI)
+    figure.savefig(
+        destination,
+        dpi=FIGURE_DPI,
+        bbox_inches="tight",
+        pad_inches=0.04,
+        facecolor="white",
+    )
     return destination
 
 

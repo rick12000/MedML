@@ -5,10 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from causalml.metrics import get_toc, rate_score
@@ -20,12 +16,16 @@ from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
-from causal_pipeline.utils import save_figure, write_dataframe
+from causal_pipeline.figures import (
+    CalibrationSeries,
+    RankingSeries,
+    plot_calibration_curves,
+    plot_ranking_curves,
+)
+from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_FIGURE_SIZE = (5, 5)
-TOC_FIGURE_SIZE = (6, 4)
 RATE_WEIGHTING_AUTOC = "autoc"
 RATE_WEIGHTING_QINI = "qini"
 
@@ -49,6 +49,35 @@ def calibration_bin_rows(
             }
         )
     return rows
+
+
+def ranking_curve(tau_hat: np.ndarray, gamma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """TOC curve. AUTOC and Qini RATE are two integrals of this same curve."""
+    table = get_toc(rate_input_frame(tau_hat, gamma), treatment_effect_col="tau")
+    return (
+        table.index.to_numpy(dtype=float).copy(),
+        table.iloc[:, 0].to_numpy(dtype=float).copy(),
+    )
+
+
+def save_joint_cate_figures(
+    ranking_by_contrast: dict[str, list[RankingSeries]],
+    calibration_by_contrast: dict[str, list[CalibrationSeries]],
+    results_root: Path,
+    held_out: bool,
+) -> None:
+    marker = "test_" if held_out else ""
+    for contrast, ranking in ranking_by_contrast.items():
+        comparison = results_root / "cate" / "comparison" / contrast
+        plot_ranking_curves(
+            series=ranking,
+            save_path=str(comparison / f"{marker}toc.png"),
+        )
+        plot_calibration_curves(
+            series=calibration_by_contrast[contrast],
+            save_path=str(comparison / f"{marker}calibration.png"),
+        )
+        logger.info("Saved joint CATE figures for %s.", contrast)
 
 
 def rate_input_frame(tau_hat: np.ndarray, gamma: np.ndarray) -> pd.DataFrame:
@@ -136,6 +165,8 @@ class CATEEvaluator:
         held_out: bool = False,
     ) -> dict[str, list[ContrastEvaluation]]:
         results: dict[str, list[ContrastEvaluation]] = {}
+        ranking_by_contrast: dict[str, list[RankingSeries]] = {}
+        calibration_by_contrast: dict[str, list[CalibrationSeries]] = {}
         for estimator_id, df_cate_predictions in predictions.items():
             contrast_results = []
             for contrast in df_cate_predictions.columns:
@@ -152,21 +183,14 @@ class CATEEvaluator:
                     random_state=self.evaluation.random_state,
                 )
                 marker = "test_" if held_out else ""
-                calibration_path = f"cate/{estimator_id}/{contrast}/{marker}calibration.png"
-                calibration_file = results_root / calibration_path
-                df_calibration = self.plot_calibration(
+                rows = calibration_bin_rows(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     n_bins=self.evaluation.calibration_bins,
-                    save_path=str(calibration_file),
                 )
-                write_dataframe(calibration_file.with_suffix(".csv"), df_calibration)
-                toc_path = f"cate/{estimator_id}/{contrast}/{marker}toc.png"
-                self.plot_toc(
-                    tau_hat=tau_hat,
-                    gamma=gamma,
-                    save_path=str(results_root / toc_path),
-                )
+                calibration_path = f"cate/{estimator_id}/{contrast}/{marker}calibration.png"
+                calibration_file = results_root / calibration_path
+                toc_fraction, toc_value = ranking_curve(tau_hat=tau_hat, gamma=gamma)
                 rate_autoc, rate_autoc_p = self.rate_with_bootstrap(
                     tau_hat=tau_hat,
                     gamma=gamma,
@@ -177,6 +201,38 @@ class CATEEvaluator:
                     gamma=gamma,
                     weighting=RATE_WEIGHTING_QINI,
                 )
+                ranking = RankingSeries(
+                    estimator_id=estimator_id,
+                    toc_fraction=toc_fraction,
+                    toc_value=toc_value,
+                    autoc=rate_autoc,
+                    autoc_p_value=rate_autoc_p,
+                    qini=rate_qini,
+                    qini_p_value=rate_qini_p,
+                )
+                calibration = CalibrationSeries(
+                    estimator_id=estimator_id,
+                    predicted=np.array(
+                        [row["mean_predicted_cate"] for row in rows],
+                        dtype=float,
+                    ),
+                    observed=np.array(
+                        [row["mean_robust_proxy"] for row in rows],
+                        dtype=float,
+                    ),
+                    eceth=eceth,
+                    eceth_standard_error=eceth_se,
+                    eceth_p_value=eceth_pvalue,
+                )
+                toc_path = f"cate/{estimator_id}/{contrast}/{marker}toc.png"
+                plot_ranking_curves(series=[ranking], save_path=str(results_root / toc_path))
+                plot_calibration_curves(
+                    series=[calibration],
+                    save_path=str(calibration_file),
+                )
+                write_dataframe(calibration_file.with_suffix(".csv"), pd.DataFrame(rows))
+                ranking_by_contrast.setdefault(contrast, []).append(ranking)
+                calibration_by_contrast.setdefault(contrast, []).append(calibration)
                 contrast_results.append(
                     ContrastEvaluation(
                         contrast=contrast,
@@ -193,41 +249,13 @@ class CATEEvaluator:
                     )
                 )
             results[estimator_id] = contrast_results
+        save_joint_cate_figures(
+            ranking_by_contrast=ranking_by_contrast,
+            calibration_by_contrast=calibration_by_contrast,
+            results_root=results_root,
+            held_out=held_out,
+        )
         return results
-
-    def plot_calibration(
-        self,
-        tau_hat: np.ndarray,
-        gamma: np.ndarray,
-        n_bins: int,
-        save_path: str,
-    ) -> pd.DataFrame:
-        rows = calibration_bin_rows(tau_hat=tau_hat, gamma=gamma, n_bins=n_bins)
-        predicted_means = [row["mean_predicted_cate"] for row in rows]
-        proxy_means = [row["mean_robust_proxy"] for row in rows]
-        fig, axis = plt.subplots(figsize=CALIBRATION_FIGURE_SIZE)
-        axis.scatter(predicted_means, proxy_means)
-        limits = [
-            min(predicted_means + proxy_means),
-            max(predicted_means + proxy_means),
-        ]
-        axis.plot(limits, limits, linestyle="--", color="gray")
-        axis.set_xlabel("Mean predicted CATE")
-        axis.set_ylabel("Mean robust proxy")
-        fig.tight_layout()
-        save_figure(save_path, fig)
-        plt.close(fig)
-        return pd.DataFrame(rows)
-
-    def plot_toc(self, tau_hat: np.ndarray, gamma: np.ndarray, save_path: str) -> None:
-        toc = get_toc(rate_input_frame(tau_hat, gamma), treatment_effect_col="tau")
-        fig, axis = plt.subplots(figsize=TOC_FIGURE_SIZE)
-        axis.plot(toc.index.to_numpy(), toc.iloc[:, 0].to_numpy())
-        axis.set_xlabel("Top fraction ranked by CATE")
-        axis.set_ylabel("TOC")
-        fig.tight_layout()
-        save_figure(save_path, fig)
-        plt.close(fig)
 
     def rate_with_bootstrap(
         self,

@@ -8,6 +8,7 @@ from causal_pipeline.evaluation import (
     RATE_WEIGHTING_QINI,
     calibration_bin_rows,
     compute_eceth,
+    ranking_curve,
     rate_input_frame,
 )
 
@@ -40,6 +41,18 @@ def test_correct_cate_is_calibrated_against_the_true_effect(
     assert abs(float(np.mean(proxy)) - float(np.mean(truth))) < PROXY_MEAN_TOLERANCE
     assert max(gaps) < CALIBRATION_GAP_TOLERANCE
     assert abs(compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)) < ECETH_TOLERANCE
+
+
+def test_ranking_curves_span_the_prioritized_fraction() -> None:
+    score = np.linspace(-1.0, 1.0, 40)
+    effect = np.linspace(-0.2, 0.5, 40)
+    fraction, value = ranking_curve(tau_hat=score, gamma=effect)
+    assert fraction.shape == value.shape
+    assert fraction.shape[0] > 1
+    assert np.isfinite(fraction).all()
+    assert np.isfinite(value).all()
+    assert float(np.min(fraction)) >= 0.0
+    assert float(np.max(fraction)) <= 1.0
 
 
 def test_prioritization_matches_the_oracle_ranking(

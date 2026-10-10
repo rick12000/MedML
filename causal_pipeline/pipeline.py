@@ -24,6 +24,7 @@ from causal_pipeline.crossfit import cross_fit_predictions
 from causal_pipeline.data import CausalDataset, DataSplitter
 from causal_pipeline.diagnostics import DiagnosticsRunner
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
+from causal_pipeline.figures import plot_interval_estimates, plot_point_estimates
 from causal_pipeline.policy import PolicyService
 from causal_pipeline.results import ResultStore
 from causal_pipeline.selection import (
@@ -35,6 +36,9 @@ from causal_pipeline.selection import (
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
+
+ATE_INTERVAL_XLABEL = "Average treatment effect"
+CATE_MEAN_XLABEL = "Mean conditional treatment effect"
 
 
 def predict_cate_fold(
@@ -182,6 +186,7 @@ class CausalPipeline:
             cate_summary=cate_summary,
             policy_summary=policy_results,
         )
+        self.write_summary_figures(ate_summary=ate_summary, cate_summary=cate_summary)
         logger.info("Causal pipeline run completed.")
 
     def analysis_frame(self, df_input: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
@@ -401,6 +406,38 @@ class CausalPipeline:
                     }
                 )
                 write_dataframe(contrast_dir / table_name, df_cate_evaluation)
+
+    def write_summary_figures(
+        self,
+        ate_summary: pd.DataFrame,
+        cate_summary: pd.DataFrame,
+    ) -> None:
+        summary_dir = self.results.root / "summary"
+        wrote_figure = False
+        if not ate_summary.empty:
+            wrote_figure = True
+            plot_interval_estimates(
+                estimates=ate_summary,
+                save_path=str(summary_dir / "ate_intervals.png"),
+                estimator_column="estimator",
+                contrast_column="contrast",
+                estimate_column="estimate",
+                lower_column="ci_lower",
+                upper_column="ci_upper",
+                xlabel=ATE_INTERVAL_XLABEL,
+            )
+        if not cate_summary.empty:
+            wrote_figure = True
+            plot_point_estimates(
+                estimates=cate_summary,
+                save_path=str(summary_dir / "cate_mean_effects.png"),
+                estimator_column="estimator",
+                contrast_column="contrast",
+                estimate_column="mean_crossfit_cate",
+                xlabel=CATE_MEAN_XLABEL,
+            )
+        if wrote_figure:
+            logger.info("Saved joint effect figures under %s", summary_dir)
 
     def build_ate_summary(
         self,

@@ -36,12 +36,23 @@ from causal_pipeline.config import JsonValue, predict_outcome_mean, require_clas
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
+from causal_pipeline.figures import (
+    LINE_WIDTH,
+    PANEL_HEIGHT,
+    REFERENCE_COLOR,
+    REFERENCE_LINESTYLE,
+    REFERENCE_LINEWIDTH,
+    SINGLE_COLUMN_WIDTH,
+    place_outside_legend,
+    publication_style,
+    series_style,
+    style_axis,
+)
 from causal_pipeline.utils import save_figure
 
 logger = logging.getLogger(__name__)
 
 TIPPING_GRID_SIZE = 200
-TIPPING_FIGURE_SIZE = (6, 4)
 INCLUDED_LABEL = 1
 
 
@@ -235,12 +246,37 @@ def plot_tipping_point(
         inclusion_fraction=bound.inclusion_fraction,
         excluded_effect=excluded_grid,
     )
-    figure, axis = plt.subplots(figsize=TIPPING_FIGURE_SIZE)
-    axis.plot(excluded_grid, population_effect)
-    axis.axhline(0.0, color="gray", linestyle="--")
-    axis.axvline(bound.tipping_point, color="gray", linestyle=":")
-    axis.set_xlabel("ATE among excluded patients")
-    axis.set_ylabel("Implied population ATE")
-    figure.tight_layout()
-    save_figure(save_path, figure)
-    plt.close(figure)
+    with publication_style():
+        figure, axis = plt.subplots(figsize=(SINGLE_COLUMN_WIDTH, PANEL_HEIGHT))
+        population_style = series_style(0)
+        tipping_style = series_style(1)
+        axis.plot(
+            excluded_grid,
+            population_effect,
+            color=population_style.color,
+            linewidth=LINE_WIDTH,
+            label="Population effect",
+        )
+        axis.axhline(
+            0.0,
+            color=REFERENCE_COLOR,
+            linestyle=REFERENCE_LINESTYLE,
+            linewidth=REFERENCE_LINEWIDTH,
+            label="No effect",
+            zorder=1,
+        )
+        axis.axvline(
+            bound.tipping_point,
+            color=tipping_style.color,
+            linestyle=tipping_style.linestyle,
+            linewidth=REFERENCE_LINEWIDTH,
+            label="Tipping point",
+            zorder=1,
+        )
+        style_axis(axis)
+        axis.set_xlabel("ATE among excluded patients")
+        axis.set_ylabel("Implied population ATE")
+        place_outside_legend(axis)
+        figure.tight_layout()
+        save_figure(save_path, figure)
+        plt.close(figure)

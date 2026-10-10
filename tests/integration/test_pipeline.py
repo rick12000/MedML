@@ -134,13 +134,22 @@ def test_pipeline_recovers_constant_effect(
     assert abs(float(ate_summary["estimate"].iloc[0]) - truth) < INTEGRATION_ATE_TOLERANCE
     assert np.isfinite(cate_summary["mean_crossfit_cate"]).all()
     assert np.isfinite(cate_summary["eceth"]).all()
+    contrast_dir = tmp_path / "cate" / "comparison" / "1_vs_0"
     assert (tmp_path / "diagnostics" / "propensity_overlap.png").is_file()
     assert (tmp_path / "data" / "estimation.parquet").is_file()
+    assert (tmp_path / "summary" / "ate_intervals.png").is_file()
+    assert (tmp_path / "summary" / "cate_mean_effects.png").is_file()
+    assert (contrast_dir / "toc.png").is_file()
+    assert (contrast_dir / "calibration.png").is_file()
+    assert (tmp_path / "cate" / "s_learner" / "1_vs_0" / "toc.png").is_file()
+    assert (tmp_path / "cate" / "s_learner" / "1_vs_0" / "calibration.png").is_file()
     policy_summary = tmp_path / "summary" / "policy_methods.csv"
     if hold_out_for_policy:
         policy_table = read_dataframe(policy_summary)
         assert policy_table.shape[0] >= 1
         assert policy_table["effect_estimate"].notna().all()
+        assert (contrast_dir / "test_toc.png").is_file()
+        assert (contrast_dir / "test_calibration.png").is_file()
     else:
         assert not policy_summary.exists()
 

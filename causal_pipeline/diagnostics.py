@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
 import pandas as pd
 from causallib.utils.stat_utils import calc_weighted_standardized_mean_differences
 from pydantic import BaseModel, ConfigDict
@@ -22,15 +23,47 @@ from causal_pipeline.config import (
 )
 from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
 from causal_pipeline.data import CausalDataset, ipw_weights_multi
+from causal_pipeline.figures import (
+    PANEL_HEIGHT,
+    place_outside_legend,
+    publication_style,
+    series_style,
+    style_axis,
+)
 from causal_pipeline.utils import save_figure
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
 OVERLAP_HISTOGRAM_BINS = 30
-OVERLAP_FIGURE_WIDTH = 8
-OVERLAP_FIGURE_HEIGHT_BINARY = 4
-OVERLAP_FIGURE_HEIGHT_PER_ARM = 3
+OVERLAP_FIGURE_WIDTH = 4.6
+OVERLAP_PANEL_HEIGHT = PANEL_HEIGHT
+HISTOGRAM_ALPHA = 0.38
+HISTOGRAM_EDGE_WIDTH = 0.8
+PROPENSITY_AXIS_MIN = 0.0
+PROPENSITY_AXIS_MAX = 1.0
 
 logger = logging.getLogger(__name__)
+
+
+def draw_propensity_histogram(
+    axis: Axes,
+    probabilities: np.ndarray,
+    treatment: np.ndarray,
+    treatment_values: list[JsonValue],
+) -> None:
+    for arm_index, arm in enumerate(treatment_values):
+        style = series_style(arm_index)
+        mask = treatment == arm
+        axis.hist(
+            probabilities[mask],
+            bins=OVERLAP_HISTOGRAM_BINS,
+            density=True,
+            histtype="stepfilled",
+            color=style.color,
+            alpha=HISTOGRAM_ALPHA,
+            edgecolor=style.color,
+            linewidth=HISTOGRAM_EDGE_WIDTH,
+            label=str(arm),
+        )
 
 
 class DiagnosticResult(BaseModel):
@@ -107,53 +140,49 @@ class DiagnosticsRunner:
         control_value: JsonValue,
         save_path: str | None = None,
     ) -> None:
-        fig, axes = plt.subplots(
-            nrows=1 if treatment_mode == TreatmentMode.BINARY else len(treatment_values),
-            figsize=(
-                OVERLAP_FIGURE_WIDTH,
-                OVERLAP_FIGURE_HEIGHT_BINARY
-                if treatment_mode == TreatmentMode.BINARY
-                else OVERLAP_FIGURE_HEIGHT_PER_ARM * len(treatment_values),
-            ),
-            squeeze=False,
-        )
-
-        if treatment_mode == TreatmentMode.BINARY:
-            axis = axes[0, 0]
-            non_control = next(arm for arm in treatment_values if arm != control_value)
-            propensity = probability_of_arm(probabilities, non_control)
-            for arm in treatment_values:
-                mask = treatment == arm
-                axis.hist(
-                    propensity[mask],
-                    bins=OVERLAP_HISTOGRAM_BINS,
-                    alpha=0.5,
-                    label=str(arm),
-                    density=True,
+        panel_count = 1 if treatment_mode == TreatmentMode.BINARY else len(treatment_values)
+        with publication_style():
+            figure, axes = plt.subplots(
+                nrows=panel_count,
+                figsize=(OVERLAP_FIGURE_WIDTH, OVERLAP_PANEL_HEIGHT * panel_count),
+                squeeze=False,
+            )
+            if treatment_mode == TreatmentMode.BINARY:
+                axis = axes[0, 0]
+                non_control = next(arm for arm in treatment_values if arm != control_value)
+                propensity = probability_of_arm(probabilities, non_control)
+                draw_propensity_histogram(
+                    axis=axis,
+                    probabilities=propensity,
+                    treatment=treatment,
+                    treatment_values=treatment_values,
                 )
-            axis.set_title("Propensity overlap")
-            axis.set_xlabel(f"P(T={non_control} | X)")
-            axis.legend()
-        else:
-            for panel_index, arm in enumerate(treatment_values):
-                axis = axes[panel_index, 0]
-                arm_probs = probability_of_arm(probabilities, arm)
-                for observed_arm in treatment_values:
-                    mask = treatment == observed_arm
-                    axis.hist(
-                        arm_probs[mask],
-                        bins=OVERLAP_HISTOGRAM_BINS,
-                        alpha=0.5,
-                        label=str(observed_arm),
-                        density=True,
+                axis.set_title("Propensity overlap", loc="left", pad=4)
+                axis.set_xlabel(f"P(T={non_control} | X)")
+                axis.set_ylabel("Density")
+                style_axis(axis)
+                place_outside_legend(axis)
+                axis.set_xlim(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX)
+            else:
+                for panel_index, arm in enumerate(treatment_values):
+                    axis = axes[panel_index, 0]
+                    draw_propensity_histogram(
+                        axis=axis,
+                        probabilities=probability_of_arm(probabilities, arm),
+                        treatment=treatment,
+                        treatment_values=treatment_values,
                     )
-                axis.set_title(f"P(T={arm} | X)")
-                axis.legend()
-
-        fig.tight_layout()
-        if save_path is not None:
-            save_figure(save_path, fig)
-        plt.close(fig)
+                    axis.set_title(f"P(T={arm} | X)", loc="left", pad=4)
+                    style_axis(axis)
+                    place_outside_legend(axis)
+                    axis.set_xlim(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX)
+                    if panel_index == len(treatment_values) - 1:
+                        axis.set_xlabel("Probability")
+                    axis.set_ylabel("Density")
+            figure.tight_layout()
+            if save_path is not None:
+                save_figure(save_path, figure)
+            plt.close(figure)
 
     def covariate_balance(
         self,

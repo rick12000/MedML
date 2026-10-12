@@ -41,6 +41,10 @@ from causal_pipeline.crossfit import (
     target_potential_outcomes,
 )
 from causal_pipeline.data import CausalDataset, contrast_columns
+from causal_pipeline.nuisance_metrics import (
+    log_doubleml_apos_nuisances,
+    log_doubleml_irm_plr_nuisances,
+)
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_html
 
@@ -174,6 +178,7 @@ class IPWAdapter(BaseATEEstimator):
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
+            log_scope="ATE/IPW",
         )
         self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
@@ -232,6 +237,7 @@ class AIPWAdapter(BaseATEEstimator):
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
+            log_scope="ATE/AIPW",
         )
         if potential_outcomes is None:
             raise RuntimeError("AIPW cross-fit did not return potential outcomes.")
@@ -298,6 +304,7 @@ class TMLEAdapter(BaseATEEstimator):
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
+            log_scope="ATE/TMLE",
         )
         if initial_outcomes is None:
             raise RuntimeError("TMLE cross-fit did not return potential outcomes.")
@@ -370,6 +377,16 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
             score="ATE",
         )
         self.model.fit()
+        log_doubleml_irm_plr_nuisances(
+            scope="ATE/DML-IRM",
+            treatment=treatment.to_numpy(),
+            outcome=outcome.to_numpy(),
+            predictions=self.model.predictions,
+            outcome_learner=ml_g,
+            propensity_learner=ml_m,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            plr=False,
+        )
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -412,6 +429,16 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
             n_rep=self.spec.n_rep,
         )
         self.model.fit()
+        log_doubleml_irm_plr_nuisances(
+            scope="ATE/DML-PLR",
+            treatment=treatment.to_numpy(),
+            outcome=outcome.to_numpy(),
+            predictions=self.model.predictions,
+            outcome_learner=ml_l,
+            propensity_learner=ml_m,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            plr=True,
+        )
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -541,6 +568,13 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             n_rep=self.spec.n_rep,
         )
         self.model.fit()
+        log_doubleml_apos_nuisances(
+            scope="ATE/DML-APOS",
+            treatment=treatment.to_numpy(),
+            models=self.model._modellist,
+            treatment_levels=self.data.treatment_values,
+            propensity_learner=ml_m,
+        )
         return self
 
     def estimate(self) -> pd.DataFrame:

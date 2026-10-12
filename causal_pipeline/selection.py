@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
 
 from causal_pipeline.config import JsonValue, predict_outcome_mean, require_classifier
+from causal_pipeline.nuisance_metrics import log_in_sample_outcome, log_in_sample_propensity
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
@@ -147,6 +148,7 @@ def transport_included_effects(
     excluded = excluded_covariates.reset_index(drop=True).loc[:, list(included.columns)]
     treatment = included_treatment.reset_index(drop=True)
     outcome = included_outcome.reset_index(drop=True).to_numpy(dtype=float)
+    binary_outcome = len(np.unique(outcome)) == 2 and np.all(np.isin(outcome, [0.0, 1.0]))
     if len(included) != len(treatment) or len(included) != len(outcome):
         raise ValueError("Included covariates, treatment, and outcome must have the same length.")
     clip_min, clip_max = propensity_clip
@@ -171,6 +173,13 @@ def transport_included_effects(
             raise ValueError(f"No included patients received treatment {arm}.")
         outcome_model = clone_scaled_estimator(outcome_learner)
         outcome_model.fit(included.iloc[np.flatnonzero(arm_mask)].copy(), outcome[arm_mask])
+        log_in_sample_outcome(
+            f"selection outcome arm={arm}",
+            outcome_model,
+            included.iloc[np.flatnonzero(arm_mask)].copy(),
+            outcome[arm_mask],
+            binary_outcome,
+        )
         mu_excluded = predict_outcome_mean(outcome_model, excluded)
         mu_included = predict_outcome_mean(outcome_model, included)
         arm_propensity = np.clip(probability_of_arm(propensity, arm), clip_min, clip_max)
@@ -211,6 +220,7 @@ def fit_inclusion_probability(
     )
     model = clone_scaled_estimator(sampling_learner)
     model.fit(stacked, labels)
+    log_in_sample_propensity("selection sampling", model, stacked, labels)
     probabilities = pd.DataFrame(
         model.predict_proba(included),
         columns=list(model.classes_),
@@ -225,6 +235,7 @@ def fit_propensity(
 ) -> pd.DataFrame:
     model = clone_scaled_estimator(propensity_learner)
     model.fit(included, treatment)
+    log_in_sample_propensity("selection", model, included, treatment)
     return pd.DataFrame(
         model.predict_proba(included),
         columns=list(model.classes_),

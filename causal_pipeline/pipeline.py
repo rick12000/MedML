@@ -6,6 +6,7 @@ import logging
 import shutil
 from collections.abc import Callable
 
+import numpy as np
 import pandas as pd
 
 from causal_pipeline.ate import (
@@ -18,6 +19,7 @@ from causal_pipeline.cate import create_cate_estimator, mean_cate_table
 from causal_pipeline.config import (
     CATEEstimatorSpec,
     DEFAULT_PROPENSITY_CLIP,
+    OutcomeType,
     PipelineConfig,
 )
 from causal_pipeline.crossfit import cross_fit_predictions
@@ -25,6 +27,8 @@ from causal_pipeline.data import CausalDataset, DataSplitter
 from causal_pipeline.diagnostics import DiagnosticsRunner
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.figures import plot_interval_estimates, plot_point_estimates
+from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
+from causal_pipeline.nuisance_screen import run_nuisance_screen
 from causal_pipeline.policy import PolicyService
 from causal_pipeline.results import ResultStore
 from causal_pipeline.selection import (
@@ -45,17 +49,51 @@ def predict_cate_fold(
     train: CausalDataset,
     held_out: CausalDataset,
     spec: CATEEstimatorSpec,
+    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
 ) -> pd.DataFrame:
     estimator = create_cate_estimator(spec=spec, data=train)
     estimator.fit(data=train)
+    if outcome_records is not None:
+        predicted = estimator.factual_outcome(held_out)
+        if predicted is not None:
+            outcome_records.append(
+                (
+                    held_out.outcome_series.to_numpy(dtype=float),
+                    np.asarray(predicted, dtype=float),
+                    estimator.logged_outcome_model(),
+                )
+            )
     return estimator.predict_effects(data=held_out)
 
 
-def cate_fold_predictor(spec: CATEEstimatorSpec) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
+def cate_fold_predictor(
+    spec: CATEEstimatorSpec,
+    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
+) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
     def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
-        return predict_cate_fold(train=train, held_out=held_out, spec=spec)
+        return predict_cate_fold(
+            train=train,
+            held_out=held_out,
+            spec=spec,
+            outcome_records=outcome_records,
+        )
 
     return predict_fold
+
+
+def log_pooled_factual_outcome(
+    records: list[tuple[np.ndarray, np.ndarray, object]],
+    role: str,
+    binary_outcome: bool,
+    metric_prefix: str,
+) -> None:
+    if not records:
+        return
+    outcome = np.concatenate([observed for observed, _, _ in records])
+    predicted = np.concatenate([values for _, values, _ in records])
+    metric = outcome_metric_from_predictions(outcome, predicted, binary_outcome)
+    if metric is not None:
+        log_nuisance_metric(role, records[0][2], f"{metric_prefix} {metric.name}", metric.value)
 
 
 class CausalPipeline:
@@ -107,6 +145,12 @@ class CausalPipeline:
         logger.info("Starting causal pipeline run.")
         analysis_frame, excluded_frame = self.analysis_frame(df_input)
         dataset = CausalDataset(data=self.config.data, df=analysis_frame)
+        if self.config.nuisance_screen.enabled:
+            run_nuisance_screen(
+                dataset=dataset,
+                screen=self.config.nuisance_screen,
+                results_root=self.results.root,
+            )
         partitions = self.splitter.split(dataset, self.config)
         self.results.save_partitions(partitions)
 
@@ -345,14 +389,22 @@ class CausalPipeline:
         predictions: dict[str, pd.DataFrame] = {}
         if not self.config.cate_estimators:
             return predictions
+        binary_outcome = estimation.outcome_type == OutcomeType.BINARY
         for spec in self.config.cate_estimators:
             estimator_id = spec.kind.value
             logger.info("Cross-fitting CATE estimator %s.", estimator_id)
+            outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
             df_effects = cross_fit_predictions(
                 dataset=estimation,
                 n_folds=self.config.cate_crossfit_folds,
                 random_state=self.config.split.random_state,
-                predict_fold=cate_fold_predictor(spec),
+                predict_fold=cate_fold_predictor(spec, outcome_records),
+            )
+            log_pooled_factual_outcome(
+                records=outcome_records,
+                role=f"CATE/{estimator_id} outcome",
+                binary_outcome=binary_outcome,
+                metric_prefix="OOF",
             )
             predictions[estimator_id] = df_effects
             write_dataframe(
@@ -370,10 +422,22 @@ class CausalPipeline:
         """Score CATE models fit on the estimation sample against test-set robust scores."""
         if self.evaluator is None or not self.config.cate_estimators:
             return {}
-        predictions = {
-            spec.kind.value: predict_cate_fold(train=estimation, held_out=test, spec=spec)
-            for spec in self.config.cate_estimators
-        }
+        binary_outcome = test.outcome_type == OutcomeType.BINARY
+        predictions = {}
+        for spec in self.config.cate_estimators:
+            outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
+            predictions[spec.kind.value] = predict_cate_fold(
+                train=estimation,
+                held_out=test,
+                spec=spec,
+                outcome_records=outcome_records,
+            )
+            log_pooled_factual_outcome(
+                records=outcome_records,
+                role=f"CATE/{spec.kind.value} outcome",
+                binary_outcome=binary_outcome,
+                metric_prefix="test",
+            )
         evaluation = self.evaluator.evaluate_cate_models(
             predictions=predictions,
             robust_scores=test_scores,

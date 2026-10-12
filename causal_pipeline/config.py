@@ -103,6 +103,8 @@ DEFAULT_NULL_EFFECT: float = 0.0
 DEFAULT_BENCHMARK_MULTIPLIER_MAX: float = 3.0
 DEFAULT_BENCHMARK_GRID_SIZE: PositiveInt = 100
 DEFAULT_LEARNER_RANDOM_STATE: int = 0
+DEFAULT_NUISANCE_SCREEN_TEST_FRACTION: Fraction = 0.2
+DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION: Fraction = 0.25
 CATE_DEPENDENT_POLICY_KINDS = frozenset(
     {PolicyKind.POLICY_TREE, PolicyKind.EXACT_POLICY_TREE, PolicyKind.VIRTUAL_TWINS}
 )
@@ -375,6 +377,15 @@ PolicyMethodSpec = Annotated[
 ]
 
 
+class NuisanceScreenConfig(BaseModel):
+    """One train/validation/test pass for a logistic model and a random forest."""
+
+    enabled: bool = True
+    test_fraction: Fraction = DEFAULT_NUISANCE_SCREEN_TEST_FRACTION
+    validation_fraction: Fraction = DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION
+    random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+
+
 class PipelineConfig(BaseModel):
     data: DataConfig
     split: SplitConfig
@@ -388,6 +399,7 @@ class PipelineConfig(BaseModel):
     policy_bootstrap_samples: PositiveInt = DEFAULT_POLICY_BOOTSTRAP_SAMPLES
     policy_random_state: int = DEFAULT_POLICY_RANDOM_STATE
     results_dir: str = DEFAULT_RESULTS_DIR
+    nuisance_screen: NuisanceScreenConfig = Field(default_factory=NuisanceScreenConfig)
 
     @model_validator(mode="after")
     def validate_pipeline_contract(self) -> PipelineConfig:

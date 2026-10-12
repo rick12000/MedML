@@ -13,8 +13,9 @@ from sklearn.base import BaseEstimator
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
 from causal_pipeline.config import JsonValue
-from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import CausalDataset
+from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
+from causal_pipeline.scaling import clone_scaled_estimator
 
 PROBABILITY_CLIP_FLOOR = 1e-6
 LOGIT_CLIP = 1e-6
@@ -139,6 +140,7 @@ def cross_fit_nuisances(
     random_state: int,
     clip_bounds: tuple[float, float],
     groups: pd.Series | np.ndarray | None = None,
+    log_scope: str | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     """Out-of-fold potential outcomes and propensity, columns aligned to treatment_values."""
     propensity = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
@@ -177,6 +179,17 @@ def cross_fit_nuisances(
             treatment_values=treatment_values,
             binary_outcome=binary_outcome,
         ).to_numpy()
+    if log_scope is not None:
+        log_crossfit_nuisances(
+            scope=log_scope,
+            treatment=treatment,
+            outcome=outcome,
+            propensity=propensity,
+            propensity_learner=propensity_learner,
+            potential_outcomes=outcome_predictions,
+            outcome_learner=outcome_learner,
+            binary_outcome=binary_outcome,
+        )
     return outcome_predictions, propensity
 
 
@@ -437,6 +450,7 @@ def cross_fit_propensity_map(
     random_state: int,
     clip_bounds: tuple[float, float],
     groups: pd.Series | np.ndarray | None = None,
+    log_scope: str | None = None,
 ) -> dict[JsonValue, np.ndarray]:
     """Out-of-fold P(T=a | T in {a, control}, X) for each non-control arm."""
     _, propensity = cross_fit_nuisances(
@@ -451,6 +465,7 @@ def cross_fit_propensity_map(
         random_state=random_state,
         clip_bounds=clip_bounds,
         groups=groups,
+        log_scope=log_scope,
     )
     clipped = clip_propensity(propensity, clip_bounds)
     return one_versus_control_propensity(propensity=clipped, control_value=control_value)

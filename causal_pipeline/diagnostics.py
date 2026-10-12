@@ -100,6 +100,7 @@ class DiagnosticsRunner:
             random_state=learner_random_state(diagnostic_config.propensity_learner, 0),
             clip_bounds=diagnostic_config.propensity_clip,
             groups=dataset_groups(train),
+            log_scope="diagnostics",
         )
         probabilities = propensity
         overlap_path = "diagnostics/propensity_overlap.png"

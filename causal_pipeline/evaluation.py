@@ -11,7 +11,8 @@ from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.stats import t as student_t
 
-from causal_pipeline.config import CATEEvaluationConfig, predict_outcome_mean
+from causal_pipeline.config import CATEEvaluationConfig, OutcomeType, predict_outcome_mean
+from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
@@ -117,6 +118,8 @@ class CATEEvaluator:
         levels = dataset.treatment_values
         clip_min, clip_max = self.evaluation.propensity_clip
         gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
+        oof_propensity = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
+        oof_outcomes = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
 
         for train_idx, test_idx in cross_fit_splits(
             features=covariates,
@@ -135,11 +138,15 @@ class CATEEvaluator:
                 propensity_learner.predict_proba(test_covariates),
                 columns=list(propensity_learner.classes_),
             )
+            aligned_propensity = propensity.reindex(columns=levels)
+            oof_propensity.iloc[test_idx] = aligned_propensity.to_numpy()
             for arm in levels:
                 outcome_learner = clone_scaled_estimator(self.evaluation.outcome_learner)
                 arm_mask = train_treatment.to_numpy() == arm
                 outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
                 outcome_mean = predict_outcome_mean(outcome_learner, test_covariates)
+                arm_column = oof_outcomes.columns.get_loc(arm)
+                oof_outcomes.iloc[test_idx, arm_column] = outcome_mean
                 arm_propensity = np.clip(probability_of_arm(propensity, arm), clip_min, clip_max)
                 observed = treatment.iloc[test_idx].to_numpy() == arm
                 gamma_by_arm[arm][test_idx] = (
@@ -147,6 +154,16 @@ class CATEEvaluator:
                     + observed * (outcome_values[test_idx] - outcome_mean) / arm_propensity
                 )
 
+        log_crossfit_nuisances(
+            scope="CATE/evaluation DR",
+            treatment=treatment,
+            outcome=dataset.outcome_series,
+            propensity=oof_propensity,
+            propensity_learner=self.evaluation.propensity_learner,
+            potential_outcomes=oof_outcomes,
+            outcome_learner=self.evaluation.outcome_learner,
+            binary_outcome=dataset.outcome_type == OutcomeType.BINARY,
+        )
         control = dataset.control_value
         contrasts = {}
         for column, arm in zip(

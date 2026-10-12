@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from causalml.inference.meta.utils import concat_treatment_col
 from causalml.inference.meta import (
     BaseDRClassifier,
     BaseDRRegressor,
@@ -22,6 +24,7 @@ from causalml.inference.meta import (
 )
 from econml.dml import CausalForestDML
 from sklearn.base import BaseEstimator
+from sklearn.model_selection import cross_val_predict
 
 from causal_pipeline.config import (
     CATEEstimatorSpec,
@@ -33,12 +36,21 @@ from causal_pipeline.config import (
     MetaCATEEstimatorSpec,
     OutcomeType,
     TARNetCATEEstimatorSpec,
+    predict_outcome_mean,
     require_classifier,
 )
 from causal_pipeline.crossfit import cross_fit_propensity_map, dataset_groups, learner_random_state
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
+from causal_pipeline.nuisance_metrics import (
+    log_econml_crossfit_nuisances,
+    log_nuisance_metric,
+    outcome_metric_from_predictions,
+)
+
 from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
+
+logger = logging.getLogger(__name__)
 
 META_LEARNER_CLASSES = {
     ("s", False): BaseSRegressor,
@@ -68,6 +80,17 @@ class BaseCATEEstimator(ABC):
     @abstractmethod
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
         ...
+
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        """Outcome prediction on rows this fit did not train on, when the model can make one."""
+        return None
+
+    def logged_outcome_model(self) -> object:
+        spec = getattr(self, "spec", None)
+        learner = getattr(spec, "outcome_learner", None)
+        if learner is not None:
+            return learner
+        return getattr(self, "model", self)
 
 
 def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseCATEEstimator:
@@ -206,6 +229,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                 ),
                 clip_bounds=self.spec.clip_bounds,
                 groups=dataset_groups(data),
+                log_scope=f"CATE/{self.letter}-learner",
             )
         if propensity is None:
             self.model.fit(
@@ -222,6 +246,13 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             )
         if self.letter == "x":
             self.attach_propensity_model(features, data.treatment_series)
+        if self.letter == "r":
+            log_r_learner_crossfit_outcome(
+                model=self.model,
+                features=features,
+                outcome=data.outcome_series,
+                binary_outcome=binary,
+            )
         return self
 
     def attach_propensity_model(self, features: pd.DataFrame, treatment: pd.Series) -> None:
@@ -272,6 +303,16 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             self.contrast_names,
         )
 
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        if self.model is None or self.letter == "r":
+            return None
+        return meta_learner_factual_outcome(
+            letter=self.letter,
+            model=self.model,
+            features=data.X_adjustment,
+            treatment=data.treatment_series,
+        )
+
 
 class CausalForestAdapter(BaseCATEEstimator):
     def __init__(self, spec: CausalForestCATEEstimatorSpec, data: CausalDataset) -> None:
@@ -302,6 +343,14 @@ class CausalForestAdapter(BaseCATEEstimator):
             X=features if features.shape[1] else None,
             W=controls if controls.shape[1] else None,
             groups=dataset_groups(data),
+            cache_values=True,
+        )
+        log_econml_crossfit_nuisances(
+            scope="CATE/causal_forest",
+            model=self.model,
+            outcome_learner=self.spec.outcome_learner,
+            propensity_learner=self.spec.propensity_learner,
+            binary_outcome=binary_outcome,
         )
         return self
 
@@ -440,6 +489,124 @@ class DragonNetAdapter(BaseCATEEstimator):
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
         return mean_cate_table(self.predict_effects(data))
+
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        if self.model is None or self.scaler is None:
+            return None
+        heads = np.asarray(self.model.predict(transform_covariates(self.scaler, data.X_adjustment)))
+        if heads.ndim != 2 or heads.shape[1] < 2:
+            return None
+        treated = binary_library_treatment(data) == 1
+        return np.where(treated, heads[:, 1], heads[:, 0])
+
+
+def rows_for_mask(features: pd.DataFrame, mask: np.ndarray) -> pd.DataFrame:
+    return features.iloc[np.flatnonzero(mask)]
+
+
+def write_masked(destination: np.ndarray, mask: np.ndarray, values: np.ndarray) -> None:
+    destination[mask] = values
+
+
+def mean_outcome_prediction(models: list[BaseEstimator], rows: pd.DataFrame) -> np.ndarray:
+    predictions = [predict_outcome_mean(model, rows) for model in models]
+    return np.mean(predictions, axis=0)
+
+
+def meta_learner_factual_outcome(
+    letter: str,
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+) -> np.ndarray:
+    """Factual outcome from the fitted nuisance models, on any rows those models can score."""
+    treatment_values = treatment.to_numpy()
+    predicted = np.zeros(len(treatment_values), dtype=float)
+    if letter == "s":
+        covered = np.zeros(len(treatment_values), dtype=float)
+        for group, fitted in model.models.items():
+            pair = (treatment_values == group) | (treatment_values == model.control_name)
+            if not np.any(pair):
+                continue
+            indicator = (treatment_values[pair] == group).astype(int)
+            design = concat_treatment_col(indicator, rows_for_mask(features, pair))
+            predicted[pair] += predict_outcome_mean(fitted, design)
+            covered[pair] += 1.0
+        missing = covered == 0.0
+        if np.any(missing):
+            raise ValueError("S-learner has no outcome model for every held-out treatment.")
+        return predicted / covered
+    if letter == "t":
+        control_model = model.model_c
+        arm_models = model.models_t
+    elif letter == "x":
+        control_model = model.model_mu_c
+        arm_models = model.models_mu_t
+    elif letter == "dr":
+        control = treatment_values == model.control_name
+        if np.any(control):
+            write_masked(
+                predicted,
+                control,
+                mean_outcome_prediction(model.models_mu_c, rows_for_mask(features, control)),
+            )
+        for group, fold_models in model.models_mu_t.items():
+            arm = treatment_values == group
+            if np.any(arm):
+                write_masked(
+                    predicted,
+                    arm,
+                    mean_outcome_prediction(fold_models, rows_for_mask(features, arm)),
+                )
+        return predicted
+    else:
+        raise ValueError(f"{letter}-learner has no held-out outcome prediction.")
+    control = treatment_values == model.control_name
+    if np.any(control):
+        write_masked(predicted, control, predict_outcome_mean(control_model, rows_for_mask(features, control)))
+    for group, fitted in arm_models.items():
+        arm = treatment_values == group
+        if np.any(arm):
+            write_masked(predicted, arm, predict_outcome_mean(fitted, rows_for_mask(features, arm)))
+    return predicted
+
+
+def log_r_learner_crossfit_outcome(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    outcome: pd.Series,
+    binary_outcome: bool,
+) -> None:
+    """Repeat causalml's discarded cross_val_predict so the R-learner outcome nuisance can be scored."""
+    if hasattr(model.model_mu, "predict_proba"):
+        predicted = cross_val_predict(
+            model.model_mu,
+            features,
+            outcome,
+            cv=model.cv,
+            method="predict_proba",
+            n_jobs=-1,
+        )[:, 1]
+    else:
+        predicted = cross_val_predict(
+            model.model_mu,
+            features,
+            outcome,
+            cv=model.cv,
+            n_jobs=model.cv_n_jobs,
+        )
+    metric = outcome_metric_from_predictions(
+        outcome=outcome.to_numpy(dtype=float),
+        predicted=np.asarray(predicted, dtype=float),
+        binary_outcome=binary_outcome,
+    )
+    if metric is not None:
+        log_nuisance_metric(
+            "CATE/r-learner outcome",
+            model.model_mu,
+            f"OOF {metric.name}",
+            metric.value,
+        )
 
 
 class ArmProbabilityModel:

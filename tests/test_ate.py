@@ -13,6 +13,7 @@ from causal_pipeline.ate import (
     doubleml_dataframe,
     factual_outcome_predictions,
     initialize_ate_estimator,
+    orthogonal_coefficient_scores,
     treated_propensity,
 )
 from causal_pipeline.config import (
@@ -25,6 +26,17 @@ from causal_pipeline.config import (
     TreatmentMode,
 )
 from causal_pipeline.data import CausalDataset
+
+
+def test_orthogonal_scores_follow_the_median_repetition() -> None:
+    score_b = np.zeros((4, 3, 1))
+    score_b[:, 0, 0] = 0.0
+    score_b[:, 1, 0] = 1.0
+    score_b[:, 2, 0] = 3.0
+    score_a = -np.ones_like(score_b)
+    scores = orthogonal_coefficient_scores(score_a, score_b)
+    assert scores.shape == (4,)
+    assert np.allclose(scores, np.ones(4))
 
 
 def test_doubleml_dataframe_aligns_non_contiguous_indexes() -> None:

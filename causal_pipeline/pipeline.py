@@ -48,6 +48,7 @@ from causal_pipeline.selection import (
     transport_included_effects,
     unseen_population_bound,
 )
+from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ class CausalPipeline:
 
         ate_models = self.fit_ate_estimators(estimation, ate_runs)
         ate_results = self.estimate_ate_models(ate_models, ate_spec_by_id)
+        self.write_subgroup_splits(estimation, ate_models)
         sensitivity_summaries = self.run_ate_sensitivity(ate_models)
         self.run_selection_analyses(
             estimation=estimation,
@@ -401,6 +403,32 @@ class CausalPipeline:
         summary = pd.concat(list(results.values()), ignore_index=True)
         self.results.write_dataframe("ate/summary.csv", summary)
         return results
+
+    def write_subgroup_splits(
+        self,
+        estimation: CausalDataset,
+        ate_models: dict[str, BaseATEEstimator],
+    ) -> None:
+        configured = self.config.subgroup_splits
+        if not configured:
+            return
+        splits = available_subgroup_splits(estimation.df.columns, configured)
+        if not splits:
+            return
+        logger.info("Estimating pre-specified subgroup splits for %s cutoffs.", len(splits))
+        tables = [
+            subgroup_split_table(
+                dataset=estimation,
+                splits=splits,
+                scores=model.treatment_contrast_scores(),
+                estimator_id=estimator_id,
+            )
+            for estimator_id, model in ate_models.items()
+        ]
+        self.results.write_dataframe(
+            "ate/subgroup_splits.csv",
+            pd.concat(tables, ignore_index=True),
+        )
 
     def run_ate_sensitivity(
         self,

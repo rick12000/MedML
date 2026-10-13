@@ -19,6 +19,7 @@ from causal_pipeline.config import (
     OutcomeType,
     PipelineConfig,
     SplitConfig,
+    SubgroupSplit,
     TreatmentMode,
     clone_estimator,
     predict_outcome_mean,
@@ -36,6 +37,32 @@ def test_pipeline_config_accepts_valid_no_policy_split(
 ) -> None:
     assert pipeline_config_no_policy.split.test_fraction == 0.0
     assert not pipeline_config_no_policy.policy
+    assert pipeline_config_no_policy.subgroup_splits is None
+
+
+def test_subgroup_splits_require_an_ate_estimator(binary_data_config: DataConfig) -> None:
+    with pytest.raises(ValidationError):
+        PipelineConfig(
+            data=binary_data_config,
+            split=SplitConfig(test_fraction=0.0, random_state=DEFAULT_SPLIT_RANDOM_STATE),
+            cate_estimators=[MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER)],
+            subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],
+        )
+
+
+def test_subgroup_splits_reject_duplicate_cutoffs(
+    pipeline_config_no_policy: PipelineConfig,
+) -> None:
+    with pytest.raises(ValidationError):
+        PipelineConfig(
+            data=pipeline_config_no_policy.data,
+            split=pipeline_config_no_policy.split,
+            ate_estimators=pipeline_config_no_policy.ate_estimators,
+            subgroup_splits=[
+                SubgroupSplit(column="x1", cutoff=0.0),
+                SubgroupSplit(column="x1", cutoff=0.0),
+            ],
+        )
 
 
 def test_pipeline_config_rejects_missing_ate_and_cate(binary_data_config: DataConfig) -> None:

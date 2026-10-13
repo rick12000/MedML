@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,16 @@ SENSITIVITY_POINT_BOUND = "theta"
 SENSITIVITY_INTERVAL_BOUND = "ci"
 
 
+@dataclass(frozen=True)
+class TreatmentContrastScores:
+    """Per-row treatment contrasts whose average is the estimator's ATE."""
+
+    values: pd.DataFrame
+    positions: np.ndarray
+    groups: np.ndarray | None
+    confidence_level: float
+
+
 class BaseATEEstimator(ABC):
     """Common interface for average treatment effect estimators."""
 
@@ -73,6 +84,10 @@ class BaseATEEstimator(ABC):
     @abstractmethod
     def estimate(self) -> pd.DataFrame:
         ...
+
+    @abstractmethod
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        """Scores aligned to positions in the dataset passed to fit."""
 
 
 def initialize_ate_estimator(
@@ -164,10 +179,12 @@ class IPWAdapter(BaseATEEstimator):
         self.outcome: pd.Series | None = None
         self.propensity: pd.DataFrame | None = None
         self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> IPWAdapter:
         propensity_learner = materialize_ipw_propensity(self.spec)
         require_classifier(propensity_learner, "IPW propensity_learner")
+        self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         _, propensity = cross_fit_nuisances(
@@ -200,20 +217,36 @@ class IPWAdapter(BaseATEEstimator):
             )
         return self
 
-    def estimate(self) -> pd.DataFrame:
-        if self.treatment is None or self.outcome is None or self.propensity is None:
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if (
+            self.treatment is None
+            or self.outcome is None
+            or self.propensity is None
+            or self.source_index is None
+        ):
             raise RuntimeError("Estimator is not fitted.")
         if self.spec.weighting == IPWWeighting.HORVITZ_THOMPSON:
             arm_scores = horvitz_thompson_scores_by_arm(self.outcome, self.treatment, self.propensity)
         else:
             arm_scores = hajek_scores_by_arm(self.outcome, self.treatment, self.propensity)
-        table = contrasts_from_arm_scores(
-            arm_scores=arm_scores,
-            control_value=self.data.control_value,
-            treatment_values=self.data.treatment_values,
-            level=self.spec.confidence_level,
-            estimand=self.spec.estimand,
+        return package_contrast_scores(
+            values=contrast_frame_from_arm_scores(
+                arm_scores=arm_scores,
+                control_value=self.data.control_value,
+                treatment_values=self.data.treatment_values,
+            ),
+            positions=positions_for_kept_rows(self.source_index, self.treatment.index),
             groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
+    def estimate(self) -> pd.DataFrame:
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
+            estimand=self.spec.estimand,
+            groups=scored.groups,
         )
         table = annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
         table["variance_assumption"] = VARIANCE_PROPENSITY_TREATED_AS_KNOWN
@@ -230,6 +263,7 @@ class AIPWAdapter(BaseATEEstimator):
         self.potential_outcomes: pd.DataFrame | None = None
         self.outcome_predictions: np.ndarray | None = None
         self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> AIPWAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
@@ -240,6 +274,7 @@ class AIPWAdapter(BaseATEEstimator):
         require_classifier(propensity_learner, "AIPW propensity_learner")
         if binary_outcome:
             require_classifier(outcome_learner, "AIPW outcome_learner")
+        self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         potential_outcomes, propensity = cross_fit_nuisances(
@@ -283,26 +318,16 @@ class AIPWAdapter(BaseATEEstimator):
         self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
         return self
 
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        return doubly_robust_contrast_scores(self)
+
     def estimate(self) -> pd.DataFrame:
-        if (
-            self.treatment is None
-            or self.outcome is None
-            or self.propensity is None
-            or self.potential_outcomes is None
-        ):
-            raise RuntimeError("Estimator is not fitted.")
-        table = contrasts_from_arm_scores(
-            arm_scores=aipw_scores_by_arm(
-                self.outcome,
-                self.treatment,
-                self.potential_outcomes,
-                self.propensity,
-            ),
-            control_value=self.data.control_value,
-            treatment_values=self.data.treatment_values,
-            level=self.spec.confidence_level,
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
             estimand=self.spec.estimand,
-            groups=self.groups,
+            groups=scored.groups,
         )
         return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
 
@@ -317,6 +342,7 @@ class TMLEAdapter(BaseATEEstimator):
         self.potential_outcomes: pd.DataFrame | None = None
         self.outcome_predictions: np.ndarray | None = None
         self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> TMLEAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
@@ -327,6 +353,7 @@ class TMLEAdapter(BaseATEEstimator):
         require_classifier(propensity_learner, "TMLE propensity_learner")
         if binary_outcome:
             require_classifier(outcome_learner, "TMLE outcome_learner")
+        self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         initial_outcomes, propensity = cross_fit_nuisances(
@@ -378,26 +405,16 @@ class TMLEAdapter(BaseATEEstimator):
         self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
         return self
 
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        return doubly_robust_contrast_scores(self)
+
     def estimate(self) -> pd.DataFrame:
-        if (
-            self.treatment is None
-            or self.outcome is None
-            or self.propensity is None
-            or self.potential_outcomes is None
-        ):
-            raise RuntimeError("Estimator is not fitted.")
-        table = contrasts_from_arm_scores(
-            arm_scores=aipw_scores_by_arm(
-                self.outcome,
-                self.treatment,
-                self.potential_outcomes,
-                self.propensity,
-            ),
-            control_value=self.data.control_value,
-            treatment_values=self.data.treatment_values,
-            level=self.spec.confidence_level,
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
             estimand=self.spec.estimand,
-            groups=self.groups,
+            groups=scored.groups,
         )
         return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
 
@@ -407,6 +424,8 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         self.spec = spec
         self.data = data
         self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLIRMAdapter:
         del tune_estimators
@@ -438,6 +457,8 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
             score="ATE",
         )
         self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
         log_doubleml_irm_plr_nuisances(
             scope="ATE/DML-IRM",
             treatment=treatment.to_numpy(),
@@ -465,12 +486,29 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
             }
         )
 
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        scores = orthogonal_coefficient_scores(
+            self.model.psi_elements["psi_a"],
+            self.model.psi_elements["psi_b"],
+        )
+        return package_contrast_scores(
+            values=pd.DataFrame({contrast: scores}),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
 
 class DoubleMLPLRAdapter(BaseATEEstimator):
     def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
         self.spec = spec
         self.data = data
         self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLPLRAdapter:
         del tune_estimators
@@ -495,6 +533,8 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
             n_rep=self.spec.n_rep,
         )
         self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
         log_doubleml_irm_plr_nuisances(
             scope="ATE/DML-PLR",
             treatment=treatment.to_numpy(),
@@ -520,6 +560,21 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
                 "ci_lower": [float(summary.iloc[0, 0])],
                 "ci_upper": [float(summary.iloc[0, 1])],
             }
+        )
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        scores = orthogonal_coefficient_scores(
+            self.model.psi_elements["psi_a"],
+            self.model.psi_elements["psi_b"],
+        )
+        return package_contrast_scores(
+            values=pd.DataFrame({f"plr_{contrast}": scores}),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
         )
 
 
@@ -612,6 +667,8 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         self.spec = spec
         self.data = data
         self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLAPOSAdapter:
         del tune_estimators
@@ -639,6 +696,8 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             n_rep=self.spec.n_rep,
         )
         self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
         log_doubleml_apos_nuisances(
             scope="ATE/DML-APOS",
             treatment=treatment.to_numpy(),
@@ -657,6 +716,20 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             treatment_values=self.data.treatment_values,
             level=self.spec.confidence_level,
             estimand=self.spec.estimand,
+        )
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        return package_contrast_scores(
+            values=apos_contrast_scores(
+                model=self.model,
+                control_value=self.data.control_value,
+                treatment_values=self.data.treatment_values,
+            ),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
         )
 
 
@@ -694,6 +767,30 @@ def apos_contrast_table(
     return pd.DataFrame(rows)
 
 
+def apos_contrast_scores(
+    model: ClusterCapableDoubleMLAPOS,
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+) -> pd.DataFrame:
+    levels = list(model.treatment_levels)
+    reference = model.modellist[treatment_level_index(levels, control_value)]
+    control_scores = orthogonal_coefficient_scores(
+        reference.psi_elements["psi_a"],
+        reference.psi_elements["psi_b"],
+    )
+    names = contrast_columns(control_value, treatment_values)
+    arms = [value for value in treatment_values if value != control_value]
+    columns = {}
+    for name, arm in zip(names, arms, strict=True):
+        arm_model = model.modellist[treatment_level_index(levels, arm)]
+        arm_scores = orthogonal_coefficient_scores(
+            arm_model.psi_elements["psi_a"],
+            arm_model.psi_elements["psi_b"],
+        )
+        columns[name] = arm_scores - control_scores
+    return pd.DataFrame(columns)
+
+
 def treatment_level_index(levels: list[object], arm: JsonValue) -> int:
     for index, level in enumerate(levels):
         if level == arm:
@@ -712,27 +809,37 @@ def estimator_supports_sensitivity(estimator: BaseATEEstimator) -> bool:
     return isinstance(estimator, (DoubleMLIRMAdapter, DoubleMLPLRAdapter)) and estimator.model is not None
 
 
-def contrasts_from_arm_scores(
+def contrast_frame_from_arm_scores(
     arm_scores: dict[JsonValue, np.ndarray],
     control_value: JsonValue,
     treatment_values: list[JsonValue],
-    level: float,
-    estimand: str,
-    groups: np.ndarray | None = None,
 ) -> pd.DataFrame:
     control_scores = arm_scores[control_value]
     names = contrast_columns(control_value, treatment_values)
     arms = [arm for arm in treatment_values if arm != control_value]
+    columns = {
+        name: arm_scores[arm] - control_scores
+        for name, arm in zip(names, arms, strict=True)
+    }
+    return pd.DataFrame(columns)
+
+
+def intervals_from_contrast_scores(
+    scores: pd.DataFrame,
+    level: float,
+    estimand: str,
+    groups: np.ndarray | None,
+) -> pd.DataFrame:
     rows = []
-    for name, arm in zip(names, arms, strict=True):
+    for contrast in scores.columns:
         estimate, lower, upper = normal_interval_from_scores(
-            arm_scores[arm] - control_scores,
+            scores[contrast].to_numpy(dtype=float),
             level,
             groups=groups,
         )
         rows.append(
             {
-                "contrast": name,
+                "contrast": contrast,
                 "estimand": estimand,
                 "estimate": estimate,
                 "ci_lower": lower,
@@ -740,6 +847,92 @@ def contrasts_from_arm_scores(
             }
         )
     return pd.DataFrame(rows)
+
+
+def doubly_robust_contrast_scores(
+    estimator: AIPWAdapter | TMLEAdapter,
+) -> TreatmentContrastScores:
+    if (
+        estimator.treatment is None
+        or estimator.outcome is None
+        or estimator.propensity is None
+        or estimator.potential_outcomes is None
+        or estimator.source_index is None
+    ):
+        raise RuntimeError("Estimator is not fitted.")
+    return package_contrast_scores(
+        values=contrast_frame_from_arm_scores(
+            arm_scores=aipw_scores_by_arm(
+                estimator.outcome,
+                estimator.treatment,
+                estimator.potential_outcomes,
+                estimator.propensity,
+            ),
+            control_value=estimator.data.control_value,
+            treatment_values=estimator.data.treatment_values,
+        ),
+        positions=positions_for_kept_rows(estimator.source_index, estimator.treatment.index),
+        groups=estimator.groups,
+        confidence_level=estimator.spec.confidence_level,
+    )
+
+
+def package_contrast_scores(
+    values: pd.DataFrame,
+    positions: np.ndarray,
+    groups: np.ndarray | None,
+    confidence_level: float,
+) -> TreatmentContrastScores:
+    if len(positions) != len(values):
+        raise ValueError("Contrast scores and row positions have different lengths.")
+    if groups is not None and len(groups) != len(values):
+        raise ValueError("Cluster ids and contrast scores have different lengths.")
+    return TreatmentContrastScores(
+        values=values,
+        positions=np.asarray(positions),
+        groups=None if groups is None else np.asarray(groups),
+        confidence_level=confidence_level,
+    )
+
+
+def positions_for_kept_rows(source_index: pd.Index, kept_index: pd.Index) -> np.ndarray:
+    if source_index.has_duplicates:
+        raise ValueError("The dataset index must be unique to align subgroup rows.")
+    locator = pd.Series(np.arange(len(source_index)), index=source_index)
+    positions = locator.loc[kept_index].to_numpy(dtype=int)
+    if len(positions) != len(kept_index):
+        raise ValueError("Scored rows could not be aligned to the dataset.")
+    return positions
+
+
+def orthogonal_coefficient_scores(psi_a: np.ndarray, psi_b: np.ndarray) -> np.ndarray:
+    """Scores whose mean is the DoubleML coefficient.
+
+    DoubleML reports the median coefficient across cross-fit repetitions, so the
+    returned scores follow that same repetition.
+    """
+    score_a = np.asarray(psi_a, dtype=float)
+    score_b = np.asarray(psi_b, dtype=float)
+    if score_a.shape != score_b.shape:
+        raise ValueError("DoubleML score components have different shapes.")
+    if score_a.ndim != 3 or score_a.shape[2] != 1:
+        raise ValueError("Subgroup contrasts expect one DoubleML coefficient.")
+    repetition_scores = []
+    repetition_means = []
+    for repetition in range(score_a.shape[1]):
+        denominator = float(np.mean(score_a[:, repetition, 0]))
+        if denominator == 0.0:
+            raise ValueError("DoubleML score derivative averages to zero.")
+        scores = -score_b[:, repetition, 0] / denominator
+        repetition_scores.append(scores)
+        repetition_means.append(float(np.mean(scores)))
+    order = np.argsort(repetition_means)
+    repetition_count = len(repetition_means)
+    if repetition_count % 2 == 1:
+        return repetition_scores[int(order[repetition_count // 2])]
+    left = int(order[repetition_count // 2 - 1])
+    right = int(order[repetition_count // 2])
+    return 0.5 * (repetition_scores[left] + repetition_scores[right])
 
 
 def hajek_scores_by_arm(

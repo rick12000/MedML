@@ -425,10 +425,18 @@ class NuisanceScreenConfig(BaseModel):
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
 
 
+class SubgroupSplit(BaseModel):
+    """One pre-specified cutoff. The high side is every row at or above the cutoff."""
+
+    column: ColumnName
+    cutoff: float
+
+
 class PipelineConfig(BaseModel):
     data: DataConfig
     split: SplitConfig
     ate_estimators: list[ATEEstimatorSpec] | None = None
+    subgroup_splits: list[SubgroupSplit] | None = None
     cate_estimators: list[CATEEstimatorSpec] | None = None
     diagnostics: DiagnosticConfig | None = None
     sensitivity: SensitivityConfig | None = None
@@ -452,6 +460,13 @@ class PipelineConfig(BaseModel):
 
         if self.sensitivity is not None and not ate_configured:
             raise ValueError("Sensitivity analysis requires at least one ATE estimator.")
+
+        if self.subgroup_splits and not ate_configured:
+            raise ValueError("Subgroup splits require at least one ATE estimator.")
+        if self.subgroup_splits:
+            split_keys = [(split.column, split.cutoff) for split in self.subgroup_splits]
+            if len(split_keys) != len(set(split_keys)):
+                raise ValueError("Subgroup splits must be unique column and cutoff pairs.")
 
         if self.cate_evaluation is not None and not cate_configured and not policy_configured:
             raise ValueError(

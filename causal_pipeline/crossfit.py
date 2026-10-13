@@ -15,6 +15,7 @@ from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from causal_pipeline.config import JsonValue
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
+from causal_pipeline.learner_tuning import outcome_learner_for_fold, propensity_learner_for_fold
 from causal_pipeline.scaling import clone_scaled_estimator
 
 PROBABILITY_CLIP_FLOOR = 1e-6
@@ -133,7 +134,7 @@ def cross_fit_nuisances(
     treatment: pd.Series,
     outcome: pd.Series,
     treatment_values: list[JsonValue],
-    propensity_learner: BaseEstimator,
+    propensity_learner: BaseEstimator | None,
     outcome_learner: BaseEstimator | None,
     binary_outcome: bool,
     n_folds: int,
@@ -141,6 +142,7 @@ def cross_fit_nuisances(
     clip_bounds: tuple[float, float],
     groups: pd.Series | np.ndarray | None = None,
     log_scope: str | None = None,
+    tune_estimators: bool = False,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     """Out-of-fold potential outcomes and propensity, columns aligned to treatment_values."""
     propensity = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
@@ -159,23 +161,39 @@ def cross_fit_nuisances(
         X_test = covariates.iloc[test_index]
         treatment_train = treatment.iloc[train_index]
         treatment_test = treatment.iloc[test_index]
+        fold_propensity_learner = propensity_learner_for_fold(
+            template=propensity_learner,
+            train_features=X_train,
+            train_treatment=treatment_train,
+            tune=tune_estimators,
+            random_state=random_state,
+        )
         propensity.iloc[test_index] = fold_propensity(
             X_train=X_train,
             treatment_train=treatment_train,
             X_test=X_test,
-            propensity_learner=propensity_learner,
+            propensity_learner=fold_propensity_learner,
             treatment_values=treatment_values,
             clip_bounds=clip_bounds,
         ).to_numpy()
         if outcome_learner is None or outcome_predictions is None:
             continue
+        fold_outcome_learner = outcome_learner_for_fold(
+            template=outcome_learner,
+            train_features=X_train,
+            train_treatment=treatment_train,
+            train_outcome=outcome.iloc[train_index],
+            binary_outcome=binary_outcome,
+            tune=tune_estimators,
+            random_state=random_state,
+        )
         outcome_predictions.iloc[test_index] = fold_potential_outcomes(
             X_train=X_train,
             treatment_train=treatment_train,
             outcome_train=outcome.iloc[train_index],
             X_test=X_test,
             treatment_test=treatment_test,
-            outcome_learner=outcome_learner,
+            outcome_learner=fold_outcome_learner,
             treatment_values=treatment_values,
             binary_outcome=binary_outcome,
         ).to_numpy()

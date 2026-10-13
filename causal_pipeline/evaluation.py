@@ -13,6 +13,7 @@ from scipy.stats import t as student_t
 
 from causal_pipeline.config import CATEEvaluationConfig, OutcomeType, predict_outcome_mean
 from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
+from causal_pipeline.learner_resolve import materialize_evaluation_learners
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
@@ -120,6 +121,10 @@ class CATEEvaluator:
         gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
         oof_propensity = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         oof_outcomes = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
+        propensity_template, outcome_template = materialize_evaluation_learners(
+            self.evaluation,
+            outcome_type=dataset.outcome_type,
+        )
 
         for train_idx, test_idx in cross_fit_splits(
             features=covariates,
@@ -132,7 +137,7 @@ class CATEEvaluator:
             test_covariates = covariates.iloc[test_idx].copy()
             train_outcome = outcome_values[train_idx]
             train_treatment = treatment.iloc[train_idx]
-            propensity_learner = clone_scaled_estimator(self.evaluation.propensity_learner)
+            propensity_learner = clone_scaled_estimator(propensity_template)
             propensity_learner.fit(train_covariates, train_treatment)
             propensity = pd.DataFrame(
                 propensity_learner.predict_proba(test_covariates),
@@ -141,7 +146,7 @@ class CATEEvaluator:
             aligned_propensity = propensity.reindex(columns=levels)
             oof_propensity.iloc[test_idx] = aligned_propensity.to_numpy()
             for arm in levels:
-                outcome_learner = clone_scaled_estimator(self.evaluation.outcome_learner)
+                outcome_learner = clone_scaled_estimator(outcome_template)
                 arm_mask = train_treatment.to_numpy() == arm
                 outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
                 outcome_mean = predict_outcome_mean(outcome_learner, test_covariates)
@@ -159,9 +164,9 @@ class CATEEvaluator:
             treatment=treatment,
             outcome=dataset.outcome_series,
             propensity=oof_propensity,
-            propensity_learner=self.evaluation.propensity_learner,
+            propensity_learner=propensity_template,
             potential_outcomes=oof_outcomes,
-            outcome_learner=self.evaluation.outcome_learner,
+            outcome_learner=outcome_template,
             binary_outcome=dataset.outcome_type == OutcomeType.BINARY,
         )
         control = dataset.control_value

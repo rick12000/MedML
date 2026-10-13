@@ -105,6 +105,7 @@ DEFAULT_BENCHMARK_GRID_SIZE: PositiveInt = 100
 DEFAULT_LEARNER_RANDOM_STATE: int = 0
 DEFAULT_NUISANCE_SCREEN_TEST_FRACTION: Fraction = 0.2
 DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION: Fraction = 0.25
+DEFAULT_TUNE_ESTIMATORS: bool = False
 CATE_DEPENDENT_POLICY_KINDS = frozenset(
     {PolicyKind.POLICY_TREE, PolicyKind.EXACT_POLICY_TREE, PolicyKind.VIRTUAL_TWINS}
 )
@@ -178,7 +179,7 @@ class DataConfig(BaseModel):
 
 class IPWATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.IPW]
-    propensity_learner: BaseEstimator
+    propensity_learner: BaseEstimator | None = None
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     weighting: IPWWeighting = IPWWeighting.HAJEK
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
@@ -189,8 +190,8 @@ class IPWATEEstimatorSpec(ArbitraryTypesModel):
 
 class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.AIPW, ATEKind.TMLE]
-    outcome_learner: BaseEstimator
-    propensity_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
+    propensity_learner: BaseEstimator | None = None
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     reduced: bool = DEFAULT_TMLE_REDUCED
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
@@ -201,8 +202,8 @@ class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
 
 class DoubleMLATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS]
-    outcome_learner: BaseEstimator
-    propensity_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
+    propensity_learner: BaseEstimator | None = None
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     n_rep: PositiveInt = DEFAULT_DML_N_REP
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
@@ -226,32 +227,18 @@ MetaCATEKind = Literal[
 
 class MetaCATEEstimatorSpec(ArbitraryTypesModel):
     kind: MetaCATEKind
-    outcome_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
     effect_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
 
-    @model_validator(mode="after")
-    def validate_effect_learner(self) -> MetaCATEEstimatorSpec:
-        two_stage = {CATEKind.X_LEARNER, CATEKind.R_LEARNER, CATEKind.DR_LEARNER}
-        if self.kind in two_stage and self.effect_learner is None:
-            raise ValueError(
-                "X-learner, R-learner, and DR-learner require effect_learner, "
-                "a regressor for the continuous treatment-effect stage."
-            )
-        if self.kind in two_stage and self.propensity_learner is None:
-            raise ValueError(
-                "X-learner, R-learner, and DR-learner require propensity_learner."
-            )
-        return self
-
 
 class CausalForestCATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[CATEKind.CAUSAL_FOREST]
-    outcome_learner: BaseEstimator
-    propensity_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
+    propensity_learner: BaseEstimator | None = None
 
 
 class TARNetCATEEstimatorSpec(BaseModel):
@@ -287,13 +274,13 @@ class SplitConfig(BaseModel):
 
 
 class DiagnosticConfig(ArbitraryTypesModel):
-    propensity_learner: BaseEstimator
+    propensity_learner: BaseEstimator | None = None
     stabilized_weights: bool = DEFAULT_DIAGNOSTIC_STABILIZED_WEIGHTS
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
 
 
 class SensitivityConfig(ArbitraryTypesModel):
-    outcome_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
     null_effect: float = DEFAULT_NULL_EFFECT
     benchmark_multiplier_max: float = DEFAULT_BENCHMARK_MULTIPLIER_MAX
     benchmark_grid_size: PositiveInt = DEFAULT_BENCHMARK_GRID_SIZE
@@ -320,8 +307,8 @@ class SensitivityConfig(ArbitraryTypesModel):
 
 
 class CATEEvaluationConfig(ArbitraryTypesModel):
-    propensity_learner: BaseEstimator
-    outcome_learner: BaseEstimator
+    propensity_learner: BaseEstimator | None = None
+    outcome_learner: BaseEstimator | None = None
     dr_crossfit_folds: PositiveInt = DEFAULT_CATE_EVAL_CROSSFIT_FOLDS
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     calibration_bins: PositiveInt = DEFAULT_CALIBRATION_BINS
@@ -338,8 +325,8 @@ class PolicyTreeMethodSpec(ArbitraryTypesModel):
 
 class DRPolicyTreeMethodSpec(ArbitraryTypesModel):
     kind: Literal[PolicyKind.DR_POLICY_TREE]
-    outcome_learner: BaseEstimator
-    propensity_learner: BaseEstimator
+    outcome_learner: BaseEstimator | None = None
+    propensity_learner: BaseEstimator | None = None
 
 
 class ExactPolicyTreeMethodSpec(ArbitraryTypesModel):
@@ -400,6 +387,7 @@ class PipelineConfig(BaseModel):
     policy_random_state: int = DEFAULT_POLICY_RANDOM_STATE
     results_dir: str = DEFAULT_RESULTS_DIR
     nuisance_screen: NuisanceScreenConfig = Field(default_factory=NuisanceScreenConfig)
+    tune_estimators: bool = DEFAULT_TUNE_ESTIMATORS
 
     @model_validator(mode="after")
     def validate_pipeline_contract(self) -> PipelineConfig:

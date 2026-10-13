@@ -48,6 +48,10 @@ from causal_pipeline.nuisance_metrics import (
     outcome_metric_from_predictions,
 )
 
+from causal_pipeline.learner_resolve import (
+    materialize_causal_forest_learners,
+    materialize_meta_cate_learners,
+)
 from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
 
 logger = logging.getLogger(__name__)
@@ -86,10 +90,9 @@ class BaseCATEEstimator(ABC):
         return None
 
     def logged_outcome_model(self) -> object:
-        spec = getattr(self, "spec", None)
-        learner = getattr(spec, "outcome_learner", None)
-        if learner is not None:
-            return learner
+        resolved = getattr(self, "resolved_outcome_learner", None)
+        if resolved is not None:
+            return resolved
         return getattr(self, "model", self)
 
 
@@ -190,6 +193,8 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         self.data = data
         self.letter = letter
         self.model = None
+        self.resolved_outcome_learner: BaseEstimator | None = None
+        self.resolved_propensity_learner: BaseEstimator | None = None
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -199,20 +204,25 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         # The pipeline predicts each group from a model fit on the other groups.
         # Any cross-fit inside causalml only reshuffles that training subset.
         binary = self.data.outcome_type == OutcomeType.BINARY
+        outcome_learner, effect_learner, propensity_learner = materialize_meta_cate_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
         if binary:
-            require_classifier(self.spec.outcome_learner, "CATE outcome_learner")
+            require_classifier(outcome_learner, "CATE outcome_learner")
+        self.resolved_outcome_learner = outcome_learner
+        self.resolved_propensity_learner = propensity_learner
         self.model = build_meta_learner(
             letter=self.letter,
             binary_outcome=binary,
-            outcome_learner=self.spec.outcome_learner,
-            effect_learner=self.spec.effect_learner,
-            propensity_learner=self.spec.propensity_learner,
+            outcome_learner=outcome_learner,
+            effect_learner=effect_learner,
+            propensity_learner=propensity_learner,
             control_name=data.control_value,
         )
         features = data.X_adjustment.copy()
         propensity = None
         if self.letter in {"x", "r", "dr"}:
-            propensity_learner = self.spec.propensity_learner
             if propensity_learner is None:
                 raise ValueError(f"{self.letter}-learner requires propensity_learner.")
             require_classifier(propensity_learner, "CATE propensity_learner")
@@ -257,9 +267,9 @@ class MetaLearnerAdapter(BaseCATEEstimator):
 
     def attach_propensity_model(self, features: pd.DataFrame, treatment: pd.Series) -> None:
         """X-learner prediction reweights by e(X). Keep that model on the configured learner."""
-        if self.spec.propensity_learner is None or self.model is None:
+        if self.resolved_propensity_learner is None or self.model is None:
             return
-        fitted = clone_scaled_estimator(self.spec.propensity_learner)
+        fitted = clone_scaled_estimator(self.resolved_propensity_learner)
         fitted.fit(features, treatment)
         groups = list(getattr(self.model, "t_groups", []))
         self.model.propensity_model = {
@@ -326,12 +336,18 @@ class CausalForestAdapter(BaseCATEEstimator):
 
     def fit(self, data: CausalDataset) -> CausalForestAdapter:
         binary_outcome = self.data.outcome_type == OutcomeType.BINARY
+        outcome_learner, propensity_learner = materialize_causal_forest_learners(
+            self.spec,
+            outcome_type=self.data.outcome_type,
+        )
         if binary_outcome:
-            require_classifier(self.spec.outcome_learner, "Causal forest outcome_learner")
-        require_classifier(self.spec.propensity_learner, "Causal forest propensity_learner")
+            require_classifier(outcome_learner, "Causal forest outcome_learner")
+        require_classifier(propensity_learner, "Causal forest propensity_learner")
+        self.resolved_outcome_learner = outcome_learner
+        self.resolved_propensity_learner = propensity_learner
         self.model = CausalForestDML(
-            model_y=clone_scaled_estimator(self.spec.outcome_learner),
-            model_t=clone_scaled_estimator(self.spec.propensity_learner),
+            model_y=clone_scaled_estimator(outcome_learner),
+            model_t=clone_scaled_estimator(propensity_learner),
             discrete_treatment=True,
             discrete_outcome=binary_outcome,
         )
@@ -348,8 +364,8 @@ class CausalForestAdapter(BaseCATEEstimator):
         log_econml_crossfit_nuisances(
             scope="CATE/causal_forest",
             model=self.model,
-            outcome_learner=self.spec.outcome_learner,
-            propensity_learner=self.spec.propensity_learner,
+            outcome_learner=outcome_learner,
+            propensity_learner=propensity_learner,
             binary_outcome=binary_outcome,
         )
         return self

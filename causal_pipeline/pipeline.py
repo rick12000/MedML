@@ -17,11 +17,16 @@ from causal_pipeline.ate import (
 )
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table
 from causal_pipeline.config import (
+    ATEKind,
     CATEEstimatorSpec,
+    DEFAULT_LEARNER_RANDOM_STATE,
     DEFAULT_PROPENSITY_CLIP,
     OutcomeType,
     PipelineConfig,
 )
+from causal_pipeline.learner_defaults import materialize_propensity_learner
+from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
+from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
 from causal_pipeline.crossfit import cross_fit_predictions
 from causal_pipeline.data import CausalDataset, DataSplitter
 from causal_pipeline.diagnostics import DiagnosticsRunner
@@ -43,6 +48,13 @@ logger = logging.getLogger(__name__)
 
 ATE_INTERVAL_XLABEL = "Average treatment effect"
 CATE_MEAN_XLABEL = "Mean conditional treatment effect"
+DML_ATE_KINDS = frozenset(
+    {
+        ATEKind.DML_IRM,
+        ATEKind.DML_PLR,
+        ATEKind.DML_APOS,
+    }
+)
 
 
 def predict_cate_fold(
@@ -50,8 +62,14 @@ def predict_cate_fold(
     held_out: CausalDataset,
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
+    tune_estimators: bool = False,
 ) -> pd.DataFrame:
-    estimator = create_cate_estimator(spec=spec, data=train)
+    fold_spec = resolve_cate_spec_for_outer_train(
+        train=train,
+        spec=spec,
+        tune=tune_estimators,
+    )
+    estimator = create_cate_estimator(spec=fold_spec, data=train)
     estimator.fit(data=train)
     if outcome_records is not None:
         predicted = estimator.factual_outcome(held_out)
@@ -69,6 +87,7 @@ def predict_cate_fold(
 def cate_fold_predictor(
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
+    tune_estimators: bool = False,
 ) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
     def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
         return predict_cate_fold(
@@ -76,6 +95,7 @@ def cate_fold_predictor(
             held_out=held_out,
             spec=spec,
             outcome_records=outcome_records,
+            tune_estimators=tune_estimators,
         )
 
     return predict_fold
@@ -275,9 +295,15 @@ class CausalPipeline:
                 included_treatment=estimation.treatment_series.copy(),
                 included_outcome=estimation.outcome_series.copy(),
                 excluded_covariates=excluded.loc[:, covariates].copy(),
-                outcome_learner=sensitivity.outcome_learner,
+                outcome_learner=materialize_sensitivity_outcome(
+                    sensitivity,
+                    outcome_type=estimation.outcome_type,
+                ),
                 sampling_learner=sensitivity.sampling_learner,
-                propensity_learner=sensitivity.propensity_learner,
+                propensity_learner=materialize_propensity_learner(
+                    sensitivity.propensity_learner,
+                    random_state=DEFAULT_LEARNER_RANDOM_STATE,
+                ),
                 treatment_values=estimation.treatment_values,
                 control_value=estimation.control_value,
                 propensity_clip=DEFAULT_PROPENSITY_CLIP,
@@ -322,7 +348,8 @@ class CausalPipeline:
         for spec in self.config.ate_estimators:
             logger.info("Fitting ATE estimator %s.", spec.kind.value)
             estimator = initialize_ate_estimator(spec=spec, data=train)
-            estimator.fit(train)
+            tune = self.config.tune_estimators and spec.kind not in DML_ATE_KINDS
+            estimator.fit(train, tune_estimators=tune)
             models[spec.kind.value] = estimator
         return models
 
@@ -398,7 +425,11 @@ class CausalPipeline:
                 dataset=estimation,
                 n_folds=self.config.cate_crossfit_folds,
                 random_state=self.config.split.random_state,
-                predict_fold=cate_fold_predictor(spec, outcome_records),
+                predict_fold=cate_fold_predictor(
+                    spec,
+                    outcome_records,
+                    tune_estimators=self.config.tune_estimators,
+                ),
             )
             log_pooled_factual_outcome(
                 records=outcome_records,
@@ -431,6 +462,7 @@ class CausalPipeline:
                 held_out=test,
                 spec=spec,
                 outcome_records=outcome_records,
+                tune_estimators=self.config.tune_estimators,
             )
             log_pooled_factual_outcome(
                 records=outcome_records,

@@ -45,6 +45,11 @@ from causal_pipeline.nuisance_metrics import (
     log_doubleml_apos_nuisances,
     log_doubleml_irm_plr_nuisances,
 )
+from causal_pipeline.learner_resolve import (
+    materialize_doubly_robust_learners,
+    materialize_doubleml_learners,
+    materialize_ipw_propensity,
+)
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_html
 
@@ -61,7 +66,7 @@ class BaseATEEstimator(ABC):
     """Common interface for average treatment effect estimators."""
 
     @abstractmethod
-    def fit(self, data: CausalDataset) -> BaseATEEstimator:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> BaseATEEstimator:
         ...
 
     @abstractmethod
@@ -159,8 +164,9 @@ class IPWAdapter(BaseATEEstimator):
         self.propensity: pd.DataFrame | None = None
         self.groups: np.ndarray | None = None
 
-    def fit(self, data: CausalDataset) -> IPWAdapter:
-        require_classifier(self.spec.propensity_learner, "IPW propensity_learner")
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> IPWAdapter:
+        propensity_learner = materialize_ipw_propensity(self.spec)
+        require_classifier(propensity_learner, "IPW propensity_learner")
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         _, propensity = cross_fit_nuisances(
@@ -168,17 +174,18 @@ class IPWAdapter(BaseATEEstimator):
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
-            propensity_learner=self.spec.propensity_learner,
+            propensity_learner=propensity_learner,
             outcome_learner=None,
             binary_outcome=data.outcome_type == OutcomeType.BINARY,
             n_folds=self.spec.n_folds,
             random_state=learner_random_state(
-                self.spec.propensity_learner,
+                propensity_learner,
                 self.spec.random_state,
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
             log_scope="ATE/IPW",
+            tune_estimators=tune_estimators,
         )
         self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
@@ -215,11 +222,15 @@ class AIPWAdapter(BaseATEEstimator):
         self.outcome_predictions: np.ndarray | None = None
         self.groups: np.ndarray | None = None
 
-    def fit(self, data: CausalDataset) -> AIPWAdapter:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> AIPWAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
-        require_classifier(self.spec.propensity_learner, "AIPW propensity_learner")
+        outcome_learner, propensity_learner = materialize_doubly_robust_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
+        require_classifier(propensity_learner, "AIPW propensity_learner")
         if binary_outcome:
-            require_classifier(self.spec.outcome_learner, "AIPW outcome_learner")
+            require_classifier(outcome_learner, "AIPW outcome_learner")
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         potential_outcomes, propensity = cross_fit_nuisances(
@@ -227,17 +238,18 @@ class AIPWAdapter(BaseATEEstimator):
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
-            propensity_learner=self.spec.propensity_learner,
-            outcome_learner=self.spec.outcome_learner,
+            propensity_learner=propensity_learner,
+            outcome_learner=outcome_learner,
             binary_outcome=binary_outcome,
             n_folds=self.spec.n_folds,
             random_state=learner_random_state(
-                self.spec.propensity_learner,
+                propensity_learner,
                 self.spec.random_state,
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
             log_scope="ATE/AIPW",
+            tune_estimators=tune_estimators,
         )
         if potential_outcomes is None:
             raise RuntimeError("AIPW cross-fit did not return potential outcomes.")
@@ -282,11 +294,15 @@ class TMLEAdapter(BaseATEEstimator):
         self.outcome_predictions: np.ndarray | None = None
         self.groups: np.ndarray | None = None
 
-    def fit(self, data: CausalDataset) -> TMLEAdapter:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> TMLEAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
-        require_classifier(self.spec.propensity_learner, "TMLE propensity_learner")
+        outcome_learner, propensity_learner = materialize_doubly_robust_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
+        require_classifier(propensity_learner, "TMLE propensity_learner")
         if binary_outcome:
-            require_classifier(self.spec.outcome_learner, "TMLE outcome_learner")
+            require_classifier(outcome_learner, "TMLE outcome_learner")
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
         initial_outcomes, propensity = cross_fit_nuisances(
@@ -294,17 +310,18 @@ class TMLEAdapter(BaseATEEstimator):
             treatment=self.treatment,
             outcome=self.outcome,
             treatment_values=data.treatment_values,
-            propensity_learner=self.spec.propensity_learner,
-            outcome_learner=self.spec.outcome_learner,
+            propensity_learner=propensity_learner,
+            outcome_learner=outcome_learner,
             binary_outcome=binary_outcome,
             n_folds=self.spec.n_folds,
             random_state=learner_random_state(
-                self.spec.propensity_learner,
+                propensity_learner,
                 self.spec.random_state,
             ),
             clip_bounds=self.spec.clip_bounds,
             groups=observation_groups(data),
             log_scope="ATE/TMLE",
+            tune_estimators=tune_estimators,
         )
         if initial_outcomes is None:
             raise RuntimeError("TMLE cross-fit did not return potential outcomes.")
@@ -352,7 +369,8 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         self.data = data
         self.model = None
 
-    def fit(self, data: CausalDataset) -> DoubleMLIRMAdapter:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLIRMAdapter:
+        del tune_estimators
         if len(data.treatment_values) != 2:
             raise ValueError(
                 "DoubleML IRM supports two treatment arms. Use DML_APOS for multi-arm treatment."
@@ -363,8 +381,12 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_g = clone_scaled_estimator(self.spec.outcome_learner)
-        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
+        outcome_learner, propensity_learner = materialize_doubleml_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
+        ml_g = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
         require_classifier(ml_m, "DoubleML IRM propensity_learner")
         if data.outcome_type == OutcomeType.BINARY:
             require_classifier(ml_g, "DoubleML IRM outcome_learner")
@@ -411,15 +433,20 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         self.data = data
         self.model = None
 
-    def fit(self, data: CausalDataset) -> DoubleMLPLRAdapter:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLPLRAdapter:
+        del tune_estimators
         X = data.X_adjustment.copy()
         treatment = binary_treatment_indicator(data.treatment_series, data.control_value)
         outcome = data.outcome_series.copy()
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_l = clone_scaled_estimator(self.spec.outcome_learner)
-        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
+        outcome_learner, propensity_learner = materialize_doubleml_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
+        ml_l = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
         require_classifier(ml_m, "DoubleML PLR propensity_learner")
         self.model = DoubleMLPLR(
             dml_data,
@@ -547,15 +574,20 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         self.data = data
         self.model = None
 
-    def fit(self, data: CausalDataset) -> DoubleMLAPOSAdapter:
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLAPOSAdapter:
+        del tune_estimators
         X = data.X_adjustment.copy()
         treatment = data.treatment_series.copy()
         outcome = data.outcome_series.copy()
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        ml_g = clone_scaled_estimator(self.spec.outcome_learner)
-        ml_m = clone_scaled_estimator(self.spec.propensity_learner)
+        outcome_learner, propensity_learner = materialize_doubleml_learners(
+            self.spec,
+            outcome_type=data.outcome_type,
+        )
+        ml_g = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
         require_classifier(ml_m, "DoubleML APOS propensity_learner")
         if data.outcome_type == OutcomeType.BINARY:
             require_classifier(ml_g, "DoubleML APOS outcome_learner")

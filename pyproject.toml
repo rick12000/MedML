@@ -19,6 +19,8 @@ dependencies = [
     "doubleml>=0.9",
     "econml>=0.15",
     "causalml>=0.15",
+    "optuna>=3.6",
+    "xgboost>=2.0",
 ]
 
 [project.optional-dependencies]

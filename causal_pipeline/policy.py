@@ -25,6 +25,7 @@ from causal_pipeline.config import (
     VirtualTwinsMethodSpec,
     clone_estimator,
 )
+from causal_pipeline.learner_resolve import materialize_dr_policy_learners
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.policy_tree import (
@@ -243,9 +244,13 @@ class PolicyService:
     ) -> FittedPolicy:
         logger.info("Fitting DRPolicyTree.")
         levels = control_first_arms(dataset.treatment_values, dataset.control_value)
+        outcome_learner, propensity_learner = materialize_dr_policy_learners(
+            spec,
+            outcome_type=dataset.outcome_type,
+        )
         tree = DRPolicyTree(
-            model_regression=clone_scaled_estimator(spec.outcome_learner),
-            model_propensity=clone_scaled_estimator(spec.propensity_learner),
+            model_regression=clone_scaled_estimator(outcome_learner),
+            model_propensity=clone_scaled_estimator(propensity_learner),
             categories=levels,
         )
         controls = dataset.X_controls.copy()

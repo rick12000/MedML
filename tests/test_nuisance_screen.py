@@ -21,9 +21,9 @@ def test_nuisance_screen_writes_test_metrics(
         results_root=tmp_path,
     )
     propensity = tmp_path / "nuisance_screen" / "propensity" / "logistic_regression" / "metrics.csv"
-    outcome = tmp_path / "nuisance_screen" / "outcome" / "random_forest" / "metrics.csv"
-    importance = tmp_path / "nuisance_screen" / "outcome" / "random_forest" / "impurity_importance.csv"
-    shap_plot = tmp_path / "nuisance_screen" / "propensity" / "random_forest" / "shap_summary.png"
+    outcome = tmp_path / "nuisance_screen" / "outcome" / "xgboost" / "metrics.csv"
+    importance = tmp_path / "nuisance_screen" / "outcome" / "xgboost" / "gain_importance.csv"
+    shap_plot = tmp_path / "nuisance_screen" / "propensity" / "xgboost" / "shap_summary.png"
     correlation = tmp_path / "nuisance_screen" / "correlation" / "correlation.csv"
     assert propensity.exists()
     assert outcome.exists()

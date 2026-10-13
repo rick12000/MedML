@@ -1,4 +1,4 @@
-"""Held-out logistic and random-forest screens for propensity and outcome."""
+"""Held-out logistic and gradient-boosted tree screens for propensity and outcome."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from xgboost import XGBClassifier, XGBRegressor
 
 from causal_pipeline.config import (
     NuisanceScreenConfig,
@@ -23,6 +23,14 @@ from causal_pipeline.config import (
     predict_outcome_mean,
 )
 from causal_pipeline.data import CausalDataset
+from causal_pipeline.learner_defaults import (
+    DEFAULT_XGBOOST_COLSAMPLE,
+    DEFAULT_XGBOOST_LEARNING_RATE,
+    DEFAULT_XGBOOST_N_ESTIMATORS,
+    DEFAULT_XGBOOST_N_JOBS,
+    DEFAULT_XGBOOST_REG_LAMBDA,
+    DEFAULT_XGBOOST_SUBSAMPLE,
+)
 from causal_pipeline.nuisance_metrics import (
     log_nuisance_metric,
     outcome_metric_from_predictions,
@@ -35,13 +43,13 @@ logger = logging.getLogger(__name__)
 
 LOGISTIC_C_VALUES = (0.1, 1.0, 10.0)
 LOGISTIC_MAX_ITER = 500
-FOREST_TREE_COUNT = 100
-FOREST_MAX_DEPTHS: tuple[int | None, ...] = (3, None)
-FOREST_MIN_SAMPLES_LEAF = (5, 20)
+XGBOOST_MAX_DEPTHS: tuple[int, ...] = (3, 6)
+XGBOOST_MIN_CHILD_WEIGHTS: tuple[int, ...] = (5, 12)
 SCREEN_SPLIT_ATTEMPTS = 20
 SHAP_ROW_LIMIT = 200
 CORRELATION_FIGURE_SIZE = 6.0
 LOWEST_SELECTION_SCORE = -1.0
+XGBOOST_ARCHITECTURE = "xgboost"
 
 
 @dataclass(frozen=True)
@@ -52,9 +60,9 @@ class ScreenSplit:
 
 
 @dataclass(frozen=True)
-class ForestChoice:
-    max_depth: int | None
-    min_samples_leaf: int
+class XgboostChoice:
+    max_depth: int
+    min_child_weight: int
 
 
 def run_nuisance_screen(
@@ -248,7 +256,7 @@ def fit_role(
         classification=classification,
         random_state=random_state,
     )
-    forest_choice = choose_forest(
+    xgboost_choice = choose_xgboost(
         train_features=train_features,
         train_labels=train_labels,
         validation_features=validation_features,
@@ -257,10 +265,10 @@ def fit_role(
         binary_outcome=binary_outcome,
         random_state=random_state,
     )
-    forest = fit_forest(
+    boosted = fit_xgboost(
         features=pd.concat([train_features, validation_features], axis=0),
         labels=pd.concat([train_labels, validation_labels], axis=0),
-        choice=forest_choice,
+        choice=xgboost_choice,
         classification=classification,
         random_state=random_state,
     )
@@ -278,17 +286,17 @@ def fit_role(
     )
     write_model_screen(
         role=role,
-        architecture="random_forest",
-        model=forest,
+        architecture=XGBOOST_ARCHITECTURE,
+        model=boosted,
         features=test_features,
         labels=test_labels,
         classification=classification,
         binary_outcome=binary_outcome,
         parameters={
-            "max_depth": forest_choice.max_depth,
-            "min_samples_leaf": forest_choice.min_samples_leaf,
+            "max_depth": xgboost_choice.max_depth,
+            "min_child_weight": xgboost_choice.min_child_weight,
         },
-        destination=destination / "random_forest",
+        destination=destination / XGBOOST_ARCHITECTURE,
         random_state=random_state,
     )
 
@@ -324,7 +332,7 @@ def choose_logistic_penalty(
     return best_penalty
 
 
-def choose_forest(
+def choose_xgboost(
     train_features: pd.DataFrame,
     train_labels: pd.Series,
     validation_features: pd.DataFrame,
@@ -332,13 +340,16 @@ def choose_forest(
     classification: bool,
     binary_outcome: bool,
     random_state: int,
-) -> ForestChoice:
-    best = ForestChoice(max_depth=FOREST_MAX_DEPTHS[0], min_samples_leaf=FOREST_MIN_SAMPLES_LEAF[0])
+) -> XgboostChoice:
+    best = XgboostChoice(
+        max_depth=XGBOOST_MAX_DEPTHS[0],
+        min_child_weight=XGBOOST_MIN_CHILD_WEIGHTS[0],
+    )
     best_score = LOWEST_SELECTION_SCORE
-    for max_depth in FOREST_MAX_DEPTHS:
-        for min_samples_leaf in FOREST_MIN_SAMPLES_LEAF:
-            choice = ForestChoice(max_depth=max_depth, min_samples_leaf=min_samples_leaf)
-            model = fit_forest(
+    for max_depth in XGBOOST_MAX_DEPTHS:
+        for min_child_weight in XGBOOST_MIN_CHILD_WEIGHTS:
+            choice = XgboostChoice(max_depth=max_depth, min_child_weight=min_child_weight)
+            model = fit_xgboost(
                 features=train_features,
                 labels=train_labels,
                 choice=choice,
@@ -376,33 +387,42 @@ def fit_logistic(
     return model
 
 
-def fit_forest(
+def fit_xgboost(
     features: pd.DataFrame,
     labels: pd.Series,
-    choice: ForestChoice,
+    choice: XgboostChoice,
     classification: bool,
     random_state: int,
-) -> RandomForestClassifier | RandomForestRegressor:
+) -> XGBClassifier | XGBRegressor:
+    shared = {
+        "n_estimators": DEFAULT_XGBOOST_N_ESTIMATORS,
+        "max_depth": choice.max_depth,
+        "min_child_weight": choice.min_child_weight,
+        "learning_rate": DEFAULT_XGBOOST_LEARNING_RATE,
+        "subsample": DEFAULT_XGBOOST_SUBSAMPLE,
+        "colsample_bytree": DEFAULT_XGBOOST_COLSAMPLE,
+        "reg_lambda": DEFAULT_XGBOOST_REG_LAMBDA,
+        "random_state": random_state,
+        "n_jobs": DEFAULT_XGBOOST_N_JOBS,
+    }
     if classification:
-        model = RandomForestClassifier(
-            n_estimators=FOREST_TREE_COUNT,
-            max_depth=choice.max_depth,
-            min_samples_leaf=choice.min_samples_leaf,
-            random_state=random_state,
+        objective = "binary:logistic" if labels.nunique() <= 2 else "multi:softprob"
+        model = XGBClassifier(
+            **shared,
+            objective=objective,
+            eval_metric="mlogloss",
         )
     else:
-        model = RandomForestRegressor(
-            n_estimators=FOREST_TREE_COUNT,
-            max_depth=choice.max_depth,
-            min_samples_leaf=choice.min_samples_leaf,
-            random_state=random_state,
+        model = XGBRegressor(
+            **shared,
+            objective="reg:squarederror",
         )
     model.fit(features, labels)
     return model
 
 
 def validation_score(
-    model: ScaledLearner | RandomForestClassifier | RandomForestRegressor,
+    model: ScaledLearner | XGBClassifier | XGBRegressor,
     features: pd.DataFrame,
     labels: pd.Series,
     classification: bool,
@@ -427,7 +447,7 @@ def validation_score(
 def write_model_screen(
     role: str,
     architecture: str,
-    model: ScaledLearner | RandomForestClassifier | RandomForestRegressor,
+    model: ScaledLearner | XGBClassifier | XGBRegressor,
     features: pd.DataFrame,
     labels: pd.Series,
     classification: bool,
@@ -448,11 +468,14 @@ def write_model_screen(
     rows = [{"parameter": name, "value": value} for name, value in parameters.items()]
     rows.append({"parameter": f"test_{metric_name}", "value": score})
     write_dataframe(destination / "metrics.csv", pd.DataFrame(rows))
-    if isinstance(model, (RandomForestClassifier, RandomForestRegressor)):
+    if isinstance(model, (XGBClassifier, XGBRegressor)):
         importance = pd.DataFrame(
-            {"feature": list(features.columns), "impurity_importance": model.feature_importances_}
+            {"feature": list(features.columns), "gain_importance": model.feature_importances_}
         )
-        write_dataframe(destination / "impurity_importance.csv", importance.sort_values("impurity_importance", ascending=False))
+        write_dataframe(
+            destination / "gain_importance.csv",
+            importance.sort_values("gain_importance", ascending=False),
+        )
     write_shap(
         model=model,
         features=features,
@@ -462,7 +485,7 @@ def write_model_screen(
 
 
 def write_shap(
-    model: ScaledLearner | RandomForestClassifier | RandomForestRegressor,
+    model: ScaledLearner | XGBClassifier | XGBRegressor,
     features: pd.DataFrame,
     destination: Path,
     random_state: int,
@@ -480,10 +503,10 @@ def write_shap(
 
 
 def shap_matrix(
-    model: ScaledLearner | RandomForestClassifier | RandomForestRegressor,
+    model: ScaledLearner | XGBClassifier | XGBRegressor,
     sample: pd.DataFrame,
 ) -> np.ndarray:
-    if isinstance(model, (RandomForestClassifier, RandomForestRegressor)):
+    if isinstance(model, (XGBClassifier, XGBRegressor)):
         explanation = shap.TreeExplainer(model).shap_values(sample)
         return first_shap_matrix(explanation)
     if isinstance(model, (ScaledClassifier, ScaledLearner)):

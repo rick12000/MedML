@@ -23,6 +23,11 @@ from causal_pipeline.config import (
     predict_outcome_mean,
     require_classifier,
 )
+from causal_pipeline.learner_resolve import (
+    fill_cate_spec_learners,
+    materialize_ipw_propensity,
+    materialize_meta_cate_learners,
+)
 
 
 def test_pipeline_config_accepts_valid_no_policy_split(
@@ -91,33 +96,42 @@ def test_clone_estimator_fit_does_not_mutate_original() -> None:
     assert hasattr(cloned, "coef_")
 
 
-def test_ipw_ate_spec_requires_propensity_learner() -> None:
-    with pytest.raises(ValidationError):
-        IPWATEEstimatorSpec(kind=ATEKind.IPW)
+def test_ipw_ate_spec_accepts_missing_propensity_learner() -> None:
+    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW)
+    learner = materialize_ipw_propensity(spec)
+    assert type(learner).__name__ == "XGBClassifier"
 
 
-def test_meta_cate_spec_requires_outcome_learner() -> None:
-    with pytest.raises(ValidationError):
-        MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER)
+def test_meta_cate_spec_accepts_missing_outcome_learner() -> None:
+    spec = MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER)
+    outcome, effect, propensity = materialize_meta_cate_learners(
+        spec,
+        outcome_type=OutcomeType.CONTINUOUS,
+    )
+    assert type(outcome).__name__ == "XGBRegressor"
+    assert effect is None
+    assert propensity is None
 
 
 @pytest.mark.parametrize("kind", [CATEKind.X_LEARNER, CATEKind.R_LEARNER, CATEKind.DR_LEARNER])
-def test_two_stage_meta_learners_require_effect_learner(
+def test_two_stage_meta_learners_materialize_effect_and_propensity(
     kind: CATEKind,
-    forest_classifier: BaseEstimator,
 ) -> None:
-    with pytest.raises(ValidationError):
-        MetaCATEEstimatorSpec(kind=kind, outcome_learner=forest_classifier)
+    spec = MetaCATEEstimatorSpec(kind=kind)
+    outcome, effect, propensity = materialize_meta_cate_learners(
+        spec,
+        outcome_type=OutcomeType.CONTINUOUS,
+    )
+    assert type(outcome).__name__ == "XGBRegressor"
+    assert type(effect).__name__ == "XGBRegressor"
+    assert type(propensity).__name__ == "XGBClassifier"
 
 
-def test_causal_forest_cate_spec_requires_learners(
-    forest_learner: RandomForestRegressor,
-) -> None:
-    with pytest.raises(ValidationError):
-        CausalForestCATEEstimatorSpec(
-            kind=CATEKind.CAUSAL_FOREST,
-            outcome_learner=forest_learner,
-        )
+def test_causal_forest_cate_spec_accepts_missing_learners() -> None:
+    spec = CausalForestCATEEstimatorSpec(kind=CATEKind.CAUSAL_FOREST)
+    filled = fill_cate_spec_learners(spec, outcome_type=OutcomeType.CONTINUOUS)
+    assert type(filled.outcome_learner).__name__ == "XGBRegressor"
+    assert type(filled.propensity_learner).__name__ == "XGBClassifier"
 
 
 def test_data_config_rejects_non_integer_continuous_treatment() -> None:
@@ -199,4 +213,3 @@ def test_multi_treatment_config_rejects_two_arms() -> None:
             control_value=0,
             treatment_values=[0, 1],
         )
-

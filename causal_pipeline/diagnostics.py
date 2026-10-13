@@ -22,6 +22,7 @@ from causal_pipeline.config import (
     TreatmentMode,
 )
 from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
+from causal_pipeline.learner_resolve import materialize_diagnostic_config
 from causal_pipeline.data import CausalDataset, ipw_weights_multi
 from causal_pipeline.figures import (
     PANEL_HEIGHT,
@@ -88,16 +89,17 @@ class DiagnosticsRunner:
         diagnostic_config = self.diagnostics
 
         adjustment_covariates = train.X_adjustment.copy()
+        propensity_learner = materialize_diagnostic_config(diagnostic_config)
         _, propensity = cross_fit_nuisances(
             covariates=adjustment_covariates,
             treatment=train.treatment_series,
             outcome=train.outcome_series,
             treatment_values=train.treatment_values,
-            propensity_learner=diagnostic_config.propensity_learner,
+            propensity_learner=propensity_learner,
             outcome_learner=None,
             binary_outcome=False,
             n_folds=DEFAULT_DML_N_FOLDS,
-            random_state=learner_random_state(diagnostic_config.propensity_learner, 0),
+            random_state=learner_random_state(propensity_learner, 0),
             clip_bounds=diagnostic_config.propensity_clip,
             groups=dataset_groups(train),
             log_scope="diagnostics",

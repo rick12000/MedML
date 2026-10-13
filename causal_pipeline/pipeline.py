@@ -17,6 +17,7 @@ from causal_pipeline.ate import (
 )
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table
 from causal_pipeline.config import (
+    ATEEstimatorSpec,
     ATEKind,
     CATEEstimatorSpec,
     DEFAULT_LEARNER_RANDOM_STATE,
@@ -30,6 +31,11 @@ from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
 from causal_pipeline.crossfit import cross_fit_predictions
 from causal_pipeline.data import CausalDataset, DataSplitter
 from causal_pipeline.diagnostics import DiagnosticsRunner
+from causal_pipeline.estimator_identity import (
+    assign_estimator_ids,
+    attach_estimator_metadata,
+    estimator_config_columns,
+)
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.figures import plot_interval_estimates, plot_point_estimates
 from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
@@ -184,8 +190,13 @@ class CausalPipeline:
             )
             self.results.save_diagnostics(diagnostics)
 
-        ate_models = self.fit_ate_estimators(estimation)
-        ate_results = self.estimate_ate_models(ate_models)
+        ate_runs = assign_estimator_ids(self.config.ate_estimators or [])
+        cate_runs = assign_estimator_ids(self.config.cate_estimators or [])
+        ate_spec_by_id = dict(ate_runs)
+        cate_spec_by_id = dict(cate_runs)
+
+        ate_models = self.fit_ate_estimators(estimation, ate_runs)
+        ate_results = self.estimate_ate_models(ate_models, ate_spec_by_id)
         sensitivity_summaries = self.run_ate_sensitivity(ate_models)
         self.run_selection_analyses(
             estimation=estimation,
@@ -193,13 +204,20 @@ class CausalPipeline:
             ate_results=ate_results,
         )
 
-        cate_predictions = self.cross_fit_cate_predictions(estimation)
+        cate_predictions = self.cross_fit_cate_predictions(estimation, cate_runs)
         cate_ate_results = {
             estimator_id: mean_cate_table(predictions)
             for estimator_id, predictions in cate_predictions.items()
         }
         for estimator_id, estimate in cate_ate_results.items():
-            write_dataframe(self.results.cate_dir(estimator_id) / "ate_estimate.csv", estimate)
+            write_dataframe(
+                self.results.cate_dir(estimator_id) / "ate_estimate.csv",
+                attach_estimator_metadata(
+                    estimate,
+                    estimator_id=estimator_id,
+                    spec=cate_spec_by_id[estimator_id],
+                ),
+            )
 
         cate_evaluation: dict[str, list[ContrastEvaluation]] = {}
         estimation_scores = None
@@ -231,6 +249,7 @@ class CausalPipeline:
                 estimation=estimation,
                 test=partitions.test,
                 test_scores=test_scores,
+                cate_runs=cate_runs,
             )
             policy_results = self.policy_service.evaluate_policies(
                 policies=policies,
@@ -239,11 +258,16 @@ class CausalPipeline:
             )
             self.results.write_dataframe("policy/summary.csv", policy_results)
 
-        ate_summary = self.build_ate_summary(ate_results, sensitivity_summaries)
+        ate_summary = self.build_ate_summary(
+            ate_results,
+            sensitivity_summaries,
+            ate_spec_by_id,
+        )
         cate_summary = self.build_cate_summary(
             cate_ate_results,
             cate_evaluation,
             test_cate_evaluation if self.config.policy else {},
+            cate_spec_by_id,
         )
         self.results.write_summaries(
             ate_summary=ate_summary,
@@ -341,35 +365,40 @@ class CausalPipeline:
                 pd.DataFrame(rows),
             )
 
-    def fit_ate_estimators(self, train: CausalDataset) -> dict[str, BaseATEEstimator]:
+    def fit_ate_estimators(
+        self,
+        train: CausalDataset,
+        ate_runs: list[tuple[str, ATEEstimatorSpec]],
+    ) -> dict[str, BaseATEEstimator]:
         models: dict[str, BaseATEEstimator] = {}
-        if not self.config.ate_estimators:
-            return models
-        for spec in self.config.ate_estimators:
-            logger.info("Fitting ATE estimator %s.", spec.kind.value)
+        for estimator_id, spec in ate_runs:
+            logger.info("Fitting ATE estimator %s.", estimator_id)
             estimator = initialize_ate_estimator(spec=spec, data=train)
             tune = self.config.tune_estimators and spec.kind not in DML_ATE_KINDS
             estimator.fit(train, tune_estimators=tune)
-            models[spec.kind.value] = estimator
+            models[estimator_id] = estimator
         return models
 
-    def estimate_ate_models(self, ate_models: dict[str, BaseATEEstimator]) -> dict[str, pd.DataFrame]:
+    def estimate_ate_models(
+        self,
+        ate_models: dict[str, BaseATEEstimator],
+        spec_by_id: dict[str, ATEEstimatorSpec],
+    ) -> dict[str, pd.DataFrame]:
         results = {}
         if not ate_models:
             return results
         for estimator_id, model in ate_models.items():
-            results[estimator_id] = model.estimate()
+            spec = spec_by_id[estimator_id]
+            results[estimator_id] = attach_estimator_metadata(
+                model.estimate(),
+                estimator_id=estimator_id,
+                spec=spec,
+            )
             write_dataframe(
                 self.results.ate_dir(estimator_id) / "estimate.csv",
                 results[estimator_id],
             )
-        summary = pd.concat(
-            [
-                df_ate.assign(estimator=estimator_id)
-                for estimator_id, df_ate in results.items()
-            ],
-            ignore_index=True,
-        )
+        summary = pd.concat(list(results.values()), ignore_index=True)
         self.results.write_dataframe("ate/summary.csv", summary)
         return results
 
@@ -412,13 +441,14 @@ class CausalPipeline:
         if sensitivity_dir.exists():
             shutil.rmtree(sensitivity_dir)
 
-    def cross_fit_cate_predictions(self, estimation: CausalDataset) -> dict[str, pd.DataFrame]:
+    def cross_fit_cate_predictions(
+        self,
+        estimation: CausalDataset,
+        cate_runs: list[tuple[str, CATEEstimatorSpec]],
+    ) -> dict[str, pd.DataFrame]:
         predictions: dict[str, pd.DataFrame] = {}
-        if not self.config.cate_estimators:
-            return predictions
         binary_outcome = estimation.outcome_type == OutcomeType.BINARY
-        for spec in self.config.cate_estimators:
-            estimator_id = spec.kind.value
+        for estimator_id, spec in cate_runs:
             logger.info("Cross-fitting CATE estimator %s.", estimator_id)
             outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
             df_effects = cross_fit_predictions(
@@ -449,15 +479,16 @@ class CausalPipeline:
         estimation: CausalDataset,
         test: CausalDataset,
         test_scores: pd.DataFrame,
+        cate_runs: list[tuple[str, CATEEstimatorSpec]],
     ) -> dict[str, list[ContrastEvaluation]]:
         """Score CATE models fit on the estimation sample against test-set robust scores."""
-        if self.evaluator is None or not self.config.cate_estimators:
+        if self.evaluator is None or not cate_runs:
             return {}
         binary_outcome = test.outcome_type == OutcomeType.BINARY
         predictions = {}
-        for spec in self.config.cate_estimators:
+        for estimator_id, spec in cate_runs:
             outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
-            predictions[spec.kind.value] = predict_cate_fold(
+            predictions[estimator_id] = predict_cate_fold(
                 train=estimation,
                 held_out=test,
                 spec=spec,
@@ -466,7 +497,7 @@ class CausalPipeline:
             )
             log_pooled_factual_outcome(
                 records=outcome_records,
-                role=f"CATE/{spec.kind.value} outcome",
+                role=f"CATE/{estimator_id} outcome",
                 binary_outcome=binary_outcome,
                 metric_prefix="test",
             )
@@ -539,9 +570,11 @@ class CausalPipeline:
         self,
         ate_results: dict[str, pd.DataFrame],
         sensitivity_summaries: dict[str, pd.DataFrame],
+        spec_by_id: dict[str, ATEEstimatorSpec],
     ) -> pd.DataFrame:
         rows = []
         for estimator_id, estimates in ate_results.items():
+            config = estimator_config_columns(spec_by_id[estimator_id])
             sensitivity = (
                 sensitivity_summaries[estimator_id]
                 if estimator_id in sensitivity_summaries
@@ -550,6 +583,7 @@ class CausalPipeline:
             for _, estimate_row in estimates.iterrows():
                 row = {
                     "estimator": estimator_id,
+                    **config,
                     "contrast": estimate_row["contrast"],
                     "estimand": estimate_row["estimand"],
                     "estimate": estimate_row["estimate"],
@@ -576,10 +610,12 @@ class CausalPipeline:
         self,
         cate_ate_results: dict[str, pd.DataFrame],
         cate_evaluation: dict[str, list[ContrastEvaluation]],
-        test_cate_evaluation: dict[str, list[ContrastEvaluation]] | None = None,
+        test_cate_evaluation: dict[str, list[ContrastEvaluation]] | None,
+        spec_by_id: dict[str, CATEEstimatorSpec],
     ) -> pd.DataFrame:
         rows = []
         for estimator_id, ate_table in cate_ate_results.items():
+            config = estimator_config_columns(spec_by_id[estimator_id])
             contrast_evaluations = (
                 cate_evaluation[estimator_id]
                 if estimator_id in cate_evaluation
@@ -603,6 +639,7 @@ class CausalPipeline:
                 rows.append(
                     {
                         "estimator": estimator_id,
+                        **config,
                         "contrast": contrast,
                         "mean_crossfit_cate": ate_row["estimate"],
                         "eceth": evaluation.eceth if evaluation else None,

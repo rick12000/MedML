@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Union
 import numpy as np
 import pandas as pd
 from econml.policy import PolicyTree
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sklearn.base import BaseEstimator, clone
 from sklearn.tree import DecisionTreeRegressor
 
@@ -131,6 +131,24 @@ class ArbitraryTypesModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+class EstimatorAliasMixin(BaseModel):
+    """Optional human-chosen id for outputs, plots, and result directories."""
+
+    alias: str | None = None
+
+    @field_validator("alias", mode="before")
+    @classmethod
+    def normalize_alias(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("alias must be a string.")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("alias must be non-empty when provided.")
+        return stripped
+
+
 def clone_estimator(estimator: BaseEstimator) -> BaseEstimator:
     """Return an unfitted copy so fitting cannot mutate a shared config object."""
     return clone(estimator)
@@ -193,7 +211,7 @@ class DataConfig(BaseModel):
         return self
 
 
-class IPWATEEstimatorSpec(ArbitraryTypesModel):
+class IPWATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[ATEKind.IPW]
     propensity_learner: BaseEstimator | None = None
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
@@ -210,7 +228,7 @@ class IPWATEEstimatorSpec(ArbitraryTypesModel):
         return self
 
 
-class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
+class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[ATEKind.AIPW, ATEKind.TMLE]
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
@@ -228,7 +246,7 @@ class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
         return self
 
 
-class DoubleMLATEEstimatorSpec(ArbitraryTypesModel):
+class DoubleMLATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS]
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
@@ -253,7 +271,7 @@ MetaCATEKind = Literal[
 ]
 
 
-class MetaCATEEstimatorSpec(ArbitraryTypesModel):
+class MetaCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: MetaCATEKind
     outcome_learner: BaseEstimator | None = None
     effect_learner: BaseEstimator | None = None
@@ -269,22 +287,22 @@ class MetaCATEEstimatorSpec(ArbitraryTypesModel):
         return self
 
 
-class CausalForestCATEEstimatorSpec(ArbitraryTypesModel):
+class CausalForestCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[CATEKind.CAUSAL_FOREST]
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
 
 
-class TARNetCATEEstimatorSpec(BaseModel):
+class TARNetCATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[CATEKind.TARNET]
 
 
-class CFRNetCATEEstimatorSpec(BaseModel):
+class CFRNetCATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[CATEKind.CFRNET]
     penalty_disc: float = DEFAULT_CFRNET_PENALTY_DISC
 
 
-class DragonNetCATEEstimatorSpec(BaseModel):
+class DragonNetCATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[CATEKind.DRAGONNET]
 
 

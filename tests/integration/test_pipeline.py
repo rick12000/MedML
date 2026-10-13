@@ -129,8 +129,8 @@ def test_pipeline_recovers_constant_effect(
     cate_summary = read_dataframe(tmp_path / "summary" / "cate_estimators.csv")
     assert ate_summary.shape[0] == 1
     assert cate_summary.shape[0] == 2
-    assert list(ate_summary["estimator"]) == [ate_kind.value]
-    assert set(cate_summary["estimator"]) == {"s_learner", "t_learner"}
+    assert list(ate_summary["estimator_kind"]) == [ate_kind.value]
+    assert set(cate_summary["estimator_kind"]) == {"s_learner", "t_learner"}
     assert abs(float(ate_summary["estimate"].iloc[0]) - truth) < INTEGRATION_ATE_TOLERANCE
     assert np.isfinite(cate_summary["mean_crossfit_cate"]).all()
     assert np.isfinite(cate_summary["eceth"]).all()
@@ -141,8 +141,9 @@ def test_pipeline_recovers_constant_effect(
     assert (tmp_path / "summary" / "cate_mean_effects.png").is_file()
     assert (contrast_dir / "toc.png").is_file()
     assert (contrast_dir / "calibration.png").is_file()
-    assert (tmp_path / "cate" / "s_learner" / "1_vs_0" / "toc.png").is_file()
-    assert (tmp_path / "cate" / "s_learner" / "1_vs_0" / "calibration.png").is_file()
+    s_learner_id = cate_summary.loc[cate_summary["estimator_kind"] == "s_learner", "estimator"].iloc[0]
+    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "toc.png").is_file()
+    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "calibration.png").is_file()
     policy_summary = tmp_path / "summary" / "policy_methods.csv"
     if hold_out_for_policy:
         policy_table = read_dataframe(policy_summary)
@@ -190,5 +191,6 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
     assert ate_summary["robustness_value_point"].notna().all()
     assert transported.shape[0] == 1
     assert np.isfinite(transported["doubly_robust"]).all()
-    assert (tmp_path / "ate" / "dml_irm" / "sensitivity" / "contour.html").is_file()
-    assert (tmp_path / "ate" / "dml_irm" / "selection" / "unseen.csv").is_file()
+    dml_id = ate_summary["estimator"].iloc[0]
+    assert (tmp_path / "ate" / dml_id / "sensitivity" / "contour.html").is_file()
+    assert (tmp_path / "ate" / dml_id / "selection" / "unseen.csv").is_file()

@@ -7,9 +7,34 @@ import pytest
 from causal_pipeline.crossfit import (
     clip_propensity,
     cross_fit_splits,
+    mask_by_propensity_trim,
+    maybe_clip_propensity,
     one_versus_control_propensity,
+    propensity_trim_mask,
     target_potential_outcomes,
 )
+
+
+def test_maybe_clip_propensity_is_identity_when_bounds_are_none() -> None:
+    propensity = pd.DataFrame([[0.01, 0.99]], columns=[0, 1])
+    unchanged = maybe_clip_propensity(propensity, None)
+    assert unchanged.equals(propensity)
+
+
+def test_mask_by_propensity_trim_nan_outside_overlap() -> None:
+    effects = pd.DataFrame({"tau": [1.0, 2.0]}, index=[0, 1])
+    propensity = pd.DataFrame({0: [0.01, 0.5], 1: [0.99, 0.5]})
+    treatment = pd.Series([0, 1], index=[0, 1])
+    masked = mask_by_propensity_trim(effects, propensity, treatment, (0.02, 0.98))
+    assert np.isnan(masked.iloc[0, 0])
+    assert masked.iloc[1, 0] == 2.0
+
+
+def test_propensity_trim_mask_uses_observed_arm_probability() -> None:
+    propensity = pd.DataFrame({0: [0.01, 0.5], 1: [0.99, 0.5]})
+    treatment = pd.Series([0, 1])
+    mask = propensity_trim_mask(propensity, treatment, (0.02, 0.98))
+    assert mask.tolist() == [False, True]
 
 
 def test_three_arm_clip_stays_inside_the_configured_bounds() -> None:

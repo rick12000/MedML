@@ -76,6 +76,22 @@ class PolicySearchMode(StrEnum):
 
 
 DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
+
+
+def validate_propensity_overlap_handling(
+    clip_bounds: tuple[float, float] | None,
+    trim_bounds: tuple[float, float] | None,
+) -> None:
+    if clip_bounds is not None and trim_bounds is not None:
+        raise ValueError(
+            "At most one of clip_bounds and trim_bounds may be set; use clipping or trimming, not both."
+        )
+    for name, bounds in (("clip_bounds", clip_bounds), ("trim_bounds", trim_bounds)):
+        if bounds is None:
+            continue
+        lower, upper = bounds
+        if lower >= upper:
+            raise ValueError(f"{name} must be ordered as (lower, upper) with lower < upper.")
 DEFAULT_DML_N_FOLDS: int = 5
 DEFAULT_DML_N_REP: int = 1
 DEFAULT_ATE_CONFIDENCE_LEVEL: float = 0.95
@@ -180,24 +196,36 @@ class DataConfig(BaseModel):
 class IPWATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.IPW]
     propensity_learner: BaseEstimator | None = None
-    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    trim_bounds: tuple[float, float] | None = None
     weighting: IPWWeighting = IPWWeighting.HAJEK
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
     estimand: str = DEFAULT_ESTIMAND_ATE
 
+    @model_validator(mode="after")
+    def validate_propensity_bounds(self) -> IPWATEEstimatorSpec:
+        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        return self
+
 
 class DoublyRobustATEEstimatorSpec(ArbitraryTypesModel):
     kind: Literal[ATEKind.AIPW, ATEKind.TMLE]
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
-    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    trim_bounds: tuple[float, float] | None = None
     reduced: bool = DEFAULT_TMLE_REDUCED
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
     estimand: str = DEFAULT_ESTIMAND_ATE
+
+    @model_validator(mode="after")
+    def validate_propensity_bounds(self) -> DoublyRobustATEEstimatorSpec:
+        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        return self
 
 
 class DoubleMLATEEstimatorSpec(ArbitraryTypesModel):
@@ -231,8 +259,14 @@ class MetaCATEEstimatorSpec(ArbitraryTypesModel):
     effect_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
-    clip_bounds: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+    trim_bounds: tuple[float, float] | None = None
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+
+    @model_validator(mode="after")
+    def validate_propensity_bounds(self) -> MetaCATEEstimatorSpec:
+        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        return self
 
 
 class CausalForestCATEEstimatorSpec(ArbitraryTypesModel):

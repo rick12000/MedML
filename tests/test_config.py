@@ -13,6 +13,7 @@ from causal_pipeline.config import (
     CausalForestCATEEstimatorSpec,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
+    DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
@@ -199,6 +200,33 @@ def test_multi_treatment_config_accepts_at_least_three_arms(n_arms: int) -> None
         control_value=0,
         treatment_values=list(range(n_arms)),
     )
+
+
+def test_ate_spec_allows_neither_clip_nor_trim() -> None:
+    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=None)
+    assert spec.clip_bounds is None
+    assert spec.trim_bounds is None
+
+
+def test_ate_spec_rejects_clip_and_trim_together() -> None:
+    with pytest.raises(ValidationError):
+        IPWATEEstimatorSpec(
+            kind=ATEKind.IPW,
+            clip_bounds=(0.02, 0.98),
+            trim_bounds=(0.05, 0.95),
+        )
+    with pytest.raises(ValidationError):
+        DoublyRobustATEEstimatorSpec(
+            kind=ATEKind.AIPW,
+            clip_bounds=(0.02, 0.98),
+            trim_bounds=(0.05, 0.95),
+        )
+    with pytest.raises(ValidationError):
+        MetaCATEEstimatorSpec(
+            kind=CATEKind.X_LEARNER,
+            clip_bounds=(0.02, 0.98),
+            trim_bounds=(0.05, 0.95),
+        )
 
 
 def test_multi_treatment_config_rejects_two_arms() -> None:

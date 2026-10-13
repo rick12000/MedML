@@ -30,13 +30,14 @@ from causal_pipeline.config import (
 )
 from causal_pipeline.crossfit import (
     aipw_arm_scores,
-    clip_propensity,
+    apply_propensity_trim,
     cross_fit_nuisances,
     VARIANCE_PROPENSITY_TREATED_AS_KNOWN,
     factual_predictions,
     hajek_influence,
     horvitz_thompson_influence,
     learner_random_state,
+    maybe_clip_propensity,
     normal_interval_from_scores,
     target_potential_outcomes,
 )
@@ -187,8 +188,16 @@ class IPWAdapter(BaseATEEstimator):
             log_scope="ATE/IPW",
             tune_estimators=tune_estimators,
         )
-        self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
+        if self.spec.trim_bounds is not None:
+            self.treatment, self.outcome, self.propensity, _, self.groups = apply_propensity_trim(
+                treatment=self.treatment,
+                outcome=self.outcome,
+                propensity=self.propensity,
+                trim_bounds=self.spec.trim_bounds,
+                groups=self.groups,
+            )
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -206,7 +215,7 @@ class IPWAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=self.groups,
         )
-        table = annotate_propensity_clip(table, self.spec.clip_bounds)
+        table = annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
         table["variance_assumption"] = VARIANCE_PROPENSITY_TREATED_AS_KNOWN
         return table
 
@@ -254,9 +263,24 @@ class AIPWAdapter(BaseATEEstimator):
         if potential_outcomes is None:
             raise RuntimeError("AIPW cross-fit did not return potential outcomes.")
         self.potential_outcomes = potential_outcomes
-        self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
-        self.outcome_predictions = factual_predictions(potential_outcomes, self.treatment)
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
+        if self.spec.trim_bounds is not None:
+            (
+                self.treatment,
+                self.outcome,
+                self.propensity,
+                self.potential_outcomes,
+                self.groups,
+            ) = apply_propensity_trim(
+                treatment=self.treatment,
+                outcome=self.outcome,
+                propensity=self.propensity,
+                trim_bounds=self.spec.trim_bounds,
+                potential_outcomes=self.potential_outcomes,
+                groups=self.groups,
+            )
+        self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -280,7 +304,7 @@ class AIPWAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=self.groups,
         )
-        return annotate_propensity_clip(table, self.spec.clip_bounds)
+        return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
 
 
 class TMLEAdapter(BaseATEEstimator):
@@ -325,7 +349,23 @@ class TMLEAdapter(BaseATEEstimator):
         )
         if initial_outcomes is None:
             raise RuntimeError("TMLE cross-fit did not return potential outcomes.")
-        self.propensity = clip_propensity(propensity, self.spec.clip_bounds)
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
+        self.groups = observation_groups(data)
+        if self.spec.trim_bounds is not None:
+            (
+                self.treatment,
+                self.outcome,
+                self.propensity,
+                initial_outcomes,
+                self.groups,
+            ) = apply_propensity_trim(
+                treatment=self.treatment,
+                outcome=self.outcome,
+                propensity=self.propensity,
+                trim_bounds=self.spec.trim_bounds,
+                potential_outcomes=initial_outcomes,
+                groups=self.groups,
+            )
         self.potential_outcomes = target_potential_outcomes(
             outcome=self.outcome,
             treatment=self.treatment,
@@ -336,7 +376,6 @@ class TMLEAdapter(BaseATEEstimator):
             reduced=self.spec.reduced,
         )
         self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
-        self.groups = observation_groups(data)
         return self
 
     def estimate(self) -> pd.DataFrame:
@@ -360,7 +399,7 @@ class TMLEAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=self.groups,
         )
-        return annotate_propensity_clip(table, self.spec.clip_bounds)
+        return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
 
 
 class DoubleMLIRMAdapter(BaseATEEstimator):
@@ -739,13 +778,18 @@ def horvitz_thompson_scores_by_arm(
     }
 
 
-def annotate_propensity_clip(
+def annotate_propensity_overlap(
     table: pd.DataFrame,
-    clip_bounds: tuple[float, float],
+    clip_bounds: tuple[float, float] | None,
+    trim_bounds: tuple[float, float] | None,
 ) -> pd.DataFrame:
     annotated = table.copy()
-    annotated["clip_lower"] = clip_bounds[0]
-    annotated["clip_upper"] = clip_bounds[1]
+    if clip_bounds is not None:
+        annotated["clip_lower"] = clip_bounds[0]
+        annotated["clip_upper"] = clip_bounds[1]
+    if trim_bounds is not None:
+        annotated["trim_lower"] = trim_bounds[0]
+        annotated["trim_upper"] = trim_bounds[1]
     return annotated
 
 

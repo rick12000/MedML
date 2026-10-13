@@ -39,7 +39,13 @@ from causal_pipeline.config import (
     predict_outcome_mean,
     require_classifier,
 )
-from causal_pipeline.crossfit import cross_fit_propensity_map, dataset_groups, learner_random_state
+from causal_pipeline.crossfit import (
+    cross_fit_meta_learner_sample,
+    dataset_groups,
+    learner_random_state,
+    marginal_propensity_frame,
+    mask_by_propensity_trim,
+)
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 from causal_pipeline.nuisance_metrics import (
@@ -195,6 +201,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         self.model = None
         self.resolved_outcome_learner: BaseEstimator | None = None
         self.resolved_propensity_learner: BaseEstimator | None = None
+        self.overlap_propensity_model: BaseEstimator | None = None
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -221,14 +228,17 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             control_name=data.control_value,
         )
         features = data.X_adjustment.copy()
+        treatment = data.treatment_series
+        outcome = data.outcome_series
         propensity = None
         if self.letter in {"x", "r", "dr"}:
             if propensity_learner is None:
                 raise ValueError(f"{self.letter}-learner requires propensity_learner.")
             require_classifier(propensity_learner, "CATE propensity_learner")
-            propensity = cross_fit_propensity_map(
+            features, treatment, outcome, propensity = cross_fit_meta_learner_sample(
                 covariates=features,
-                treatment=data.treatment_series,
+                treatment=treatment,
+                outcome=outcome,
                 learner=propensity_learner,
                 treatment_values=data.treatment_values,
                 control_value=data.control_value,
@@ -238,43 +248,85 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                     self.spec.random_state,
                 ),
                 clip_bounds=self.spec.clip_bounds,
+                trim_bounds=self.spec.trim_bounds,
                 groups=dataset_groups(data),
                 log_scope=f"CATE/{self.letter}-learner",
             )
         if propensity is None:
             self.model.fit(
                 features,
-                treatment=data.treatment_series,
-                y=data.outcome_series,
+                treatment=treatment,
+                y=outcome,
             )
         else:
             self.model.fit(
                 features,
-                treatment=data.treatment_series,
-                y=data.outcome_series,
+                treatment=treatment,
+                y=outcome,
                 p=propensity,
             )
         if self.letter == "x":
-            self.attach_propensity_model(features, data.treatment_series)
+            self.overlap_propensity_model = self.attach_propensity_model(features, treatment)
+        elif self.spec.trim_bounds is not None:
+            self.overlap_propensity_model = self.fit_overlap_propensity_model(features, treatment)
         if self.letter == "r":
             log_r_learner_crossfit_outcome(
                 model=self.model,
                 features=features,
-                outcome=data.outcome_series,
+                outcome=outcome,
                 binary_outcome=binary,
             )
         return self
 
-    def attach_propensity_model(self, features: pd.DataFrame, treatment: pd.Series) -> None:
+    def fit_overlap_propensity_model(
+        self,
+        features: pd.DataFrame,
+        treatment: pd.Series,
+    ) -> BaseEstimator:
+        if self.resolved_propensity_learner is None:
+            raise RuntimeError("Propensity learner is not configured.")
+        fitted = clone_scaled_estimator(self.resolved_propensity_learner)
+        fitted.fit(features, treatment)
+        return fitted
+
+    def attach_propensity_model(
+        self,
+        features: pd.DataFrame,
+        treatment: pd.Series,
+    ) -> BaseEstimator | None:
         """X-learner prediction reweights by e(X). Keep that model on the configured learner."""
         if self.resolved_propensity_learner is None or self.model is None:
-            return
+            return None
         fitted = clone_scaled_estimator(self.resolved_propensity_learner)
         fitted.fit(features, treatment)
         groups = list(getattr(self.model, "t_groups", []))
         self.model.propensity_model = {
             group: ArmProbabilityModel(fitted, group) for group in groups
         }
+        return fitted
+
+    def overlap_propensity(self, data: CausalDataset) -> pd.DataFrame:
+        if self.overlap_propensity_model is None:
+            raise RuntimeError("Overlap propensity model is missing; refit the estimator.")
+        return marginal_propensity_frame(
+            self.overlap_propensity_model,
+            data.X_adjustment.copy(),
+            self.data.treatment_values,
+        )
+
+    def mask_to_overlap_region(
+        self,
+        values: pd.DataFrame | np.ndarray,
+        data: CausalDataset,
+    ) -> pd.DataFrame | np.ndarray:
+        if self.spec.trim_bounds is None:
+            return values
+        return mask_by_propensity_trim(
+            values,
+            self.overlap_propensity(data),
+            data.treatment_series,
+            self.spec.trim_bounds,
+        )
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
         if self.model is None:
@@ -287,8 +339,14 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             else self.contrast_names
         )
         if effects.ndim == 1:
-            return pd.DataFrame({columns[0]: effects})
-        return pd.DataFrame(effects, columns=columns[: effects.shape[1]])
+            effects_df = pd.DataFrame({columns[0]: effects}, index=data.X_adjustment.index)
+        else:
+            effects_df = pd.DataFrame(
+                effects,
+                index=data.X_adjustment.index,
+                columns=columns[: effects.shape[1]],
+            )
+        return self.mask_to_overlap_region(effects_df, data)
 
     def estimate(self, data: CausalDataset) -> pd.DataFrame:
         if self.model is None:
@@ -316,12 +374,13 @@ class MetaLearnerAdapter(BaseCATEEstimator):
     def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
         if self.model is None or self.letter == "r":
             return None
-        return meta_learner_factual_outcome(
+        predicted = meta_learner_factual_outcome(
             letter=self.letter,
             model=self.model,
             features=data.X_adjustment,
             treatment=data.treatment_series,
         )
+        return self.mask_to_overlap_region(predicted, data)
 
 
 class CausalForestAdapter(BaseCATEEstimator):

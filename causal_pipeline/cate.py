@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import logging
 from abc import ABC, abstractmethod
@@ -62,6 +63,8 @@ from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covari
 
 logger = logging.getLogger(__name__)
 
+NEURAL_EXTRA_INSTALL = 'pip install "medml[neural]"'
+
 META_LEARNER_CLASSES = {
     ("s", False): BaseSRegressor,
     ("s", True): BaseSClassifier,
@@ -102,7 +105,34 @@ class BaseCATEEstimator(ABC):
         return getattr(self, "model", self)
 
 
+def ensure_cate_spec_supported(spec: CATEEstimatorSpec) -> None:
+    """Raise when a neural CATE spec needs packages that are not installed."""
+    if spec.kind in {CATEKind.TARNET, CATEKind.CFRNET}:
+        _ensure_modules(("jax", "flax", "catenets"), spec.kind.value)
+        return
+    if spec.kind == CATEKind.DRAGONNET:
+        _ensure_modules(("jax", "flax"), spec.kind.value)
+        try:
+            from causalml.inference.jax import DragonNet  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                f"DragonNet is not available with the installed packages. "
+                f"Install with: {NEURAL_EXTRA_INSTALL}"
+            ) from error
+
+
+def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
+    missing = [name for name in module_names if importlib.util.find_spec(name) is None]
+    if not missing:
+        return
+    raise ImportError(
+        f"{label} requires optional packages ({', '.join(missing)}). "
+        f"Install with: {NEURAL_EXTRA_INSTALL}"
+    )
+
+
 def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseCATEEstimator:
+    ensure_cate_spec_supported(spec=spec)
     if spec.kind == CATEKind.S_LEARNER:
         return MetaLearnerAdapter(spec=spec, data=data, letter="s")
     if spec.kind == CATEKind.T_LEARNER:

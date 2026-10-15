@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import shutil
 from collections.abc import Callable
@@ -15,7 +16,7 @@ from causal_pipeline.ate import (
     initialize_ate_estimator,
     estimator_supports_sensitivity,
 )
-from causal_pipeline.cate import create_cate_estimator, mean_cate_table
+from causal_pipeline.cate import create_cate_estimator, ensure_cate_spec_supported, mean_cate_table
 from causal_pipeline.config import (
     ATEEstimatorSpec,
     ATEKind,
@@ -24,6 +25,7 @@ from causal_pipeline.config import (
     DEFAULT_PROPENSITY_CLIP,
     OutcomeType,
     PipelineConfig,
+    PolicyKind,
 )
 from causal_pipeline.learner_defaults import materialize_propensity_learner
 from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
@@ -62,6 +64,19 @@ DML_ATE_KINDS = frozenset(
         ATEKind.DML_APOS,
     }
 )
+
+R_EXTRA_INSTALL = 'pip install "medml[r]"'
+
+
+def ensure_pipeline_runtime_support(config: PipelineConfig) -> None:
+    """Fail before data work when the config needs optional packages that are missing."""
+    for spec in config.cate_estimators or []:
+        ensure_cate_spec_supported(spec=spec)
+    if config.policy is None:
+        return
+    if any(method.kind == PolicyKind.MOB for method in config.policy):
+        if importlib.util.find_spec("rpy2") is None:
+            raise ImportError(f"MOB requires optional dependency rpy2. Install with: {R_EXTRA_INSTALL}")
 
 
 def predict_cate_fold(
@@ -167,6 +182,7 @@ class CausalPipeline:
             )
         else:
             self.policy_service = None
+        ensure_pipeline_runtime_support(config=config)
 
     def run(self, df_input: pd.DataFrame) -> None:
         logger.info("Starting causal pipeline run.")

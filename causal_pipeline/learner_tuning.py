@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from enum import StrEnum
 from typing import Callable
@@ -10,7 +11,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from causallib.estimation import Standardization
-from optuna.samplers import GPSampler
+from optuna.samplers import BaseSampler, GPSampler, TPESampler
 from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split
@@ -143,15 +144,18 @@ def resolve_cate_spec_for_outer_train(
         )
         effect_learner = spec.effect_learner
         if effect_learner is not None:
-            effect_learner = prepare_learner_for_outer_train(
-                template=effect_learner,
-                features=features,
-                labels=outcome,
-                task=TuningTask.REGRESSION,
-                tune=True,
-                random_state=random_state,
-                stratify=treatment,
-            )
+            # causalml meta-learners keep effect models as regressors even for binary Y.
+            # Tuning them with validation R² on 0/1 labels is misleading, so use defaults.
+            if not binary_outcome:
+                effect_learner = prepare_learner_for_outer_train(
+                    template=effect_learner,
+                    features=features,
+                    labels=outcome,
+                    task=TuningTask.REGRESSION,
+                    tune=True,
+                    random_state=random_state,
+                    stratify=treatment,
+                )
         propensity_learner = spec.propensity_learner
         if propensity_learner is not None:
             propensity_learner = prepare_learner_for_outer_train(
@@ -228,11 +232,19 @@ def inner_holdout(
     return features.loc[train_index], features.loc[validation_index]
 
 
+def make_tuning_sampler(random_state: int) -> BaseSampler:
+    """GP-based search when PyTorch is installed; otherwise TPE (no extra dependency)."""
+    if importlib.util.find_spec("torch") is not None:
+        return GPSampler(seed=random_state, n_startup_trials=TUNING_N_STARTUP_TRIALS)
+    logger.debug("torch not installed; using TPESampler for hyperparameter search")
+    return TPESampler(seed=random_state, n_startup_trials=TUNING_N_STARTUP_TRIALS)
+
+
 def run_study(
     objective: Callable[[optuna.Trial], float],
     random_state: int,
 ) -> dict[str, object]:
-    sampler = GPSampler(seed=random_state, n_startup_trials=TUNING_N_STARTUP_TRIALS)
+    sampler = make_tuning_sampler(random_state=random_state)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=TUNING_N_TRIALS, show_progress_bar=False)
     return study.best_params

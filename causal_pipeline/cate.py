@@ -124,12 +124,15 @@ def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseC
     raise ValueError(f"Unsupported CATE kind: {spec.kind}")
 
 
-def reject_grouped_internal_crossfit(data: CausalDataset, estimator_name: str) -> None:
-    """causalml and the neural libraries cross-fit by row and cannot keep groups intact."""
-    if data.group_id is not None:
-        raise NotImplementedError(
-            f"{estimator_name} runs an internal row-wise cross-fit that cannot keep groups together."
-        )
+def warn_rowwise_internal_split(data: CausalDataset, estimator_name: str) -> None:
+    """Library early stopping holds out rows and cannot keep groups intact."""
+    if data.group_id is None:
+        return
+    logger.warning(
+        "%s splits its training rows for early stopping and cannot keep groups together. "
+        "Continuing with that row-wise split. Outer cross-fitting still holds out whole groups.",
+        estimator_name,
+    )
 
 
 def binary_library_treatment(data: CausalDataset) -> np.ndarray:
@@ -484,7 +487,7 @@ class TARNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> TARNetAdapter:
-        reject_grouped_internal_crossfit(data, "TARNet")
+        warn_rowwise_internal_split(data, "TARNet")
         from catenets.models.jax import TARNet
 
         self.model = TARNet()
@@ -514,7 +517,7 @@ class CFRNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> CFRNetAdapter:
-        reject_grouped_internal_crossfit(data, "CFRNet")
+        warn_rowwise_internal_split(data, "CFRNet")
         from catenets.models.jax import CFRNet
 
         self.model = CFRNet(penalty_disc=self.spec.penalty_disc)
@@ -544,7 +547,7 @@ class DragonNetAdapter(BaseCATEEstimator):
         )
 
     def fit(self, data: CausalDataset) -> DragonNetAdapter:
-        reject_grouped_internal_crossfit(data, "DragonNet")
+        warn_rowwise_internal_split(data, "DragonNet")
         from causalml.inference.jax import DragonNet
 
         self.model = DragonNet()

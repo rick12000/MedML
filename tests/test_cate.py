@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
 
-from causal_pipeline.cate import create_cate_estimator, mean_cate_table
+from causal_pipeline.cate import create_cate_estimator, mean_cate_table, warn_rowwise_internal_split
 from causal_pipeline.config import (
     CATEKind,
     CausalForestCATEEstimatorSpec,
@@ -31,6 +33,31 @@ FAST_CATE_KINDS = [
     CATEKind.DR_LEARNER,
     CATEKind.CAUSAL_FOREST,
 ]
+
+
+def test_grouped_neural_split_warns_and_continues(
+    binary_data_config: DataConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    grouped_config = binary_data_config.model_copy(update={"group_id": "patient_id"})
+    frame = pd.DataFrame(
+        {
+            "y": [0, 1],
+            "t": [0, 1],
+            "x1": [0.0, 1.0],
+            "x2": [1.0, 0.0],
+            "patient_id": [1, 1],
+        }
+    )
+    grouped = CausalDataset(data=grouped_config, df=frame)
+    ungrouped = CausalDataset(data=binary_data_config, df=frame.drop(columns=["patient_id"]))
+    with caplog.at_level(logging.WARNING):
+        warn_rowwise_internal_split(grouped, "DragonNet")
+        warn_rowwise_internal_split(ungrouped, "DragonNet")
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "DragonNet" in warnings[0].getMessage()
+    assert "row-wise" in warnings[0].getMessage()
 
 
 def test_binary_s_learner_rejects_regressor_outcome_model(

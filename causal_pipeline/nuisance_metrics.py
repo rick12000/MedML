@@ -61,14 +61,26 @@ def has_multiple_classes(values: np.ndarray) -> bool:
     return len(np.unique(values)) >= MINIMUM_CLASSES_FOR_AUC
 
 
+def finite_outcome_prediction_pairs(
+    outcome: np.ndarray,
+    predicted: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Drop rows with non-finite outcomes or scores (e.g. propensity-trimmed holdouts)."""
+    outcome_values = np.asarray(outcome, dtype=float)
+    prediction_values = np.asarray(predicted, dtype=float)
+    if outcome_values.shape != prediction_values.shape:
+        raise ValueError("Outcome and prediction arrays must have the same shape.")
+    mask = np.isfinite(outcome_values) & np.isfinite(prediction_values)
+    return outcome_values[mask], prediction_values[mask]
+
+
 def outcome_metric_from_predictions(
     outcome: np.ndarray,
     predicted: np.ndarray,
     binary_outcome: bool,
 ) -> OutcomeMetric | None:
-    outcome_values = np.asarray(outcome, dtype=float)
-    prediction_values = np.asarray(predicted, dtype=float)
-    if not has_multiple_classes(outcome_values):
+    outcome_values, prediction_values = finite_outcome_prediction_pairs(outcome, predicted)
+    if outcome_values.size == 0 or not has_multiple_classes(outcome_values):
         return None
     if binary_outcome:
         return OutcomeMetric("AUC", float(roc_auc_score(outcome_values, prediction_values)))

@@ -122,6 +122,17 @@ def method_name(mode: PolicySearchMode) -> str:
     return EXACT_POLICY_CAPITAL_METHOD
 
 
+def finite_cate_row_mask(values: pd.DataFrame | np.ndarray) -> np.ndarray:
+    """True for rows with finite CATE contrasts (trimmed estimates are NaN elsewhere)."""
+    if isinstance(values, pd.DataFrame):
+        matrix = values.to_numpy(dtype=float)
+    else:
+        matrix = np.asarray(values, dtype=float)
+    if matrix.ndim == 1:
+        return np.isfinite(matrix)
+    return np.isfinite(matrix).all(axis=1)
+
+
 def offset_treatment_rewards(
     rewards: np.ndarray,
     minimum_effect: float,

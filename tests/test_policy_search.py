@@ -108,6 +108,42 @@ def test_capital_tree_treats_the_cumulative_prefix() -> None:
     assert np.array_equal(tree.predict(features), np.array([1, 1, 1, 0]))
 
 
+def test_exact_policy_tree_ignores_non_finite_trimmed_cate_rows() -> None:
+    data = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=["x1"],
+        effect_modifiers=["x1"],
+        outcome_type=OutcomeType.BINARY,
+        treatment_mode=TreatmentMode.BINARY,
+        control_value=0,
+        treatment_values=[0, 1],
+    )
+    frame = pd.DataFrame(
+        {
+            "y": np.zeros(6, dtype=int),
+            "t": np.tile([0, 1], 3),
+            "x1": np.arange(6, dtype=float),
+        }
+    )
+    dataset = CausalDataset(data=data, df=frame)
+    effects = pd.DataFrame({"1_vs_0": [np.nan, np.nan, 0.1, 0.2, 0.9, 1.0]})
+    service = PolicyService(
+        methods=[
+            ExactPolicyTreeMethodSpec(
+                kind=PolicyKind.EXACT_POLICY_TREE,
+                mode=PolicySearchMode.WELFARE,
+                depth=1,
+            )
+        ],
+        bootstrap_samples=5,
+        random_state=0,
+    )
+    fitted = service.fit_policy_methods(estimation=dataset, predictions={"x_learner_trim": effects})
+    assert len(fitted) == 1
+    assert len(fitted[0].rules) >= 1
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_treatment"),
     [

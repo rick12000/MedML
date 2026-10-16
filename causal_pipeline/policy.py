@@ -31,6 +31,7 @@ from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.policy_tree import (
     ExactPolicyTree,
     capital_reward_matrix,
+    finite_cate_row_mask,
     method_name,
     offset_treatment_rewards,
 )
@@ -221,7 +222,25 @@ class PolicyService:
             split_step=spec.split_step,
             feature_names=list(X_mod.columns),
         )
-        tree.fit(features=X_mod, rewards=rewards, control_action=control_action)
+        overlap_rows = finite_cate_row_mask(rewards)
+        if not np.any(overlap_rows):
+            raise ValueError(
+                f"No finite CATE rewards remain for exact policy search ({estimator_id})."
+            )
+        excluded = int((~overlap_rows).sum())
+        if excluded:
+            logger.info(
+                "Exact policy tree for %s: fitting on %s patient(s), excluding %s with "
+                "non-finite CATE rewards outside the overlap region.",
+                estimator_id,
+                int(overlap_rows.sum()),
+                excluded,
+            )
+        tree.fit(
+            features=X_mod.loc[overlap_rows],
+            rewards=rewards[overlap_rows],
+            control_action=control_action,
+        )
         rules = self.extract_exact_policy_rules(
             tree=tree,
             X_mod=X_mod,

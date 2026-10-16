@@ -17,6 +17,8 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.tree import DecisionTreeRegressor
 
+from causal_pipeline.policy_tree import finite_cate_row_mask
+
 logger = logging.getLogger(__name__)
 
 VIRTUAL_TWINS_METHOD = "virtual_twins"
@@ -48,12 +50,25 @@ class VirtualTwins:
         robust_scores: pd.DataFrame | None,
     ) -> VirtualTwins:
         effect_frame = effects.copy()
+        overlap_rows = finite_cate_row_mask(effect_frame)
+        if not np.any(overlap_rows):
+            raise ValueError("Virtual twins need at least one patient with finite CATE effects.")
+        excluded = int((~overlap_rows).sum())
+        if excluded:
+            logger.info(
+                "Virtual twins: fitting on %s patient(s), excluding %s with non-finite "
+                "CATE effects outside the overlap region.",
+                int(overlap_rows.sum()),
+                excluded,
+            )
+        features_fit = features.loc[overlap_rows]
+        effects_fit = effect_frame.loc[overlap_rows]
         model = clone(self.tree)
-        model.fit(features, effect_frame.to_numpy(dtype=float))
+        model.fit(features_fit, effects_fit.to_numpy(dtype=float))
         qualifying = qualifying_leaf_ids(
             model=model,
-            features=features,
-            effects=effect_frame.to_numpy(dtype=float),
+            features=features_fit,
+            effects=effects_fit.to_numpy(dtype=float),
             minimum_effect=self.minimum_effect,
         )
         self.model = model

@@ -61,6 +61,7 @@ from causal_pipeline.selection import (
     unseen_population_bound,
 )
 from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
+from causal_pipeline.subgroup_figures import SUBGROUP_SPLITS_FIGURE_NAME, plot_subgroup_splits_table
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -461,9 +462,12 @@ class CausalPipeline:
             )
             for estimator_id, model in ate_models.items()
         ]
-        self.results.write_dataframe(
-            "ate/subgroup_splits.csv",
-            pd.concat(tables, ignore_index=True),
+        combined = pd.concat(tables, ignore_index=True)
+        self.results.write_dataframe("ate/subgroup_splits.csv", combined)
+        plot_subgroup_splits_table(
+            table=combined,
+            split_order=[(split.column, split.cutoff) for split in splits],
+            save_path=str(self.results.root / "ate" / SUBGROUP_SPLITS_FIGURE_NAME),
         )
 
     def run_ate_sensitivity(

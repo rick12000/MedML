@@ -15,6 +15,7 @@ from causal_pipeline.subgroup import (
     available_subgroup_splits,
     subgroup_split_table,
 )
+from causal_pipeline.subgroup_figures import plot_subgroup_splits_table
 
 CONFIDENCE_LEVEL = 0.95
 
@@ -142,6 +143,49 @@ def test_subgroup_splits_are_skipped_when_every_column_is_missing(
         )
     assert kept == []
     assert "none of the columns" in caplog.text
+
+
+def test_subgroup_split_figure_renders(tmp_path) -> None:
+    dataset = CausalDataset(
+        data=DataConfig(
+            outcome="y",
+            treatment="t",
+            confounders=["x1"],
+            effect_modifiers=["x1"],
+            outcome_type=OutcomeType.CONTINUOUS,
+            treatment_mode=TreatmentMode.BINARY,
+            control_value=0,
+            treatment_values=[0, 1],
+        ),
+        df=pd.DataFrame(
+            {
+                "y": [4.0, 6.0, 10.0, 10.0, 10.0, 10.0],
+                "t": [0, 1, 0, 1, 0, 1],
+                "x1": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                "age": [40.0, 50.0, 60.0, 70.0, 80.0, 90.0],
+            }
+        ),
+    )
+    scores = TreatmentContrastScores(
+        values=pd.DataFrame({"1_vs_0": [1.0, 1.0, 2.0, 2.0, 2.0, 2.0]}),
+        positions=np.arange(len(dataset.df)),
+        groups=None,
+        confidence_level=CONFIDENCE_LEVEL,
+    )
+    table = subgroup_split_table(
+        dataset=dataset,
+        splits=[SubgroupSplit(column="age", cutoff=60.0)],
+        scores=scores,
+        estimator_id="ipw",
+    )
+    output = tmp_path / "subgroup_splits.png"
+    plot_subgroup_splits_table(
+        table=table,
+        split_order=[("age", 60.0)],
+        save_path=str(output),
+    )
+    assert output.is_file()
+    assert output.stat().st_size > 0
 
 
 def test_subgroup_split_rejects_a_one_sided_cutoff() -> None:

@@ -48,8 +48,12 @@ XGBOOST_MIN_CHILD_WEIGHTS: tuple[int, ...] = (5, 12)
 SCREEN_SPLIT_ATTEMPTS = 20
 SHAP_ROW_LIMIT = 200
 CORRELATION_FIGURE_SIZE = 6.0
+COLUMN_DROP_FIGURE_WIDTH = 8.0
+COLUMN_DROP_FIGURE_ROW_HEIGHT = 0.35
+COLUMN_DROP_CI_MULTIPLIER = 1.96
 LOWEST_SELECTION_SCORE = -1.0
 XGBOOST_ARCHITECTURE = "xgboost"
+LOGISTIC_ARCHITECTURE = "logistic_regression"
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,8 @@ def run_nuisance_screen(
         binary_outcome=False,
         classification=True,
         random_state=screen.random_state,
+        column_drop_repeats=screen.column_drop_repeats,
+        column_drop_top_features=screen.column_drop_top_features,
         destination=root / "propensity",
     )
     outcome_frame = outcome_design(
@@ -110,6 +116,8 @@ def run_nuisance_screen(
         binary_outcome=binary_outcome,
         classification=binary_outcome,
         random_state=screen.random_state,
+        column_drop_repeats=screen.column_drop_repeats,
+        column_drop_top_features=screen.column_drop_top_features,
         destination=root / "outcome",
     )
     logger.info("Wrote nuisance screens under %s", root)
@@ -228,6 +236,8 @@ def fit_role(
     binary_outcome: bool,
     classification: bool,
     random_state: int,
+    column_drop_repeats: int,
+    column_drop_top_features: int,
     destination: Path,
 ) -> None:
     train_features = split.train.loc[:, feature_columns]
@@ -272,17 +282,23 @@ def fit_role(
         classification=classification,
         random_state=random_state,
     )
+    training_features = pd.concat([train_features, validation_features], axis=0)
+    training_labels = pd.concat([train_labels, validation_labels], axis=0)
     write_model_screen(
         role=role,
-        architecture="logistic_regression",
+        architecture=LOGISTIC_ARCHITECTURE,
         model=logistic,
         features=test_features,
         labels=test_labels,
+        training_features=training_features,
+        training_labels=training_labels,
         classification=classification,
         binary_outcome=binary_outcome,
         parameters=logistic_parameters,
-        destination=destination / "logistic_regression",
+        destination=destination / LOGISTIC_ARCHITECTURE,
         random_state=random_state,
+        column_drop_repeats=column_drop_repeats,
+        column_drop_top_features=column_drop_top_features,
     )
     write_model_screen(
         role=role,
@@ -290,6 +306,8 @@ def fit_role(
         model=boosted,
         features=test_features,
         labels=test_labels,
+        training_features=training_features,
+        training_labels=training_labels,
         classification=classification,
         binary_outcome=binary_outcome,
         parameters={
@@ -298,6 +316,8 @@ def fit_role(
         },
         destination=destination / XGBOOST_ARCHITECTURE,
         random_state=random_state,
+        column_drop_repeats=column_drop_repeats,
+        column_drop_top_features=column_drop_top_features,
     )
 
 
@@ -450,11 +470,15 @@ def write_model_screen(
     model: ScaledLearner | XGBClassifier | XGBRegressor,
     features: pd.DataFrame,
     labels: pd.Series,
+    training_features: pd.DataFrame,
+    training_labels: pd.Series,
     classification: bool,
     binary_outcome: bool,
     parameters: dict[str, float | int | None],
     destination: Path,
     random_state: int,
+    column_drop_repeats: int,
+    column_drop_top_features: int,
 ) -> None:
     score = validation_score(
         model=model,
@@ -482,6 +506,217 @@ def write_model_screen(
         destination=destination,
         random_state=random_state,
     )
+    write_column_drop_importance(
+        training_features=training_features,
+        training_labels=training_labels,
+        evaluation_features=features,
+        evaluation_labels=labels,
+        architecture=architecture,
+        parameters=parameters,
+        classification=classification,
+        binary_outcome=binary_outcome,
+        repeats=column_drop_repeats,
+        top_features=column_drop_top_features,
+        destination=destination,
+        random_state=random_state,
+    )
+
+
+def refit_screen_model(
+    architecture: str,
+    features: pd.DataFrame,
+    labels: pd.Series,
+    parameters: dict[str, float | int | None],
+    classification: bool,
+    random_state: int,
+) -> ScaledLearner | XGBClassifier | XGBRegressor:
+    if architecture == LOGISTIC_ARCHITECTURE:
+        penalty_c = parameters.get("C")
+        if classification and penalty_c is None:
+            raise ValueError("Logistic column-drop screens require a penalty C.")
+        return fit_logistic(
+            features=features,
+            labels=labels,
+            penalty_c=penalty_c if classification else None,
+            classification=classification,
+            random_state=random_state,
+        )
+    if architecture == XGBOOST_ARCHITECTURE:
+        max_depth = parameters.get("max_depth")
+        min_child_weight = parameters.get("min_child_weight")
+        if max_depth is None or min_child_weight is None:
+            raise ValueError("XGBoost column-drop screens require max_depth and min_child_weight.")
+        return fit_xgboost(
+            features=features,
+            labels=labels,
+            choice=XgboostChoice(max_depth=int(max_depth), min_child_weight=int(min_child_weight)),
+            classification=classification,
+            random_state=random_state,
+        )
+    raise ValueError(f"Unsupported screen architecture for column drop: {architecture}")
+
+
+def performance_drop_metric_name(classification: bool) -> str:
+    return "AUC" if classification else "R2"
+
+
+def column_drop_repeat_seed(random_state: int, repeat_index: int) -> int:
+    return random_state + repeat_index
+
+
+def summarize_column_drops(drops: np.ndarray) -> tuple[float, float, float, float, float]:
+    """Mean drop with sample standard deviation, SEM, and a normal 95% interval."""
+    values = np.asarray(drops, dtype=float)
+    repeat_count = values.size
+    mean_drop = float(np.mean(values))
+    if repeat_count <= 1:
+        return mean_drop, 0.0, 0.0, mean_drop, mean_drop
+    std_drop = float(np.std(values, ddof=1))
+    sem_drop = std_drop / np.sqrt(repeat_count)
+    half_width = COLUMN_DROP_CI_MULTIPLIER * sem_drop
+    return mean_drop, std_drop, float(sem_drop), mean_drop - half_width, mean_drop + half_width
+
+
+def column_drop_importance_table(
+    training_features: pd.DataFrame,
+    training_labels: pd.Series,
+    evaluation_features: pd.DataFrame,
+    evaluation_labels: pd.Series,
+    architecture: str,
+    parameters: dict[str, float | int | None],
+    classification: bool,
+    binary_outcome: bool,
+    repeats: int,
+    random_state: int,
+) -> pd.DataFrame:
+    """Retrain without each column and measure held-out performance loss versus the full model."""
+    if repeats < 1:
+        raise ValueError("column_drop_repeats must be at least 1.")
+    feature_columns = list(training_features.columns)
+    metric_name = performance_drop_metric_name(classification=classification)
+    drop_samples: dict[str, list[float]] = {column: [] for column in feature_columns}
+    for repeat_index in range(repeats):
+        repeat_seed = column_drop_repeat_seed(random_state=random_state, repeat_index=repeat_index)
+        baseline_model = refit_screen_model(
+            architecture=architecture,
+            features=training_features,
+            labels=training_labels,
+            parameters=parameters,
+            classification=classification,
+            random_state=repeat_seed,
+        )
+        baseline_score = validation_score(
+            model=baseline_model,
+            features=evaluation_features,
+            labels=evaluation_labels,
+            classification=classification,
+            binary_outcome=binary_outcome,
+        )
+        for column in feature_columns:
+            remaining_columns = [name for name in feature_columns if name != column]
+            reduced_training = training_features.loc[:, remaining_columns]
+            reduced_evaluation = evaluation_features.loc[:, remaining_columns]
+            reduced_model = refit_screen_model(
+                architecture=architecture,
+                features=reduced_training,
+                labels=training_labels,
+                parameters=parameters,
+                classification=classification,
+                random_state=repeat_seed,
+            )
+            reduced_score = validation_score(
+                model=reduced_model,
+                features=reduced_evaluation,
+                labels=evaluation_labels,
+                classification=classification,
+                binary_outcome=binary_outcome,
+            )
+            drop_samples[column].append(baseline_score - reduced_score)
+    rows: list[dict[str, float | int | str]] = []
+    for column in feature_columns:
+        mean_drop, std_drop, sem_drop, ci_low, ci_high = summarize_column_drops(
+            np.asarray(drop_samples[column], dtype=float)
+        )
+        rows.append(
+            {
+                "feature": column,
+                f"mean_{metric_name}_drop": mean_drop,
+                f"std_{metric_name}_drop": std_drop,
+                f"sem_{metric_name}_drop": sem_drop,
+                f"ci95_lower_{metric_name}_drop": ci_low,
+                f"ci95_upper_{metric_name}_drop": ci_high,
+                "n_repeats": repeats,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def write_column_drop_importance(
+    training_features: pd.DataFrame,
+    training_labels: pd.Series,
+    evaluation_features: pd.DataFrame,
+    evaluation_labels: pd.Series,
+    architecture: str,
+    parameters: dict[str, float | int | None],
+    classification: bool,
+    binary_outcome: bool,
+    repeats: int,
+    top_features: int,
+    destination: Path,
+    random_state: int,
+) -> None:
+    table = column_drop_importance_table(
+        training_features=training_features,
+        training_labels=training_labels,
+        evaluation_features=evaluation_features,
+        evaluation_labels=evaluation_labels,
+        architecture=architecture,
+        parameters=parameters,
+        classification=classification,
+        binary_outcome=binary_outcome,
+        repeats=repeats,
+        random_state=random_state,
+    )
+    metric_name = performance_drop_metric_name(classification=classification)
+    mean_column = f"mean_{metric_name}_drop"
+    sem_column = f"sem_{metric_name}_drop"
+    ranked = table.sort_values(mean_column, ascending=False)
+    write_dataframe(destination / "column_drop_importance.csv", ranked)
+    plot_column_drop_importance(
+        table=ranked,
+        metric_name=metric_name,
+        top_features=top_features,
+        destination=destination / "column_drop_importance.png",
+    )
+
+
+def plot_column_drop_importance(
+    table: pd.DataFrame,
+    metric_name: str,
+    top_features: int,
+    destination: Path,
+) -> None:
+    mean_column = f"mean_{metric_name}_drop"
+    sem_column = f"sem_{metric_name}_drop"
+    panel = table.head(top_features).iloc[::-1]
+    figure_height = max(3.0, COLUMN_DROP_FIGURE_ROW_HEIGHT * len(panel))
+    figure, axis = plt.subplots(figsize=(COLUMN_DROP_FIGURE_WIDTH, figure_height))
+    positions = np.arange(len(panel))
+    axis.barh(
+        y=positions,
+        width=panel[mean_column].to_numpy(dtype=float),
+        xerr=panel[sem_column].to_numpy(dtype=float),
+        color="steelblue",
+        capsize=3.0,
+        zorder=2,
+    )
+    axis.set_yticks(positions, panel["feature"].tolist())
+    axis.set_xlabel(f"Held-out {metric_name} drop when column is removed")
+    axis.set_title(f"Top {len(panel)} features by column-drop importance")
+    axis.axvline(0.0, color="black", linewidth=0.8, linestyle="--", zorder=1)
+    figure.tight_layout()
+    save_figure(destination, figure)
+    plt.close(figure)
 
 
 def write_shap(

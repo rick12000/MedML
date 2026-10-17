@@ -121,6 +121,8 @@ DEFAULT_BENCHMARK_GRID_SIZE: PositiveInt = 100
 DEFAULT_LEARNER_RANDOM_STATE: int = 0
 DEFAULT_NUISANCE_SCREEN_TEST_FRACTION: Fraction = 0.2
 DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION: Fraction = 0.25
+DEFAULT_COLUMN_DROP_REPEATS: PositiveInt = 5
+DEFAULT_COLUMN_DROP_TOP_FEATURES: PositiveInt = 20
 DEFAULT_TUNE_ESTIMATORS: bool = False
 CATE_DEPENDENT_POLICY_KINDS = frozenset(
     {PolicyKind.POLICY_TREE, PolicyKind.EXACT_POLICY_TREE, PolicyKind.VIRTUAL_TWINS}
@@ -423,6 +425,8 @@ class NuisanceScreenConfig(BaseModel):
     test_fraction: Fraction = DEFAULT_NUISANCE_SCREEN_TEST_FRACTION
     validation_fraction: Fraction = DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+    column_drop_repeats: PositiveInt = DEFAULT_COLUMN_DROP_REPEATS
+    column_drop_top_features: PositiveInt = DEFAULT_COLUMN_DROP_TOP_FEATURES
 
 
 class SubgroupSplit(BaseModel):

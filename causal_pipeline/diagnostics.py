@@ -31,7 +31,7 @@ from causal_pipeline.figures import (
     series_style,
     style_axis,
 )
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import save_figure, write_dataframe
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
 OVERLAP_HISTOGRAM_BINS = 30
@@ -118,6 +118,15 @@ class DiagnosticsRunner:
             control_value=train.control_value,
             save_path=save_path,
         )
+        if save_path is not None:
+            overlap_data = propensity_overlap_frame(
+                treatment=train.treatment_series.to_numpy(),
+                probabilities=probabilities,
+                treatment_mode=train.treatment_mode,
+                treatment_values=train.treatment_values,
+                control_value=train.control_value,
+            )
+            write_dataframe(Path(save_path).with_suffix(".csv"), overlap_data)
 
         balance = self.covariate_balance(
             covariates=adjustment_covariates,
@@ -263,6 +272,23 @@ def overlap_weights(
     marginal = {arm: float(np.mean(treatment == arm)) for arm in levels}
     scale = np.array([marginal[value] for value in treatment], dtype=float)
     return weights * scale
+
+
+def propensity_overlap_frame(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+) -> pd.DataFrame:
+    frame = pd.DataFrame({"treatment": treatment})
+    if treatment_mode == TreatmentMode.BINARY:
+        non_control = next(arm for arm in treatment_values if arm != control_value)
+        frame["propensity"] = probability_of_arm(probabilities, non_control)
+        return frame
+    for arm in treatment_values:
+        frame[f"propensity_{arm}"] = probability_of_arm(probabilities, arm)
+    return frame
 
 
 def probability_of_arm(probabilities: pd.DataFrame, arm: JsonValue) -> np.ndarray:

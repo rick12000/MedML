@@ -41,4 +41,5 @@ def test_diagnostics_writes_overlap_plot_under_results_root(
     result = runner.run(train=dataset, results_root=str(tmp_path))
     overlap_path = tmp_path / "diagnostics" / "propensity_overlap.png"
     assert overlap_path.is_file()
+    assert (tmp_path / "diagnostics" / "propensity_overlap.csv").is_file()
     assert result.propensity_overlap_path is not None

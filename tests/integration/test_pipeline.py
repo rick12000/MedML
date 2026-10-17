@@ -136,13 +136,17 @@ def test_pipeline_recovers_constant_effect(
     assert np.isfinite(cate_summary["eceth"]).all()
     contrast_dir = tmp_path / "cate" / "comparison" / "1_vs_0"
     assert (tmp_path / "diagnostics" / "propensity_overlap.png").is_file()
+    assert (tmp_path / "diagnostics" / "propensity_overlap.csv").is_file()
     assert (tmp_path / "data" / "estimation.parquet").is_file()
     assert (tmp_path / "summary" / "ate_intervals.png").is_file()
     assert (tmp_path / "summary" / "cate_mean_effects.png").is_file()
     assert (contrast_dir / "toc.png").is_file()
+    assert (contrast_dir / "toc.csv").is_file()
     assert (contrast_dir / "calibration.png").is_file()
+    assert (contrast_dir / "calibration.csv").is_file()
     s_learner_id = cate_summary.loc[cate_summary["estimator_kind"] == "s_learner", "estimator"].iloc[0]
     assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "toc.png").is_file()
+    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "toc.csv").is_file()
     assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "calibration.png").is_file()
     policy_summary = tmp_path / "summary" / "policy_methods.csv"
     if hold_out_for_policy:
@@ -150,7 +154,9 @@ def test_pipeline_recovers_constant_effect(
         assert policy_table.shape[0] >= 1
         assert policy_table["effect_estimate"].notna().all()
         assert (contrast_dir / "test_toc.png").is_file()
+        assert (contrast_dir / "test_toc.csv").is_file()
         assert (contrast_dir / "test_calibration.png").is_file()
+        assert (contrast_dir / "test_calibration.csv").is_file()
     else:
         assert not policy_summary.exists()
 
@@ -193,4 +199,5 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
     assert np.isfinite(transported["doubly_robust"]).all()
     dml_id = ate_summary["estimator"].iloc[0]
     assert (tmp_path / "ate" / dml_id / "sensitivity" / "contour.html").is_file()
+    assert (tmp_path / "ate" / dml_id / "sensitivity" / "contour.csv").is_file()
     assert (tmp_path / "ate" / dml_id / "selection" / "unseen.csv").is_file()

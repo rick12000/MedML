@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -62,6 +63,38 @@ def ranking_curve(tau_hat: np.ndarray, gamma: np.ndarray) -> tuple[np.ndarray, n
     )
 
 
+def write_ranking_curve_data(save_path: str | Path, series: Sequence[RankingSeries]) -> Path:
+    rows: list[dict[str, float | str]] = []
+    for item in series:
+        for fraction, value in zip(item.toc_fraction, item.toc_value, strict=True):
+            rows.append(
+                {
+                    "estimator": item.estimator_id,
+                    "toc_fraction": float(fraction),
+                    "toc_value": float(value),
+                }
+            )
+    destination = Path(save_path).with_suffix(".csv")
+    write_dataframe(destination, pd.DataFrame(rows))
+    return destination
+
+
+def write_calibration_curve_data(save_path: str | Path, series: Sequence[CalibrationSeries]) -> Path:
+    rows: list[dict[str, float | str]] = []
+    for item in series:
+        for predicted, observed in zip(item.predicted, item.observed, strict=True):
+            rows.append(
+                {
+                    "estimator": item.estimator_id,
+                    "mean_predicted_cate": float(predicted),
+                    "mean_robust_proxy": float(observed),
+                }
+            )
+    destination = Path(save_path).with_suffix(".csv")
+    write_dataframe(destination, pd.DataFrame(rows))
+    return destination
+
+
 def save_joint_cate_figures(
     ranking_by_contrast: dict[str, list[RankingSeries]],
     calibration_by_contrast: dict[str, list[CalibrationSeries]],
@@ -71,14 +104,15 @@ def save_joint_cate_figures(
     marker = "test_" if held_out else ""
     for contrast, ranking in ranking_by_contrast.items():
         comparison = results_root / "cate" / "comparison" / contrast
-        plot_ranking_curves(
-            series=ranking,
-            save_path=str(comparison / f"{marker}toc.png"),
-        )
+        toc_path = comparison / f"{marker}toc.png"
+        calibration_path = comparison / f"{marker}calibration.png"
+        plot_ranking_curves(series=ranking, save_path=str(toc_path))
+        write_ranking_curve_data(toc_path, ranking)
         plot_calibration_curves(
             series=calibration_by_contrast[contrast],
-            save_path=str(comparison / f"{marker}calibration.png"),
+            save_path=str(calibration_path),
         )
+        write_calibration_curve_data(calibration_path, calibration_by_contrast[contrast])
         logger.info("Saved joint CATE figures for %s.", contrast)
 
 
@@ -247,7 +281,9 @@ class CATEEvaluator:
                     eceth_p_value=eceth_pvalue,
                 )
                 toc_path = f"cate/{estimator_id}/{contrast}/{marker}toc.png"
-                plot_ranking_curves(series=[ranking], save_path=str(results_root / toc_path))
+                toc_file = results_root / toc_path
+                plot_ranking_curves(series=[ranking], save_path=str(toc_file))
+                write_ranking_curve_data(toc_file, [ranking])
                 plot_calibration_curves(
                     series=[calibration],
                     save_path=str(calibration_file),

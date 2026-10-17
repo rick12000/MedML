@@ -53,7 +53,7 @@ from causal_pipeline.learner_resolve import (
     materialize_ipw_propensity,
 )
 from causal_pipeline.scaling import clone_scaled_estimator
-from causal_pipeline.utils import write_html
+from causal_pipeline.utils import write_dataframe, write_html
 
 logger = logging.getLogger(__name__)
 
@@ -1050,6 +1050,32 @@ def population_outcome_for_arm(population: pd.Series, arm: JsonValue) -> float:
     raise KeyError(arm)
 
 
+def sensitivity_contour_dataframe(figure: object) -> pd.DataFrame:
+    """Long-form grid underlying a DoubleML sensitivity contour plot."""
+    heatmap = None
+    for trace in figure.data:
+        trace_type = trace.type if hasattr(trace, "type") else trace.get("type")
+        if trace_type in {"heatmap", "contour"}:
+            heatmap = trace
+            break
+    if heatmap is None:
+        raise RuntimeError("Sensitivity plot did not include a contour trace.")
+    cf_d = np.asarray(heatmap.x, dtype=float)
+    cf_y = np.asarray(heatmap.y, dtype=float)
+    contour_values = np.asarray(heatmap.z, dtype=float)
+    rows: list[dict[str, float]] = []
+    for row_index, cf_y_value in enumerate(cf_y):
+        for column_index, cf_d_value in enumerate(cf_d):
+            rows.append(
+                {
+                    "cf_d": float(cf_d_value),
+                    "cf_y": float(cf_y_value),
+                    "contour_value": float(contour_values[row_index, column_index]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 class SensitivityResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
@@ -1113,6 +1139,7 @@ class ATESensitivityAnalyzer:
             null_hypothesis=sensitivity_config.null_effect,
         )
         contour_path = str(write_html(contour_dir / "contour.html", figure))
+        write_dataframe(contour_dir / "contour.csv", sensitivity_contour_dataframe(figure))
         summary = pd.DataFrame(
             {
                 "robustness_value_point": [point_rv],

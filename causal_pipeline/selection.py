@@ -22,6 +22,7 @@ would cancel the included estimate.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import matplotlib
 
@@ -49,7 +50,7 @@ from causal_pipeline.figures import (
     series_style,
     style_axis,
 )
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import save_figure, write_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -242,13 +243,11 @@ def fit_propensity(
     )
 
 
-def plot_tipping_point(
+def tipping_point_curve_data(
     bound: UnseenPopulationBound,
     outcome_lower: float,
     outcome_upper: float,
-    save_path: str,
-) -> None:
-    """Plot the population effect against the unknown effect among excluded patients."""
+) -> pd.DataFrame:
     excluded_lower = outcome_lower - outcome_upper
     excluded_upper = outcome_upper - outcome_lower
     excluded_grid = np.linspace(excluded_lower, excluded_upper, TIPPING_GRID_SIZE)
@@ -257,6 +256,29 @@ def plot_tipping_point(
         inclusion_fraction=bound.inclusion_fraction,
         excluded_effect=excluded_grid,
     )
+    return pd.DataFrame(
+        {
+            "excluded_ate": excluded_grid,
+            "population_ate": population_effect,
+            "tipping_point": bound.tipping_point,
+        }
+    )
+
+
+def plot_tipping_point(
+    bound: UnseenPopulationBound,
+    outcome_lower: float,
+    outcome_upper: float,
+    save_path: str,
+) -> None:
+    """Plot the population effect against the unknown effect among excluded patients."""
+    curve = tipping_point_curve_data(
+        bound=bound,
+        outcome_lower=outcome_lower,
+        outcome_upper=outcome_upper,
+    )
+    excluded_grid = curve["excluded_ate"].to_numpy(dtype=float)
+    population_effect = curve["population_ate"].to_numpy(dtype=float)
     with publication_style():
         figure, axis = plt.subplots(figsize=(SINGLE_COLUMN_WIDTH, PANEL_HEIGHT))
         population_style = series_style(0)
@@ -290,4 +312,5 @@ def plot_tipping_point(
         place_outside_legend(axis)
         figure.tight_layout()
         save_figure(save_path, figure)
+        write_dataframe(Path(save_path).with_suffix(".csv"), curve)
         plt.close(figure)

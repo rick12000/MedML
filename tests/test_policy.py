@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 
 from causal_pipeline.config import OutcomeFavorability
+from econml.policy import PolicyTree
+
 from causal_pipeline.policy import (
     INTERVAL_STATUS_BOOTSTRAP,
     INTERVAL_STATUS_DEFINITIONAL,
@@ -12,6 +14,20 @@ from causal_pipeline.policy import (
     reward_direction,
     reward_matrix,
 )
+from causal_pipeline.policy_tree import sklearn_tree_leaf_descriptions
+
+
+def test_sklearn_policy_tree_leaf_descriptions_use_split_paths() -> None:
+    features = pd.DataFrame({"age": [1.0, 2.0, 3.0, 4.0], "score": [0.0, 1.0, 2.0, 3.0]})
+    rewards = np.column_stack([np.zeros(4), np.arange(4.0)])
+    tree = PolicyTree(max_depth=1, min_samples_leaf=1)
+    tree.fit(features, rewards)
+    descriptions = sklearn_tree_leaf_descriptions(tree, feature_names=list(features.columns))
+    leaf_ids = tree.apply(features)
+    for leaf in sorted(set(leaf_ids)):
+        text = descriptions[int(leaf)]
+        assert "leaf_" not in text
+        assert "≤" in text or ">" in text or text == "all patients"
 
 
 def test_reward_matrix_places_each_contrast_on_its_arm() -> None:

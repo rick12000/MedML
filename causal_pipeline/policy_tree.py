@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from sklearn.tree import _tree
 
 from causal_pipeline.config import JsonValue, PolicySearchMode
 
@@ -392,4 +393,28 @@ def describe_leaves(node: PolicySplitNode, feature_names: list[str]) -> dict[int
         threshold = format(current.threshold, ".6g")
         pending.append((current.left, clauses + [f"{feature_name} <= {threshold}"]))
         pending.append((current.right, clauses + [f"{feature_name} > {threshold}"]))
+    return descriptions
+
+
+def sklearn_tree_leaf_descriptions(
+    sklearn_tree: object,
+    feature_names: list[str],
+) -> dict[int, str]:
+    """Map ``apply`` leaf node ids to human-readable path rules."""
+    tree_ = sklearn_tree.tree_
+    descriptions: dict[int, str] = {}
+
+    def visit(node_id: int, clauses: list[str]) -> None:
+        if tree_.children_left[node_id] == _tree.TREE_LEAF:
+            descriptions[int(node_id)] = " and ".join(clauses) if clauses else "all patients"
+            return
+        feature_index = int(tree_.feature[node_id])
+        if feature_index < 0:
+            raise RuntimeError(f"Internal node {node_id} is missing a split feature.")
+        feature_name = feature_names[feature_index]
+        threshold = format(float(tree_.threshold[node_id]), ".6g")
+        visit(int(tree_.children_left[node_id]), clauses + [f"{feature_name} <= {threshold}"])
+        visit(int(tree_.children_right[node_id]), clauses + [f"{feature_name} > {threshold}"])
+
+    visit(0, [])
     return descriptions

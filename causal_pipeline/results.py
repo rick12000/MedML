@@ -53,6 +53,9 @@ class ResultStore:
     def cate_dir(self, estimator_id: str) -> Path:
         return ensure_directory(self.root / "cate" / estimator_id)
 
+    def policy_slice_dir(self, slice_slug: str) -> Path:
+        return ensure_directory(self.root / "policy" / "slices" / slice_slug)
+
     def write_dataframe(self, relative_path: str, df: pd.DataFrame) -> Path:
         return persist_dataframe(self.root / relative_path, df)
 

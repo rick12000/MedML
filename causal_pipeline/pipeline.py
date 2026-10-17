@@ -42,7 +42,17 @@ from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.figures import plot_interval_estimates, plot_point_estimates
 from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
 from causal_pipeline.nuisance_screen import run_nuisance_screen
-from causal_pipeline.policy import PolicyService
+from causal_pipeline.policy import (
+    POLICY_DATA_SPLIT_TEST,
+    POLICY_DATA_SPLIT_TRAIN,
+    FittedPolicy,
+    PolicyService,
+)
+from causal_pipeline.policy_figures import (
+    POLICY_TREE_FIGURE_NAME,
+    policy_slice_slug,
+    save_policy_slice_figure,
+)
 from causal_pipeline.results import ResultStore
 from causal_pipeline.selection import (
     plot_tipping_point,
@@ -271,10 +281,20 @@ class CausalPipeline:
             )
             policy_results = self.policy_service.evaluate_policies(
                 policies=policies,
+                splits=[
+                    (estimation, estimation_scores, POLICY_DATA_SPLIT_TRAIN),
+                    (partitions.test, test_scores, POLICY_DATA_SPLIT_TEST),
+                ],
+            )
+            self.results.write_dataframe("policy/summary.csv", policy_results)
+            self.persist_policy_artifacts(
+                policies=policies,
+                policy_results=policy_results,
+                estimation=estimation,
+                estimation_scores=estimation_scores,
                 test=partitions.test,
                 test_scores=test_scores,
             )
-            self.results.write_dataframe("policy/summary.csv", policy_results)
 
         ate_summary = self.build_ate_summary(
             ate_results,
@@ -577,6 +597,34 @@ class CausalPipeline:
                     }
                 )
                 write_dataframe(contrast_dir / table_name, df_cate_evaluation)
+
+    def persist_policy_artifacts(
+        self,
+        policies: list[FittedPolicy],
+        policy_results: pd.DataFrame,
+        estimation: CausalDataset,
+        estimation_scores: pd.DataFrame,
+        test: CausalDataset,
+        test_scores: pd.DataFrame,
+    ) -> None:
+        for policy in policies:
+            slice_slug = policy_slice_slug(policy)
+            slice_dir = self.results.policy_slice_dir(slice_slug)
+            slice_rows = policy_results.loc[
+                (policy_results["method"] == policy.method)
+                & (policy_results["source_cate_model"] == policy.source_cate_model)
+            ]
+            if not slice_rows.empty:
+                write_dataframe(slice_dir / "rule_performance.csv", slice_rows)
+            save_policy_slice_figure(
+                policy=policy,
+                estimation=estimation,
+                train_scores=estimation_scores,
+                test=test,
+                test_scores=test_scores,
+                save_path=str(slice_dir / POLICY_TREE_FIGURE_NAME),
+            )
+        logger.info("Saved policy slice tables and figures under %s", self.results.root / "policy")
 
     def write_summary_figures(
         self,

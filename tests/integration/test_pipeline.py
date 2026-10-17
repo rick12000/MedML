@@ -153,6 +153,12 @@ def test_pipeline_recovers_constant_effect(
         policy_table = read_dataframe(policy_summary)
         assert policy_table.shape[0] >= 1
         assert policy_table["effect_estimate"].notna().all()
+        assert set(policy_table["data_split"]) == {"train", "test"}
+        assert policy_table["rule"].str.startswith("leaf_").sum() == 0
+        slice_dirs = list((tmp_path / "policy" / "slices").glob("*"))
+        assert slice_dirs
+        assert slice_dirs[0].joinpath("policy_tree.png").is_file()
+        assert slice_dirs[0].joinpath("rule_performance.csv").is_file()
         assert (contrast_dir / "test_toc.png").is_file()
         assert (contrast_dir / "test_toc.csv").is_file()
         assert (contrast_dir / "test_calibration.png").is_file()

@@ -34,6 +34,7 @@ from causal_pipeline.policy_tree import (
     finite_cate_row_mask,
     method_name,
     offset_treatment_rewards,
+    sklearn_tree_leaf_descriptions,
 )
 from causal_pipeline.virtual_twins import QUALIFYING_UNION_RULE, VIRTUAL_TWINS_METHOD, VirtualTwins
 
@@ -51,6 +52,8 @@ BOOTSTRAP_CI_UPPER_PERCENTILE = 97.5
 INTERVAL_STATUS_DEFINITIONAL = "definitional"
 INTERVAL_STATUS_BOOTSTRAP = "percentile_bootstrap"
 MOB_ARM_COLUMN = "mob_non_control"
+POLICY_DATA_SPLIT_TRAIN = "train"
+POLICY_DATA_SPLIT_TEST = "test"
 
 
 @dataclass(frozen=True)
@@ -398,6 +401,10 @@ class PolicyService:
         leaf_ids = np.asarray(tree.apply(X_mod))
         actions = np.asarray(tree.predict(X_mod))
         levels = dataset.treatment_values if action_levels is None else action_levels
+        descriptions = sklearn_tree_leaf_descriptions(
+            sklearn_tree=tree,
+            feature_names=list(X_mod.columns),
+        )
         rules = []
         for rule_id, leaf in enumerate(sorted(set(leaf_ids))):
             mask = leaf_ids == leaf
@@ -407,7 +414,7 @@ class PolicyService:
                     method=method,
                     source_cate_model=source_cate_model,
                     rule_id=rule_id,
-                    rule=f"leaf_{leaf}",
+                    rule=descriptions[int(leaf)],
                     recommended_treatment=levels[recommended],
                     learning_n=int(mask.sum()),
                     subgroup_leaf=int(leaf),
@@ -453,6 +460,10 @@ class PolicyService:
         dataset: CausalDataset,
     ) -> list[PolicyRule]:
         leaf_ids = np.asarray(tree.apply(X_mod))
+        descriptions = sklearn_tree_leaf_descriptions(
+            sklearn_tree=tree,
+            feature_names=list(X_mod.columns),
+        )
         rules = []
         for rule_id, leaf in enumerate(sorted(set(leaf_ids))):
             mask = leaf_ids == leaf
@@ -467,7 +478,7 @@ class PolicyService:
                     method=method,
                     source_cate_model=source_cate_model,
                     rule_id=rule_id,
-                    rule=f"leaf_{leaf}",
+                    rule=descriptions[int(leaf)],
                     recommended_treatment=recommended_arm,
                     learning_n=int(mask.sum()),
                     subgroup_leaf=int(leaf),
@@ -487,6 +498,10 @@ class PolicyService:
             raise RuntimeError("Virtual twins did not fit a tree.")
         leaf_ids = np.asarray(twins.model.apply(X_mod))
         qualifying = set(twins.qualifying_leaves)
+        descriptions = sklearn_tree_leaf_descriptions(
+            sklearn_tree=twins.model,
+            feature_names=list(X_mod.columns),
+        )
         rules = []
         for leaf in sorted(qualifying):
             mask = leaf_ids == leaf
@@ -503,7 +518,7 @@ class PolicyService:
                     method=VIRTUAL_TWINS_METHOD,
                     source_cate_model=source_cate_model,
                     rule_id=len(rules),
-                    rule=f"leaf_{leaf}",
+                    rule=descriptions[int(leaf)],
                     recommended_treatment=recommended_arm,
                     learning_n=int(mask.sum()),
                     subgroup_leaf=int(leaf),
@@ -560,57 +575,81 @@ class PolicyService:
     def evaluate_policies(
         self,
         policies: list[FittedPolicy],
-        test: CausalDataset,
-        test_scores: pd.DataFrame,
+        splits: list[tuple[CausalDataset, pd.DataFrame, str]],
     ) -> pd.DataFrame:
-        X_mod = test.X_effect_modifiers
         rows = []
-        n_test = len(test.df)
         for policy in policies:
-            leaf_ids = self.subgroup_leaf_ids(policy=policy, X_mod=X_mod)
-            for rule in policy.rules:
-                if leaf_ids is None:
-                    subgroup_scores = test_scores
-                    test_n = len(test_scores)
-                else:
-                    if rule.included_leaves is not None:
-                        mask = np.isin(leaf_ids, list(rule.included_leaves))
-                    elif rule.subgroup_leaf is None:
-                        continue
-                    else:
-                        mask = leaf_ids == rule.subgroup_leaf
-                    subgroup_scores = test_scores.iloc[mask]
-                    test_n = int(mask.sum())
-                if test_n == 0:
-                    continue
-                interval = self.bootstrap_subgroup_effect(
-                    subgroup_scores=subgroup_scores,
-                    recommended_treatment=rule.recommended_treatment,
-                    control_value=test.control_value,
-                )
-                rows.append(
-                    {
-                        "method": policy.method,
-                        "source_cate_model": policy.source_cate_model,
-                        "rule_id": rule.rule_id,
-                        "rule": rule.rule,
-                        "recommended_treatment": rule.recommended_treatment,
-                        "test_n": test_n,
-                        "test_prevalence": test_n / n_test,
-                        "effect_estimate": interval.estimate,
-                        "ci_lower_given_rule": interval.ci_lower,
-                        "ci_upper_given_rule": interval.ci_upper,
-                        "interval_status": interval.interval_status,
-                        "learning_effect": np.nan if rule.learning_effect is None else rule.learning_effect,
-                        "debiased_learning_effect": (
-                            np.nan if rule.debiased_effect is None else rule.debiased_effect
-                        ),
-                    }
+            for dataset, scores, data_split in splits:
+                rows.extend(
+                    self._evaluate_policy_on_split(
+                        policy=policy,
+                        dataset=dataset,
+                        scores=scores,
+                        data_split=data_split,
+                    )
                 )
         summary = pd.DataFrame(rows)
         if not summary.empty:
-            summary["n_rules_scored"] = len(summary)
+            summary["n_rules_scored"] = summary.groupby(
+                ["method", "source_cate_model", "data_split"],
+                dropna=False,
+            )["rule_id"].transform("count")
         return summary
+
+    def _evaluate_policy_on_split(
+        self,
+        policy: FittedPolicy,
+        dataset: CausalDataset,
+        scores: pd.DataFrame,
+        data_split: str,
+    ) -> list[dict[str, object]]:
+        X_mod = dataset.X_effect_modifiers
+        rows: list[dict[str, object]] = []
+        cohort_n = len(dataset.df)
+        leaf_ids = self.subgroup_leaf_ids(policy=policy, X_mod=X_mod)
+        for rule in policy.rules:
+            if leaf_ids is None:
+                subgroup_scores = scores
+                split_n = len(scores)
+            else:
+                if rule.included_leaves is not None:
+                    mask = np.isin(leaf_ids, list(rule.included_leaves))
+                elif rule.subgroup_leaf is None:
+                    continue
+                else:
+                    mask = leaf_ids == rule.subgroup_leaf
+                subgroup_scores = scores.iloc[mask]
+                split_n = int(mask.sum())
+            if split_n == 0:
+                continue
+            interval = self.bootstrap_subgroup_effect(
+                subgroup_scores=subgroup_scores,
+                recommended_treatment=rule.recommended_treatment,
+                control_value=dataset.control_value,
+            )
+            rows.append(
+                {
+                    "method": policy.method,
+                    "source_cate_model": policy.source_cate_model,
+                    "data_split": data_split,
+                    "rule_id": rule.rule_id,
+                    "rule": rule.rule,
+                    "recommended_treatment": rule.recommended_treatment,
+                    "split_n": split_n,
+                    "split_prevalence": split_n / cohort_n,
+                    "test_n": split_n,
+                    "test_prevalence": split_n / cohort_n,
+                    "effect_estimate": interval.estimate,
+                    "ci_lower_given_rule": interval.ci_lower,
+                    "ci_upper_given_rule": interval.ci_upper,
+                    "interval_status": interval.interval_status,
+                    "learning_effect": np.nan if rule.learning_effect is None else rule.learning_effect,
+                    "debiased_learning_effect": (
+                        np.nan if rule.debiased_effect is None else rule.debiased_effect
+                    ),
+                }
+            )
+        return rows
 
     def bootstrap_subgroup_effect(
         self,

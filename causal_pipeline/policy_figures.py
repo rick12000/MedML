@@ -37,8 +37,9 @@ LEAF_SPACING_INCHES = 1.55
 EDGE_LINE_WIDTH = 0.9
 BOX_LINE_WIDTH = 0.9
 FOOTNOTE = (
-    "Δ = benefit of treatment vs control in the node (sign-adjusted; positive favours treatment). "
-    "Decisions come from the fitted tree; Δ is computed separately on training and held-out rows."
+    "Δ = held-out benefit of treatment vs control in the node (doubly robust scores on the "
+    "test split only; sign-adjusted; positive favours treatment). Tree structure and decisions "
+    "come from the estimation sample."
 )
 
 @dataclass(frozen=True)
@@ -47,8 +48,6 @@ class DrawnNode:
     header: str
     is_leaf: bool
     decision: JsonValue
-    train_n: int
-    train_benefit: float
     test_n: int
     test_benefit: float
     children: tuple[str, str] | None
@@ -88,7 +87,7 @@ def save_policy_slice_figure(
     test_scores: pd.DataFrame,
     save_path: str,
 ) -> None:
-    """One fitted tree. Structure and decisions come from training; Δ is shown on both samples."""
+    """One fitted tree. Structure and decisions come from estimation; Δ is held-out test only."""
     if not policy_supports_tree_figure(policy):
         return
     nodes = build_tree_nodes(
@@ -141,7 +140,6 @@ def build_tree_nodes(
     return assemble_nodes(
         specs=specs,
         estimation=estimation,
-        train_scores=train_scores,
         test=test,
         test_scores=test_scores,
     )
@@ -317,21 +315,14 @@ def exact_tree_specs(
 def assemble_nodes(
     specs: list[NodeSpec],
     estimation: CausalDataset,
-    train_scores: pd.DataFrame,
     test: CausalDataset,
     test_scores: pd.DataFrame,
 ) -> list[DrawnNode]:
-    """Attach benefit values from the shared subgroup definition and x-positions for drawing."""
+    """Attach held-out test benefit per node and x-positions for drawing."""
     positions = _leaf_x_positions({spec.key: spec for spec in specs})
     drawn: list[DrawnNode] = []
     for spec in specs:
-        train_n = int(spec.train_mask.sum())
         test_n = int(spec.test_mask.sum())
-        train_benefit = (
-            subgroup_benefit(spec.train_mask, train_scores, estimation, spec.decision).benefit
-            if train_n
-            else float("nan")
-        )
         test_benefit = (
             subgroup_benefit(spec.test_mask, test_scores, test, spec.decision).benefit
             if test_n
@@ -343,8 +334,6 @@ def assemble_nodes(
                 header=spec.header,
                 is_leaf=spec.is_leaf,
                 decision=spec.decision,
-                train_n=train_n,
-                train_benefit=train_benefit,
                 test_n=test_n,
                 test_benefit=test_benefit,
                 children=spec.children,
@@ -487,8 +476,7 @@ def draw_node(ax: Axes, node: DrawnNode) -> None:
     lines = [
         (node.header, HEADER_FONT_SIZE, "bold"),
         (decision_text, BODY_FONT_SIZE, "normal"),
-        (f"Train  n={node.train_n}  Δ={format_benefit(node.train_benefit)}", BODY_FONT_SIZE, "normal"),
-        (f"Test   n={node.test_n}  Δ={format_benefit(node.test_benefit)}", BODY_FONT_SIZE, "normal"),
+        (f"Test n={node.test_n}  Δ={format_benefit(node.test_benefit)}", BODY_FONT_SIZE, "normal"),
     ]
     spacing = 0.165
     top = y + (len(lines) - 1) * spacing / 2

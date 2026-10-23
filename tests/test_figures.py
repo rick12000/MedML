@@ -10,6 +10,7 @@ from matplotlib.container import BarContainer, ErrorbarContainer
 from matplotlib.table import Table
 
 from causal_pipeline.figures import (
+    drop_nonfinite_effect_estimates,
     CalibrationSeries,
     RankingSeries,
     compose_calibration_curves,
@@ -140,6 +141,30 @@ def test_interval_figure_rejects_missing_estimates() -> None:
             upper_column="ci_upper",
             xlabel="Average treatment effect",
         )
+
+
+def test_drop_nonfinite_effect_estimates_keeps_plottable_rows() -> None:
+    estimates = pd.DataFrame(
+        {
+            "estimator": ["s_learner", "dr_learner_trim"],
+            "contrast": ["1_vs_0", "1_vs_0"],
+            "estimate": [0.12, np.nan],
+        }
+    )
+    kept = drop_nonfinite_effect_estimates(
+        estimates,
+        "estimate",
+        figure_name="cate_mean_effects.png",
+    )
+    assert kept.shape[0] == 1
+    assert kept["estimator"].iloc[0] == "s_learner"
+    compose_point_estimates(
+        estimates=kept,
+        estimator_column="estimator",
+        contrast_column="contrast",
+        estimate_column="estimate",
+        xlabel="Mean conditional treatment effect",
+    )
 
 
 def test_ranking_and_calibration_figures_report_metrics_under_each_panel(

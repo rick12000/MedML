@@ -142,9 +142,9 @@ def test_policy_tree_figure_decision_matches_fitted_policy_on_heterogeneous_cate
         majority_action = int(np.bincount(fitted_actions[row_mask]).argmax())
         assert node.decision == dataset.treatment_values[majority_action]
         if node.is_treat:
-            assert node.train_benefit > 0.0
+            assert node.test_benefit > 0.0
         else:
-            assert node.train_benefit <= 0.0
+            assert node.test_benefit <= 0.0
     policy_png = artifact_path(
         test_output_dir,
         "policy",

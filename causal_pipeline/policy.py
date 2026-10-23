@@ -588,6 +588,11 @@ class PolicyService:
         policies: list[FittedPolicy],
         splits: list[tuple[CausalDataset, pd.DataFrame, str]],
     ) -> pd.DataFrame:
+        """Score fitted rules with doubly robust subgroup effects.
+
+        Callers should pass only the held-out test split so reported effects are
+        not duplicated on the estimation sample used to learn the tree.
+        """
         rows = []
         for policy in policies:
             for dataset, scores, data_split in splits:

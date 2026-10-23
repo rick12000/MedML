@@ -39,12 +39,15 @@ from causal_pipeline.estimator_identity import (
     estimator_config_columns,
 )
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
-from causal_pipeline.figures import plot_interval_estimates, plot_point_estimates
+from causal_pipeline.figures import (
+    drop_nonfinite_effect_estimates,
+    plot_interval_estimates,
+    plot_point_estimates,
+)
 from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
 from causal_pipeline.nuisance_screen import run_nuisance_screen
 from causal_pipeline.policy import (
     POLICY_DATA_SPLIT_TEST,
-    POLICY_DATA_SPLIT_TRAIN,
     FittedPolicy,
     PolicyService,
 )
@@ -283,10 +286,7 @@ class CausalPipeline:
             )
             policy_results = self.policy_service.evaluate_policies(
                 policies=policies,
-                splits=[
-                    (estimation, estimation_scores, POLICY_DATA_SPLIT_TRAIN),
-                    (partitions.test, test_scores, POLICY_DATA_SPLIT_TEST),
-                ],
+                splits=[(partitions.test, test_scores, POLICY_DATA_SPLIT_TEST)],
             )
             self.results.write_dataframe("policy/summary.csv", policy_results)
             self.persist_policy_artifacts(
@@ -639,10 +639,15 @@ class CausalPipeline:
     ) -> None:
         summary_dir = self.results.root / "summary"
         wrote_figure = False
-        if not ate_summary.empty:
+        ate_for_figure = drop_nonfinite_effect_estimates(
+            ate_summary,
+            "estimate",
+            figure_name="ate_intervals.png",
+        )
+        if not ate_for_figure.empty:
             wrote_figure = True
             plot_interval_estimates(
-                estimates=ate_summary,
+                estimates=ate_for_figure,
                 save_path=str(summary_dir / "ate_intervals.png"),
                 estimator_column="estimator",
                 contrast_column="contrast",
@@ -651,10 +656,15 @@ class CausalPipeline:
                 upper_column="ci_upper",
                 xlabel=ATE_INTERVAL_XLABEL,
             )
-        if not cate_summary.empty:
+        cate_for_figure = drop_nonfinite_effect_estimates(
+            cate_summary,
+            "mean_crossfit_cate",
+            figure_name="cate_mean_effects.png",
+        )
+        if not cate_for_figure.empty:
             wrote_figure = True
             plot_point_estimates(
-                estimates=cate_summary,
+                estimates=cate_for_figure,
                 save_path=str(summary_dir / "cate_mean_effects.png"),
                 estimator_column="estimator",
                 contrast_column="contrast",

@@ -485,6 +485,30 @@ def compose_calibration_curves(series: Sequence[CalibrationSeries]) -> Figure:
     return figure
 
 
+def drop_nonfinite_effect_estimates(
+    estimates: pd.DataFrame,
+    estimate_column: str,
+    *,
+    figure_name: str,
+) -> pd.DataFrame:
+    """Return rows with finite point estimates; log and drop the rest for summary figures."""
+    if estimates.empty or estimate_column not in estimates.columns:
+        return estimates
+    values = pd.to_numeric(estimates[estimate_column], errors="coerce")
+    keep = np.isfinite(values.to_numpy(dtype=float, copy=False))
+    if keep.all():
+        return estimates
+    for _, row in estimates.loc[~keep].iterrows():
+        logger.warning(
+            "Omitting non-finite %s for estimator=%s contrast=%s from %s.",
+            estimate_column,
+            row.get("estimator", "?"),
+            row.get("contrast", "?"),
+            figure_name,
+        )
+    return estimates.loc[keep].reset_index(drop=True)
+
+
 def effect_groups(
     estimates: pd.DataFrame,
     estimator_column: str,

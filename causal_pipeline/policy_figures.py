@@ -119,10 +119,10 @@ def build_tree_nodes(
             return []
         specs = exact_tree_specs(
             root=policy.model.node,
+            tree=policy.model,
             feature_names=policy.feature_names,
             train_features=estimation.X_effect_modifiers,
             test_features=test.X_effect_modifiers,
-            train_scores=train_scores,
             dataset=estimation,
         )
     else:
@@ -208,8 +208,12 @@ def sklearn_tree_specs(
                 dataset=dataset,
             )
         else:
-            action = int(np.argmax(sklearn_tree.value[node_id][:, 0]))
-            decision = levels[action]
+            decision = _fitted_policy_decision(
+                tree=tree,
+                mask=train_path[:, node_id],
+                features=train_features,
+                levels=levels,
+            )
         specs.append(
             NodeSpec(
                 key=str(node_id),
@@ -233,14 +237,15 @@ def sklearn_tree_specs(
 
 def exact_tree_specs(
     root: PolicySplitNode,
+    tree: ExactPolicyTree,
     feature_names: list[str],
     train_features: pd.DataFrame,
     test_features: pd.DataFrame,
-    train_scores: pd.DataFrame,
     dataset: CausalDataset,
 ) -> list[NodeSpec]:
     train_matrix = np.asarray(train_features.to_numpy(), dtype=float)
     test_matrix = np.asarray(test_features.to_numpy(), dtype=float)
+    assigned_actions, _ = tree.assign(features=train_features)
     specs: list[NodeSpec] = []
 
     def visit(
@@ -255,7 +260,11 @@ def exact_tree_specs(
         test_mask = np.zeros(len(test_matrix), dtype=bool)
         test_mask[test_positions] = True
         if current.leaf_id is not None:
-            decision = dataset.treatment_values[int(current.action)]
+            decision = _majority_policy_decision(
+                actions=assigned_actions,
+                mask=train_mask,
+                treatment_values=dataset.treatment_values,
+            )
             specs.append(
                 NodeSpec(key, "Leaf", True, None, None, train_mask, test_mask, decision, depth)
             )
@@ -266,7 +275,11 @@ def exact_tree_specs(
             raise RuntimeError("Internal policy node is missing a child.")
         feature = feature_names[current.feature_index]
         header = f"{feature} ≤ {format(current.threshold, '.4g')}"
-        decision = _best_arm_for_mask(mask=train_mask, scores=train_scores, dataset=dataset)
+        decision = _majority_policy_decision(
+            actions=assigned_actions,
+            mask=train_mask,
+            treatment_values=dataset.treatment_values,
+        )
         specs.append(
             NodeSpec(
                 key,
@@ -369,6 +382,33 @@ def _control_first_levels(dataset: CausalDataset) -> list[JsonValue]:
     return [dataset.control_value] + [
         value for value in dataset.treatment_values if value != dataset.control_value
     ]
+
+
+def _fitted_policy_decision(
+    tree: PolicyTree | DecisionTreeRegressor,
+    mask: np.ndarray,
+    features: pd.DataFrame,
+    levels: list[JsonValue],
+) -> JsonValue:
+    """Majority fitted action among rows reaching this node."""
+    row_index = np.flatnonzero(mask)
+    if row_index.size == 0:
+        return levels[0]
+    predictions = np.asarray(tree.predict(features.iloc[row_index]), dtype=int)
+    action = int(np.bincount(predictions, minlength=len(levels)).argmax())
+    return levels[action]
+
+
+def _majority_policy_decision(
+    actions: np.ndarray,
+    mask: np.ndarray,
+    treatment_values: list[JsonValue],
+) -> JsonValue:
+    row_index = np.flatnonzero(mask)
+    if row_index.size == 0:
+        return treatment_values[0]
+    action = int(np.bincount(actions[row_index], minlength=len(treatment_values)).argmax())
+    return treatment_values[action]
 
 
 def _best_arm_for_mask(mask: np.ndarray, scores: pd.DataFrame, dataset: CausalDataset) -> JsonValue:

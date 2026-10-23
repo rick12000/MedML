@@ -12,7 +12,13 @@ from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.stats import t as student_t
 
-from causal_pipeline.config import CATEEvaluationConfig, OutcomeType, predict_outcome_mean
+from causal_pipeline.config import (
+    CATEEvaluationConfig,
+    OutcomeFavorability,
+    OutcomeType,
+    predict_outcome_mean,
+)
+from causal_pipeline.policy import reward_direction
 from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
 from causal_pipeline.learner_resolve import materialize_evaluation_learners
 from causal_pipeline.scaling import clone_scaled_estimator
@@ -54,9 +60,28 @@ def calibration_bin_rows(
     return rows
 
 
-def ranking_curve(tau_hat: np.ndarray, gamma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def benefit_oriented_scores(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    direction: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sign-adjust predictions and DR proxies for treat-when-beneficial ranking."""
+    oriented_tau = direction * np.asarray(tau_hat, dtype=float)
+    oriented_gamma = direction * np.asarray(gamma, dtype=float)
+    return oriented_tau, oriented_gamma
+
+
+def ranking_curve(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    direction: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
     """TOC curve. AUTOC and Qini RATE are two integrals of this same curve."""
-    table = get_toc(rate_input_frame(tau_hat, gamma), treatment_effect_col="tau")
+    oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
+    table = get_toc(
+        rate_input_frame(oriented_tau, oriented_gamma),
+        treatment_effect_col="tau",
+    )
     return (
         table.index.to_numpy(dtype=float).copy(),
         table.iloc[:, 0].to_numpy(dtype=float).copy(),
@@ -219,7 +244,9 @@ class CATEEvaluator:
         robust_scores: pd.DataFrame,
         results_root: Path,
         held_out: bool = False,
+        outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER,
     ) -> dict[str, list[ContrastEvaluation]]:
+        direction = reward_direction(outcome_favorability)
         results: dict[str, list[ContrastEvaluation]] = {}
         ranking_by_contrast: dict[str, list[RankingSeries]] = {}
         calibration_by_contrast: dict[str, list[CalibrationSeries]] = {}
@@ -246,16 +273,22 @@ class CATEEvaluator:
                 )
                 calibration_path = f"cate/{estimator_id}/{contrast}/{marker}calibration.png"
                 calibration_file = results_root / calibration_path
-                toc_fraction, toc_value = ranking_curve(tau_hat=tau_hat, gamma=gamma)
+                toc_fraction, toc_value = ranking_curve(
+                    tau_hat=tau_hat,
+                    gamma=gamma,
+                    direction=direction,
+                )
                 rate_autoc, rate_autoc_p = self.rate_with_bootstrap(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     weighting=RATE_WEIGHTING_AUTOC,
+                    direction=direction,
                 )
                 rate_qini, rate_qini_p = self.rate_with_bootstrap(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     weighting=RATE_WEIGHTING_QINI,
+                    direction=direction,
                 )
                 ranking = RankingSeries(
                     estimator_id=estimator_id,
@@ -320,9 +353,11 @@ class CATEEvaluator:
         tau_hat: np.ndarray,
         gamma: np.ndarray,
         weighting: str,
+        direction: float = 1.0,
     ) -> tuple[float, float]:
+        oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
         scored = rate_score(
-            rate_input_frame(tau_hat, gamma),
+            rate_input_frame(oriented_tau, oriented_gamma),
             treatment_effect_col="tau",
             weighting=weighting,
             return_ci=True,

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.config import (
+    OutcomeType,
     DRPolicyTreeMethodSpec,
     ExactPolicyTreeMethodSpec,
     JsonValue,
@@ -277,8 +278,13 @@ class PolicyService:
         )
         controls = dataset.X_controls.copy()
         groups = dataset.df[dataset.group_id] if dataset.group_id is not None else None
+        outcome = dr_policy_outcome(
+            outcome=dataset.outcome_series,
+            outcome_type=dataset.outcome_type,
+            favorability=dataset.data.outcome_favorability,
+        )
         tree.fit(
-            Y=dataset.outcome_series.copy(),
+            Y=outcome,
             T=dataset.treatment_series.copy(),
             X=dataset.X_effect_modifiers.copy(),
             W=controls if controls.shape[1] else None,
@@ -319,7 +325,12 @@ class PolicyService:
             bootstrap_samples=self.bootstrap_samples,
             random_state=self.random_state,
         )
-        twins.fit(features=X_mod, effects=effects, robust_scores=robust_scores)
+        twins.fit(
+            features=X_mod,
+            effects=effects,
+            robust_scores=robust_scores,
+            direction=reward_direction(dataset.data.outcome_favorability),
+        )
         if twins.model is None:
             raise RuntimeError("Virtual twins did not fit a tree.")
         rules = self.extract_virtual_twin_rules(
@@ -732,6 +743,20 @@ def reward_direction(favorability: OutcomeFavorability) -> float:
     if favorability == OutcomeFavorability.LOWER_IS_BETTER:
         return -1.0
     return 1.0
+
+
+def dr_policy_outcome(
+    outcome: pd.Series,
+    outcome_type: OutcomeType,
+    favorability: OutcomeFavorability,
+) -> pd.Series:
+    """Outcome passed to DRPolicyTree so welfare maximization matches favorability."""
+    if favorability == OutcomeFavorability.HIGHER_IS_BETTER:
+        return outcome.copy()
+    values = outcome.to_numpy(dtype=float)
+    if outcome_type == OutcomeType.BINARY:
+        return pd.Series(1.0 - values, index=outcome.index)
+    return pd.Series(-values, index=outcome.index)
 
 
 def control_first_arms(

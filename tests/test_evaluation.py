@@ -6,6 +6,7 @@ from causalml.metrics import get_toc, rate_score
 from causal_pipeline.evaluation import (
     RATE_WEIGHTING_AUTOC,
     RATE_WEIGHTING_QINI,
+    benefit_oriented_scores,
     calibration_bin_rows,
     compute_eceth,
     ranking_curve,
@@ -41,6 +42,40 @@ def test_correct_cate_is_calibrated_against_the_true_effect(
     assert abs(float(np.mean(proxy)) - float(np.mean(truth))) < PROXY_MEAN_TOLERANCE
     assert max(gaps) < CALIBRATION_GAP_TOLERANCE
     assert abs(compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)) < ECETH_TOLERANCE
+
+
+def test_benefit_oriented_scores_flip_both_ranking_inputs() -> None:
+    tau_hat = np.array([0.2, -0.1, 0.4])
+    gamma = np.array([0.3, 0.0, -0.2])
+    oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction=-1.0)
+    assert oriented_tau.shape == tau_hat.shape
+    assert oriented_gamma.shape == gamma.shape
+    assert np.allclose(oriented_tau, -tau_hat)
+    assert np.allclose(oriented_gamma, -gamma)
+
+
+def test_lower_is_better_rate_matches_manual_sign_flip(
+    recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    predicted, proxy, _truth = recovered_linear_cate
+    for weighting in RATE_WEIGHTINGS:
+        directed_rate = float(
+            rate_score(
+                rate_input_frame(*benefit_oriented_scores(predicted, proxy, -1.0)),
+                treatment_effect_col="tau",
+                weighting=weighting,
+                return_ci=False,
+            ).iloc[0]
+        )
+        manual_flip_rate = float(
+            rate_score(
+                rate_input_frame(-predicted, -proxy),
+                treatment_effect_col="tau",
+                weighting=weighting,
+                return_ci=False,
+            ).iloc[0]
+        )
+        assert abs(directed_rate - manual_flip_rate) < RATE_TOLERANCE
 
 
 def test_ranking_curves_span_the_prioritized_fraction() -> None:

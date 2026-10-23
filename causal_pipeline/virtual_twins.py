@@ -48,8 +48,9 @@ class VirtualTwins:
         features: pd.DataFrame,
         effects: pd.DataFrame,
         robust_scores: pd.DataFrame | None,
+        direction: float = 1.0,
     ) -> VirtualTwins:
-        effect_frame = effects.copy()
+        effect_frame = effects * direction
         overlap_rows = finite_cate_row_mask(effect_frame)
         if not np.any(overlap_rows):
             raise ValueError("Virtual twins need at least one patient with finite CATE effects.")
@@ -95,7 +96,7 @@ def qualifying_leaf_ids(
     effects: np.ndarray,
     minimum_effect: float,
 ) -> np.ndarray:
-    """Leaves whose largest absolute mean contrast exceeds the minimum effect."""
+    """Leaves whose largest directed mean contrast exceeds the minimum effect."""
     leaf_ids = np.asarray(model.apply(features))
     effect_matrix = np.asarray(effects, dtype=float)
     if effect_matrix.ndim == 1:
@@ -103,7 +104,7 @@ def qualifying_leaf_ids(
     retained: list[int] = []
     for leaf in np.unique(leaf_ids):
         mean_effects = effect_matrix[leaf_ids == leaf].mean(axis=0)
-        if float(np.max(np.abs(mean_effects))) > minimum_effect:
+        if float(np.max(mean_effects)) > minimum_effect:
             retained.append(int(leaf))
     return np.asarray(retained, dtype=int)
 

@@ -257,6 +257,7 @@ class CausalPipeline:
                 predictions=cate_predictions,
                 robust_scores=estimation_scores,
                 results_root=self.results.root,
+                outcome_favorability=estimation.data.outcome_favorability,
             )
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation)
 
@@ -574,6 +575,7 @@ class CausalPipeline:
             robust_scores=test_scores,
             results_root=self.results.root,
             held_out=True,
+            outcome_favorability=test.data.outcome_favorability,
         )
         self.persist_cate_evaluation(cate_evaluation=evaluation, table_name="test_evaluation.csv")
         return evaluation

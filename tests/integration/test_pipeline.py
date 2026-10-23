@@ -107,7 +107,7 @@ def pipeline_config(
 def test_pipeline_recovers_constant_effect(
     ate_kind: ATEKind,
     hold_out_for_policy: bool,
-    tmp_path: Path,
+    test_output_dir: Path,
     recovery_data_config: DataConfig,
     constant_effect_cohort: tuple[pd.DataFrame, float],
     logistic_learner: BaseEstimator,
@@ -118,15 +118,15 @@ def test_pipeline_recovers_constant_effect(
         ate_kind=ate_kind,
         hold_out_for_policy=hold_out_for_policy,
         data_config=recovery_data_config,
-        results_dir=tmp_path,
+        results_dir=test_output_dir,
         logistic_learner=logistic_learner,
         linear_learner=linear_learner,
         sensitivity=None,
     )
     CausalPipeline(config=config).run(df_input=frame)
 
-    ate_summary = read_dataframe(tmp_path / "summary" / "ate_estimators.csv")
-    cate_summary = read_dataframe(tmp_path / "summary" / "cate_estimators.csv")
+    ate_summary = read_dataframe(test_output_dir / "summary" / "ate_estimators.csv")
+    cate_summary = read_dataframe(test_output_dir / "summary" / "cate_estimators.csv")
     assert ate_summary.shape[0] == 1
     assert cate_summary.shape[0] == 2
     assert list(ate_summary["estimator_kind"]) == [ate_kind.value]
@@ -134,28 +134,28 @@ def test_pipeline_recovers_constant_effect(
     assert abs(float(ate_summary["estimate"].iloc[0]) - truth) < INTEGRATION_ATE_TOLERANCE
     assert np.isfinite(cate_summary["mean_crossfit_cate"]).all()
     assert np.isfinite(cate_summary["eceth"]).all()
-    contrast_dir = tmp_path / "cate" / "comparison" / "1_vs_0"
-    assert (tmp_path / "diagnostics" / "propensity_overlap.png").is_file()
-    assert (tmp_path / "diagnostics" / "propensity_overlap.csv").is_file()
-    assert (tmp_path / "data" / "estimation.parquet").is_file()
-    assert (tmp_path / "summary" / "ate_intervals.png").is_file()
-    assert (tmp_path / "summary" / "cate_mean_effects.png").is_file()
+    contrast_dir = test_output_dir / "cate" / "comparison" / "1_vs_0"
+    assert (test_output_dir / "diagnostics" / "propensity_overlap.png").is_file()
+    assert (test_output_dir / "diagnostics" / "propensity_overlap.csv").is_file()
+    assert (test_output_dir / "data" / "estimation.parquet").is_file()
+    assert (test_output_dir / "summary" / "ate_intervals.png").is_file()
+    assert (test_output_dir / "summary" / "cate_mean_effects.png").is_file()
     assert (contrast_dir / "toc.png").is_file()
     assert (contrast_dir / "toc.csv").is_file()
     assert (contrast_dir / "calibration.png").is_file()
     assert (contrast_dir / "calibration.csv").is_file()
     s_learner_id = cate_summary.loc[cate_summary["estimator_kind"] == "s_learner", "estimator"].iloc[0]
-    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "toc.png").is_file()
-    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "toc.csv").is_file()
-    assert (tmp_path / "cate" / s_learner_id / "1_vs_0" / "calibration.png").is_file()
-    policy_summary = tmp_path / "summary" / "policy_methods.csv"
+    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "toc.png").is_file()
+    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "toc.csv").is_file()
+    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "calibration.png").is_file()
+    policy_summary = test_output_dir / "summary" / "policy_methods.csv"
     if hold_out_for_policy:
         policy_table = read_dataframe(policy_summary)
         assert policy_table.shape[0] >= 1
         assert policy_table["effect_estimate"].notna().all()
         assert set(policy_table["data_split"]) == {"train", "test"}
         assert policy_table["rule"].str.startswith("leaf_").sum() == 0
-        slice_dirs = list((tmp_path / "policy" / "slices").glob("*"))
+        slice_dirs = list((test_output_dir / "policy" / "slices").glob("*"))
         assert slice_dirs
         assert slice_dirs[0].joinpath("policy_tree.png").is_file()
         assert slice_dirs[0].joinpath("rule_performance.csv").is_file()
@@ -169,7 +169,7 @@ def test_pipeline_recovers_constant_effect(
 
 @pytest.mark.integration
 def test_pipeline_reports_selection_and_doubleml_sensitivity(
-    tmp_path: Path,
+    test_output_dir: Path,
     recovery_data_config: DataConfig,
     constant_effect_cohort: tuple[pd.DataFrame, float],
     logistic_learner: BaseEstimator,
@@ -189,21 +189,21 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
         ate_kind=ATEKind.DML_IRM,
         hold_out_for_policy=False,
         data_config=recovery_data_config,
-        results_dir=tmp_path,
+        results_dir=test_output_dir,
         logistic_learner=logistic_learner,
         linear_learner=linear_learner,
         sensitivity=sensitivity,
     )
     CausalPipeline(config=config).run(df_input=selected)
 
-    ate_summary = read_dataframe(tmp_path / "summary" / "ate_estimators.csv")
-    transported = read_dataframe(tmp_path / "selection" / "transport.csv")
+    ate_summary = read_dataframe(test_output_dir / "summary" / "ate_estimators.csv")
+    transported = read_dataframe(test_output_dir / "selection" / "transport.csv")
     assert ate_summary.shape[0] == 1
     assert abs(float(ate_summary["estimate"].iloc[0]) - truth) < INTEGRATION_ATE_TOLERANCE
     assert ate_summary["robustness_value_point"].notna().all()
     assert transported.shape[0] == 1
     assert np.isfinite(transported["doubly_robust"]).all()
     dml_id = ate_summary["estimator"].iloc[0]
-    assert (tmp_path / "ate" / dml_id / "sensitivity" / "contour.html").is_file()
-    assert (tmp_path / "ate" / dml_id / "sensitivity" / "contour.csv").is_file()
-    assert (tmp_path / "ate" / dml_id / "selection" / "unseen.csv").is_file()
+    assert (test_output_dir / "ate" / dml_id / "sensitivity" / "contour.html").is_file()
+    assert (test_output_dir / "ate" / dml_id / "sensitivity" / "contour.csv").is_file()
+    assert (test_output_dir / "ate" / dml_id / "selection" / "unseen.csv").is_file()

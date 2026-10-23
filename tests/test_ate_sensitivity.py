@@ -38,7 +38,7 @@ def test_ipw_does_not_publish_a_hand_rolled_sensitivity_bound(
 
 
 def test_skipped_sensitivity_removes_a_previous_bound(
-    tmp_path: Path,
+    test_output_dir: Path,
     binary_data_config: DataConfig,
     logistic_learner: BaseEstimator,
     df_synthetic_binary: pd.DataFrame,
@@ -50,7 +50,7 @@ def test_skipped_sensitivity_removes_a_previous_bound(
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
         sensitivity=SensitivityConfig(outcome_learner=logistic_learner),
-        results_dir=str(tmp_path),
+        results_dir=str(test_output_dir),
     )
     pipeline = CausalPipeline(config=config)
     stale = pipeline.results.ate_dir("ipw") / "sensitivity"

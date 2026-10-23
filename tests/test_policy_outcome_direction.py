@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -20,7 +22,13 @@ from causal_pipeline.policy import (
     reward_direction,
     reward_matrix,
 )
-from causal_pipeline.policy_figures import build_tree_nodes
+from causal_pipeline.policy_figures import (
+    POLICY_TREE_FIGURE_NAME,
+    build_tree_nodes,
+    policy_slice_slug,
+    save_policy_slice_figure,
+)
+from tests.cache_paths import artifact_path
 
 
 @pytest.mark.parametrize(
@@ -87,7 +95,9 @@ def test_dr_policy_outcome_continuous_uses_negation_when_lower_is_better() -> No
     assert flipped.tolist() == [-1.0, -2.5]
 
 
-def test_policy_tree_figure_decision_matches_fitted_policy_on_heterogeneous_cate() -> None:
+def test_policy_tree_figure_decision_matches_fitted_policy_on_heterogeneous_cate(
+    test_output_dir: Path,
+) -> None:
     sample_size = 40
     covariate = np.linspace(0.0, 1.0, sample_size)
     scores = pd.DataFrame({"1_vs_0": np.where(covariate < 0.5, -0.8, 0.8)})
@@ -135,3 +145,20 @@ def test_policy_tree_figure_decision_matches_fitted_policy_on_heterogeneous_cate
             assert node.train_benefit > 0.0
         else:
             assert node.train_benefit <= 0.0
+    policy_png = artifact_path(
+        test_output_dir,
+        "policy",
+        "slices",
+        policy_slice_slug(fitted),
+        POLICY_TREE_FIGURE_NAME,
+    )
+    save_policy_slice_figure(
+        policy=fitted,
+        estimation=dataset,
+        train_scores=scores,
+        test=dataset,
+        test_scores=scores,
+        save_path=str(policy_png),
+    )
+    assert policy_png.is_file()
+    assert policy_png.stat().st_size > 0

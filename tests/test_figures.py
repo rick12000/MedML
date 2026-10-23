@@ -17,8 +17,13 @@ from causal_pipeline.figures import (
     compose_point_estimates,
     compose_ranking_curves,
     format_p_value,
+    plot_calibration_curves,
     plot_interval_estimates,
+    plot_point_estimates,
+    plot_ranking_curves,
 )
+
+from tests.cache_paths import artifact_path
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -29,7 +34,7 @@ def test_p_values_use_journal_thresholds() -> None:
     assert format_p_value(0.5) == "0.500"
 
 
-def test_interval_figure_shows_confidence_intervals_and_no_effect_line(tmp_path: Path) -> None:
+def test_interval_figure_shows_confidence_intervals_and_no_effect_line(test_output_dir: Path) -> None:
     estimates = pd.DataFrame(
         {
             "estimator": ["ipw", "aipw", "ipw", "aipw"],
@@ -62,7 +67,7 @@ def test_interval_figure_shows_confidence_intervals_and_no_effect_line(tmp_path:
     assert any("no effect" in text.get_text() for text in figure.texts)
     plt.close(figure)
 
-    destination = tmp_path / "ate_intervals.png"
+    destination = artifact_path(test_output_dir, "summary", "ate_intervals.png")
     plot_interval_estimates(
         estimates=estimates,
         save_path=str(destination),
@@ -77,7 +82,7 @@ def test_interval_figure_shows_confidence_intervals_and_no_effect_line(tmp_path:
     assert destination.read_bytes().startswith(PNG_SIGNATURE)
 
 
-def test_point_figure_shows_means_without_intervals() -> None:
+def test_point_figure_shows_means_without_intervals(test_output_dir: Path) -> None:
     estimates = pd.DataFrame(
         {
             "estimator": ["s_learner", "t_learner"],
@@ -104,6 +109,14 @@ def test_point_figure_shows_means_without_intervals() -> None:
     assert isinstance(axis.containers[0], BarContainer)
     assert not any(isinstance(container, ErrorbarContainer) for container in axis.containers)
     assert {tick.get_text() for tick in axis.get_yticklabels()} == {"S-learner", "T-learner"}
+    plot_point_estimates(
+        estimates=estimates,
+        save_path=str(artifact_path(test_output_dir, "summary", "cate_mean_effects.png")),
+        estimator_column="estimator",
+        contrast_column="contrast",
+        estimate_column="estimate",
+        xlabel="Mean conditional treatment effect",
+    )
     plt.close(figure)
 
 
@@ -129,7 +142,9 @@ def test_interval_figure_rejects_missing_estimates() -> None:
         )
 
 
-def test_ranking_and_calibration_figures_report_metrics_under_each_panel() -> None:
+def test_ranking_and_calibration_figures_report_metrics_under_each_panel(
+    test_output_dir: Path,
+) -> None:
     fraction = np.linspace(0.0, 1.0, 6)
     ranking = [
         RankingSeries(
@@ -169,6 +184,12 @@ def test_ranking_and_calibration_figures_report_metrics_under_each_panel() -> No
     assert single_ranking.axes[0].get_title() == "S-learner"
     assert table_cells(single_ranking)[1] == ["AUTOC", "0.042", "0.031"]
     assert table_cells(single_ranking)[2] == ["Qini", "0.018", "< 0.001"]
+    plot_ranking_curves(
+        series=ranking,
+        save_path=str(
+            artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "toc.png")
+        ),
+    )
     plt.close(ranking_figure)
     plt.close(single_ranking)
 
@@ -205,6 +226,12 @@ def test_ranking_and_calibration_figures_report_metrics_under_each_panel() -> No
     single_calibration = compose_calibration_curves([calibration[0]])
     assert single_calibration.axes[0].get_title() == "S-learner"
     assert table_cells(single_calibration)[1] == ["ECETH", "0.004", "0.002", "0.040"]
+    plot_calibration_curves(
+        series=calibration,
+        save_path=str(
+            artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "calibration.png")
+        ),
+    )
     plt.close(calibration_figure)
     plt.close(single_calibration)
 

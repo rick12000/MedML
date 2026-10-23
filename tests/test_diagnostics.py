@@ -34,12 +34,12 @@ def test_diagnostics_runner_produces_balance_table(
 def test_diagnostics_writes_overlap_plot_under_results_root(
     pipeline_config_no_policy: PipelineConfig,
     df_synthetic_binary: pd.DataFrame,
-    tmp_path: Path,
+    test_output_dir: Path,
 ) -> None:
     runner = DiagnosticsRunner(diagnostics=pipeline_config_no_policy.diagnostics)
     dataset = CausalDataset(data=pipeline_config_no_policy.data, df=df_synthetic_binary)
-    result = runner.run(train=dataset, results_root=str(tmp_path))
-    overlap_path = tmp_path / "diagnostics" / "propensity_overlap.png"
+    result = runner.run(train=dataset, results_root=str(test_output_dir))
+    overlap_path = test_output_dir / "diagnostics" / "propensity_overlap.png"
     assert overlap_path.is_file()
-    assert (tmp_path / "diagnostics" / "propensity_overlap.csv").is_file()
+    assert (test_output_dir / "diagnostics" / "propensity_overlap.csv").is_file()
     assert result.propensity_overlap_path is not None

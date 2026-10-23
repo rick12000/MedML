@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,7 +16,6 @@ from causal_pipeline.config import (
     CATEEvaluationConfig,
     CATEKind,
     DataConfig,
-    DEFAULT_RESULTS_DIR,
     DEFAULT_SPLIT_RANDOM_STATE,
     DiagnosticConfig,
     IPWATEEstimatorSpec,
@@ -27,6 +29,11 @@ from causal_pipeline.config import (
 )
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import CATEEvaluator
+from tests.cache_paths import (
+    TEST_CACHE_ROOT,
+    module_cache_key,
+    sanitize_cache_segment,
+)
 
 TEST_LOGISTIC_MAX_ITER = 500
 TEST_RANDOM_STATE = 0
@@ -43,6 +50,17 @@ HETEROGENEOUS_EFFECT_SLOPE = 1.2
 HETEROGENEOUS_EFFECT_NOISE = 0.5
 RECOVERY_FOREST_TREES = 40
 RECOVERY_FOREST_DEPTH = 8
+
+@pytest.fixture
+def test_output_dir(request: pytest.FixtureRequest) -> Path:
+    """Per-test directory under ``cache/pytest/<module>/<test_name>/``."""
+    module_key = module_cache_key(Path(request.module.__file__))
+    test_name = sanitize_cache_segment(request.node.name)
+    destination = TEST_CACHE_ROOT / module_key / test_name
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
 
 
 def draw_confounded_treatment(
@@ -252,6 +270,7 @@ def pipeline_config_no_policy(
     binary_data_config: DataConfig,
     logistic_learner: BaseEstimator,
     forest_classifier: BaseEstimator,
+    test_output_dir: Path,
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
@@ -272,7 +291,7 @@ def pipeline_config_no_policy(
         sensitivity=None,
         cate_evaluation=None,
         policy=None,
-        results_dir=DEFAULT_RESULTS_DIR,
+        results_dir=str(test_output_dir),
     )
 
 
@@ -281,6 +300,7 @@ def pipeline_config_with_policy(
     binary_data_config: DataConfig,
     logistic_learner: BaseEstimator,
     forest_classifier: BaseEstimator,
+    test_output_dir: Path,
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
@@ -304,7 +324,7 @@ def pipeline_config_with_policy(
             random_state=TEST_RANDOM_STATE,
         ),
         policy=[PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE)],
-        results_dir=DEFAULT_RESULTS_DIR,
+        results_dir=str(test_output_dir),
     )
 
 

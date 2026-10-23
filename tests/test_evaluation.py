@@ -1,17 +1,26 @@
 from __future__ import annotations
 
-import numpy as np
-from causalml.metrics import get_toc, rate_score
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+from causalml.metrics import get_toc, rate_score
+from sklearn.linear_model import LinearRegression, LogisticRegression
+
+from causal_pipeline.config import CATEEvaluationConfig, OutcomeFavorability
 from causal_pipeline.evaluation import (
+    CATEEvaluator,
     RATE_WEIGHTING_AUTOC,
     RATE_WEIGHTING_QINI,
     benefit_oriented_scores,
     calibration_bin_rows,
     compute_eceth,
+    eceth_hypothesis_test,
     ranking_curve,
     rate_input_frame,
 )
+from causal_pipeline.figures import CalibrationSeries, RankingSeries, plot_calibration_curves, plot_ranking_curves
+from tests.cache_paths import artifact_path
 
 CALIBRATION_BINS = 5
 CALIBRATION_GAP_TOLERANCE = 0.08
@@ -32,6 +41,7 @@ def toc_at_top_fraction(score: np.ndarray, effect: np.ndarray, fraction: float) 
 
 def test_correct_cate_is_calibrated_against_the_true_effect(
     recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
+    test_output_dir: Path,
 ) -> None:
     predicted, proxy, truth = recovered_linear_cate
     rows = calibration_bin_rows(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)
@@ -42,6 +52,32 @@ def test_correct_cate_is_calibrated_against_the_true_effect(
     assert abs(float(np.mean(proxy)) - float(np.mean(truth))) < PROXY_MEAN_TOLERANCE
     assert max(gaps) < CALIBRATION_GAP_TOLERANCE
     assert abs(compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=CALIBRATION_BINS)) < ECETH_TOLERANCE
+    eceth, eceth_se, eceth_p = eceth_hypothesis_test(
+        tau_hat=predicted,
+        gamma=proxy,
+        n_bins=CALIBRATION_BINS,
+        tolerance=ECETH_TOLERANCE,
+        bootstrap_samples=30,
+        random_state=0,
+    )
+    calibration = CalibrationSeries(
+        estimator_id="t_learner_heterogeneous_recovery",
+        predicted=np.array([row["mean_predicted_cate"] for row in rows], dtype=float),
+        observed=np.array([row["mean_robust_proxy"] for row in rows], dtype=float),
+        eceth=eceth,
+        eceth_standard_error=eceth_se,
+        eceth_p_value=eceth_p,
+    )
+    plot_calibration_curves(
+        series=[calibration],
+        save_path=str(
+            artifact_path(
+                test_output_dir,
+                "heterogeneous_recovery",
+                "calibration_t_learner_bins.png",
+            )
+        ),
+    )
 
 
 def test_benefit_oriented_scores_flip_both_ranking_inputs() -> None:
@@ -90,19 +126,107 @@ def test_ranking_curves_span_the_prioritized_fraction() -> None:
     assert float(np.max(fraction)) <= 1.0
 
 
+def test_evaluate_cate_models_writes_pipeline_style_artifacts(
+    recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
+    test_output_dir: Path,
+) -> None:
+    predicted, proxy, _truth = recovered_linear_cate
+    predictions = {"t_learner": pd.DataFrame({"1_vs_0": predicted})}
+    scores = pd.DataFrame({"1_vs_0": proxy})
+    evaluation = CATEEvaluationConfig(
+        propensity_learner=LogisticRegression(max_iter=500),
+        outcome_learner=LinearRegression(),
+        dr_crossfit_folds=3,
+        calibration_bins=5,
+        rate_bootstrap_samples=8,
+        eceth_bootstrap_samples=8,
+        random_state=0,
+    )
+    results = CATEEvaluator(evaluation=evaluation).evaluate_cate_models(
+        predictions=predictions,
+        robust_scores=scores,
+        results_root=test_output_dir,
+        outcome_favorability=OutcomeFavorability.HIGHER_IS_BETTER,
+    )
+    assert results["t_learner"]
+    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "toc.png").is_file()
+    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "calibration.png").is_file()
+    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "toc.png").is_file()
+
+
 def test_prioritization_matches_the_oracle_ranking(
     recovered_linear_cate: tuple[np.ndarray, np.ndarray, np.ndarray],
+    test_output_dir: Path,
 ) -> None:
     predicted, proxy, truth = recovered_linear_cate
-    # Fitted ranking, then the same scores with the ranking reversed.
     rankings = (
-        (predicted, truth),
-        (-predicted, -truth),
+        ("fitted_t_learner", predicted, truth, "fitted"),
+        ("sign_flip_control", -predicted, -truth, "sign_flip"),
     )
-    for score, oracle_score in rankings:
+    for label, score, oracle_score, folder in rankings:
         estimated_toc = toc_at_top_fraction(score, proxy, TOP_FRACTION)
         oracle_toc = toc_at_top_fraction(oracle_score, truth, TOP_FRACTION)
         assert abs(estimated_toc - oracle_toc) < TOC_TOLERANCE
+        toc_fraction, toc_value = ranking_curve(tau_hat=score, gamma=proxy)
+        autoc = float(
+            rate_score(
+                rate_input_frame(tau_hat=score, gamma=proxy),
+                treatment_effect_col="tau",
+                weighting=RATE_WEIGHTING_AUTOC,
+                return_ci=False,
+            ).iloc[0]
+        )
+        qini = float(
+            rate_score(
+                rate_input_frame(tau_hat=score, gamma=proxy),
+                treatment_effect_col="tau",
+                weighting=RATE_WEIGHTING_QINI,
+                return_ci=False,
+            ).iloc[0]
+        )
+        plot_ranking_curves(
+            series=[
+                RankingSeries(
+                    estimator_id=label,
+                    toc_fraction=toc_fraction,
+                    toc_value=toc_value,
+                    autoc=autoc,
+                    autoc_p_value=float("nan"),
+                    qini=qini,
+                    qini_p_value=float("nan"),
+                )
+            ],
+            save_path=str(
+                artifact_path(
+                    test_output_dir,
+                    "heterogeneous_recovery",
+                    folder,
+                    "toc.png",
+                )
+            ),
+        )
+        oracle_fraction, oracle_value = ranking_curve(tau_hat=oracle_score, gamma=truth)
+        plot_ranking_curves(
+            series=[
+                RankingSeries(
+                    estimator_id=f"{label}_oracle",
+                    toc_fraction=oracle_fraction,
+                    toc_value=oracle_value,
+                    autoc=autoc,
+                    autoc_p_value=float("nan"),
+                    qini=qini,
+                    qini_p_value=float("nan"),
+                )
+            ],
+            save_path=str(
+                artifact_path(
+                    test_output_dir,
+                    "heterogeneous_recovery",
+                    folder,
+                    "toc_oracle.png",
+                )
+            ),
+        )
         for weighting in RATE_WEIGHTINGS:
             estimated_rate = float(
                 rate_score(

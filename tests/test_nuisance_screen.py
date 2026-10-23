@@ -21,7 +21,7 @@ from causal_pipeline.nuisance_screen import (
 def test_nuisance_screen_writes_test_metrics(
     df_synthetic_binary,
     binary_data_config,
-    tmp_path: Path,
+    test_output_dir: Path,
 ) -> None:
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     run_nuisance_screen(
@@ -32,15 +32,17 @@ def test_nuisance_screen_writes_test_metrics(
             random_state=0,
             column_drop_repeats=2,
         ),
-        results_root=tmp_path,
+        results_root=test_output_dir,
     )
-    propensity = tmp_path / "nuisance_screen" / "propensity" / "logistic_regression" / "metrics.csv"
-    outcome = tmp_path / "nuisance_screen" / "outcome" / "xgboost" / "metrics.csv"
-    importance = tmp_path / "nuisance_screen" / "outcome" / "xgboost" / "gain_importance.csv"
-    column_drop = tmp_path / "nuisance_screen" / "outcome" / "xgboost" / "column_drop_importance.csv"
-    column_drop_plot = tmp_path / "nuisance_screen" / "propensity" / "logistic_regression" / "column_drop_importance.png"
-    shap_plot = tmp_path / "nuisance_screen" / "propensity" / "xgboost" / "shap_summary.png"
-    correlation = tmp_path / "nuisance_screen" / "correlation" / "correlation.csv"
+    propensity = test_output_dir / "nuisance_screen" / "propensity" / "logistic_regression" / "metrics.csv"
+    outcome = test_output_dir / "nuisance_screen" / "outcome" / "xgboost" / "metrics.csv"
+    importance = test_output_dir / "nuisance_screen" / "outcome" / "xgboost" / "gain_importance.csv"
+    column_drop = test_output_dir / "nuisance_screen" / "outcome" / "xgboost" / "column_drop_importance.csv"
+    column_drop_plot = (
+        test_output_dir / "nuisance_screen" / "propensity" / "logistic_regression" / "column_drop_importance.png"
+    )
+    shap_plot = test_output_dir / "nuisance_screen" / "propensity" / "xgboost" / "shap_summary.png"
+    correlation = test_output_dir / "nuisance_screen" / "correlation" / "correlation.csv"
     assert propensity.exists()
     assert outcome.exists()
     assert importance.exists()

@@ -145,7 +145,7 @@ def test_subgroup_splits_are_skipped_when_every_column_is_missing(
     assert "none of the columns" in caplog.text
 
 
-def test_subgroup_split_figure_renders(tmp_path) -> None:
+def test_subgroup_split_figure_renders(test_output_dir) -> None:
     dataset = CausalDataset(
         data=DataConfig(
             outcome="y",
@@ -178,7 +178,8 @@ def test_subgroup_split_figure_renders(tmp_path) -> None:
         scores=scores,
         estimator_id="ipw",
     )
-    output = tmp_path / "subgroup_splits.png"
+    output = test_output_dir / "subgroup" / "subgroup_splits.png"
+    output.parent.mkdir(parents=True, exist_ok=True)
     plot_subgroup_splits_table(
         table=table,
         split_order=[("age", 60.0)],

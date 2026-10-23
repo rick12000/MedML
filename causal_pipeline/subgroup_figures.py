@@ -1,58 +1,50 @@
-"""Forest-style table figures for pre-specified subgroup split results."""
+"""Forest-style table for pre-specified subgroup split results.
+
+The figure is drawn on one canvas measured in inches, so text, intervals, and
+p-values share one row grid. Every data row carries exactly one interval per
+forest column, centred on that row. Only a bottom X axis is drawn.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from matplotlib.gridspec import GridSpec
 
-from causal_pipeline.figures import (
-    AXIS_LABEL_SIZE,
-    ERROR_LINE_WIDTH,
-    INK,
-    MARKER_SIZE,
-    PUBLICATION_RC,
-    REFERENCE_COLOR,
-    REFERENCE_LINESTYLE,
-    REFERENCE_LINEWIDTH,
-    TICK_LABEL_SIZE,
-    display_contrast,
-    display_estimator,
-    publication_style,
-    style_axis,
-)
+from causal_pipeline.figures import INK, REFERENCE_COLOR, display_contrast, display_estimator, publication_style
 from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE
 from causal_pipeline.utils import save_figure
 
 SUBGROUP_SPLITS_FIGURE_NAME = "subgroup_splits.png"
-ROW_HEIGHT_INCHES = 0.36
-HEADER_HEIGHT_INCHES = 0.55
-FIGURE_WIDTH_INCHES = 7.8
-FOREST_CAP_TOLERANCE = 2.5
-MIN_FOREST_HALF_WIDTH = 0.05
-
-
-@dataclass(frozen=True)
-class SubgroupVisualRow:
-    estimator: str | None
-    label: str
-    n_above: int | None = None
-    n_below: int | None = None
-    effect_difference: float | None = None
-    effect_ci_lower: float | None = None
-    effect_ci_upper: float | None = None
-    effect_pvalue: float | None = None
-    outcome_difference: float | None = None
-    outcome_ci_lower: float | None = None
-    outcome_ci_upper: float | None = None
-    outcome_pvalue: float | None = None
+MUTED_INK = "#4A4A4A"
+RULE_COLOR = "#D0D0D0"
+ROW_INCHES = 0.30
+HEADER_INCHES = 0.34
+TOP_PAD_INCHES = 0.12
+TITLE_INCHES = 0.04
+AXIS_INCHES = 0.55
+MARGIN_INCHES = 0.14
+TEXT_FONT_SIZE = 7.6
+HEADER_FONT_SIZE = 7.8
+COLUMN_HEADER_SIZE = 7.4
+FOREST_WIDTH_INCHES = 1.75
+FOREST_GAP_INCHES = 0.14
+SUBGROUP_WIDTH_INCHES = 2.55
+PATIENTS_WIDTH_INCHES = 0.95
+ESTIMATE_WIDTH_INCHES = 1.65
+P_WIDTH_INCHES = 0.62
+MARKER_SIZE = 4.2
+TICK_FONT = 6.8
+INTERVAL_WIDTH = 1.0
+TICK_TARGET_COUNT = 5
+LIMIT_HALF_WIDTH_FACTOR = 1.25
+CAP_CLIP_FACTOR = 2.5
+ARROW_INCHES = 0.07
+P_FLOOR = 0.01
 
 
 def plot_subgroup_splits_table(
@@ -60,346 +52,317 @@ def plot_subgroup_splits_table(
     split_order: list[tuple[str, float]],
     save_path: str,
 ) -> None:
-    rows = build_visual_rows(table=table, split_order=split_order)
-    if not rows:
+    if table.empty:
         return
-    confidence_level = float(table["confidence_level"].iloc[0])
-    ci_percent = int(round(confidence_level * 100))
+    ci_percent = int(round(float(table["confidence_level"].iloc[0]) * 100))
+    items = build_items(table=table, split_order=split_order)
+    if not items:
+        return
     with publication_style():
-        figure = compose_subgroup_table(
-            rows=rows,
-            ci_percent=ci_percent,
-        )
+        figure = compose_subgroup_table(items=items, ci_percent=ci_percent)
         save_figure(save_path, figure)
         plt.close(figure)
 
 
-def build_visual_rows(
-    table: pd.DataFrame,
-    split_order: list[tuple[str, float]],
-) -> list[SubgroupVisualRow]:
-    if table.empty:
-        return []
-    estimators = list(dict.fromkeys(table["estimator"].astype(str)))
-    rows: list[SubgroupVisualRow] = []
-    for estimator in estimators:
+def build_items(table: pd.DataFrame, split_order: list[tuple[str, float]]) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    multi_contrast = table["contrast"].nunique() > 1
+    for estimator in dict.fromkeys(table["estimator"].astype(str)):
         estimator_rows = table.loc[table["estimator"].astype(str) == estimator]
-        first_row = True
+        items.append({"kind": "header", "label": display_estimator(estimator)})
         for column, cutoff in split_order:
             matches = estimator_rows.loc[
                 (estimator_rows["column"] == column) & (estimator_rows["cutoff"] == cutoff)
             ]
             for _, record in matches.iterrows():
-                split_label = split_row_label(
-                    column=str(record["column"]),
-                    cutoff=float(record["cutoff"]),
-                    above_rule=str(record["above_rule"]),
-                    contrast=str(record["contrast"]),
-                    multi_contrast=estimator_rows["contrast"].nunique() > 1,
+                items.append(
+                    {
+                        "kind": "data",
+                        "label": split_label(
+                            column=column,
+                            cutoff=cutoff,
+                            above_rule=str(record["above_rule"]),
+                            contrast=str(record["contrast"]),
+                            multi_contrast=multi_contrast,
+                        ),
+                        "n_above": int(round(float(record["n_above"]))),
+                        "n_below": int(round(float(record["n_below"]))),
+                        "effect": interval_values(record, "effect"),
+                        "outcome": interval_values(record, "outcome"),
+                        "effect_p": float(record["effect_pvalue"]),
+                        "outcome_p": float(record["outcome_pvalue"]),
+                    }
                 )
-                if first_row:
-                    label = f"{display_estimator(estimator)}\n{split_label.strip()}"
-                    first_row = False
-                else:
-                    label = split_label
-                rows.append(
-                    SubgroupVisualRow(
-                        estimator=estimator,
-                        label=label,
-                        n_above=round_patient_count(record["n_above"]),
-                        n_below=round_patient_count(record["n_below"]),
-                        effect_difference=float(record["effect_difference"]),
-                        effect_ci_lower=float(record["effect_ci_lower"]),
-                        effect_ci_upper=float(record["effect_ci_upper"]),
-                        effect_pvalue=float(record["effect_pvalue"]),
-                        outcome_difference=float(record["outcome_difference"]),
-                        outcome_ci_lower=float(record["outcome_ci_lower"]),
-                        outcome_ci_upper=float(record["outcome_ci_upper"]),
-                        outcome_pvalue=float(record["outcome_pvalue"]),
-                    )
-                )
-    return rows
+    return items
 
 
-def split_row_label(
-    column: str,
-    cutoff: float,
-    above_rule: str,
-    contrast: str,
-    multi_contrast: bool,
-) -> str:
+def interval_values(record: pd.Series, prefix: str) -> tuple[float, float, float]:
+    return (
+        float(record[f"{prefix}_difference"]),
+        float(record[f"{prefix}_ci_lower"]),
+        float(record[f"{prefix}_ci_upper"]),
+    )
+
+
+def split_label(column: str, cutoff: float, above_rule: str, contrast: str, multi_contrast: bool) -> str:
     cutoff_text = format(cutoff, ".6g")
-    if above_rule == ABOVE_CUTOFF_RULE:
-        base = f"{column} ≥ {cutoff_text}"
-    else:
-        base = f"{column} {above_rule} {cutoff_text}"
+    comparison = "≥" if above_rule == ABOVE_CUTOFF_RULE else above_rule
+    base = f"{column} {comparison} {cutoff_text}"
     if multi_contrast:
-        return f"  {base} ({display_contrast(contrast)})"
-    return f"  {base}"
+        base = f"{base} · {display_contrast(contrast)}"
+    return base
 
 
-def compose_subgroup_table(
-    rows: list[SubgroupVisualRow],
-    ci_percent: int,
-) -> Figure:
-    total_rows = len(rows)
-    figure_height = HEADER_HEIGHT_INCHES + ROW_HEIGHT_INCHES * total_rows
-    figure = plt.figure(figsize=(FIGURE_WIDTH_INCHES, figure_height))
-    grid = GridSpec(
-        nrows=total_rows + 1,
-        ncols=8,
-        figure=figure,
-        height_ratios=[HEADER_HEIGHT_INCHES / ROW_HEIGHT_INCHES] + [1.0] * total_rows,
-        width_ratios=[2.5, 0.8, 1.15, 1.45, 0.55, 1.15, 1.45, 0.55],
-        hspace=0.05,
-        wspace=0.25,
-        left=0.05,
-        right=0.98,
-        top=0.96,
-        bottom=0.07,
-    )
-    write_column_headers(grid=grid, ci_percent=ci_percent)
-    effect_axis = add_forest_axis(grid=grid, column=3, row_count=len(rows))
-    outcome_axis = add_forest_axis(grid=grid, column=6, row_count=len(rows))
-    effect_limits = forest_limits(
-        estimates=[row.effect_difference for row in rows],
-        lowers=[row.effect_ci_lower for row in rows],
-        uppers=[row.effect_ci_upper for row in rows],
-    )
-    outcome_limits = forest_limits(
-        estimates=[row.outcome_difference for row in rows],
-        lowers=[row.outcome_ci_lower for row in rows],
-        uppers=[row.outcome_ci_upper for row in rows],
-    )
-    effect_axis.set_xlim(effect_limits)
-    outcome_axis.set_xlim(outcome_limits)
-    row_positions = np.arange(len(rows), dtype=float)[::-1] + 1.0
-    for grid_row, visual in enumerate(rows, start=1):
-        data_y = float(row_positions[grid_row - 1])
-        write_text_cell(grid, grid_row, 0, visual.label, ha="left", fontweight="regular")
-        write_text_cell(
-            grid,
-            grid_row,
-            1,
-            f"{visual.n_above} / {visual.n_below}",
-            ha="center",
+def compose_subgroup_table(items: list[dict[str, object]], ci_percent: int) -> Figure:
+    columns = column_layout()
+    body_height = sum(HEADER_INCHES if item["kind"] == "header" else ROW_INCHES for item in items)
+    height = MARGIN_INCHES + TITLE_INCHES + HEADER_INCHES + TOP_PAD_INCHES + body_height + AXIS_INCHES
+    figure = plt.figure(figsize=(columns["total"], height))
+    canvas = figure.add_axes((0.0, 0.0, 1.0, 1.0))
+    canvas.set_xlim(0.0, columns["total"])
+    canvas.set_ylim(height, 0.0)
+    canvas.axis("off")
+
+    header_top = MARGIN_INCHES + TITLE_INCHES
+    write_column_headers(canvas, columns, header_top, ci_percent)
+
+    data_items = [item for item in items if item["kind"] == "data"]
+    effect_scale = forest_scale([item["effect"] for item in data_items])
+    outcome_scale = forest_scale([item["outcome"] for item in data_items])
+
+    top = header_top + HEADER_INCHES + TOP_PAD_INCHES
+    row_top = top
+    for item in items:
+        if item["kind"] == "header":
+            canvas.text(
+                columns["subgroup"][0],
+                row_top + HEADER_INCHES / 2,
+                str(item["label"]),
+                fontsize=HEADER_FONT_SIZE,
+                fontweight="bold",
+                color=INK,
+                va="center",
+                ha="left",
+            )
+            if row_top > top:
+                canvas.plot(
+                    [0.0, columns["total"]],
+                    [row_top, row_top],
+                    color=RULE_COLOR,
+                    linewidth=0.6,
+                )
+            row_top += HEADER_INCHES
+            continue
+        middle = row_top + ROW_INCHES / 2
+        write_data_row(canvas, columns, item, middle)
+        draw_interval(canvas, columns["effect_forest"], effect_scale, middle, item["effect"])
+        draw_interval(canvas, columns["outcome_forest"], outcome_scale, middle, item["outcome"])
+        row_top += ROW_INCHES
+
+    axis_y = row_top + 0.12
+    for key, scale, label in (
+        ("effect_forest", effect_scale, "ATE difference (above − below)"),
+        ("outcome_forest", outcome_scale, "Outcome difference (above − below)"),
+    ):
+        span = columns[key]
+        zero_x = to_canvas_x(span, scale, 0.0)
+        canvas.plot(
+            [zero_x, zero_x],
+            [top, axis_y],
+            color=REFERENCE_COLOR,
+            linestyle=(0, (2, 2)),
+            linewidth=0.5,
+            zorder=1,
         )
-        write_text_cell(
-            grid,
-            grid_row,
-            2,
-            format_estimate_ci(
-                visual.effect_difference,
-                visual.effect_ci_lower,
-                visual.effect_ci_upper,
-            ),
-            ha="center",
-        )
-        write_text_cell(grid, grid_row, 4, format_p_value(visual.effect_pvalue), ha="center")
-        write_text_cell(
-            grid,
-            grid_row,
-            5,
-            format_estimate_ci(
-                visual.outcome_difference,
-                visual.outcome_ci_lower,
-                visual.outcome_ci_upper,
-            ),
-            ha="center",
-        )
-        write_text_cell(grid, grid_row, 7, format_p_value(visual.outcome_pvalue), ha="center")
-        draw_capped_interval(
-            axis=effect_axis,
-            y=data_y,
-            estimate=visual.effect_difference,
-            lower=visual.effect_ci_lower,
-            upper=visual.effect_ci_upper,
-            xlim=effect_axis.get_xlim(),
-        )
-        draw_capped_interval(
-            axis=outcome_axis,
-            y=data_y,
-            estimate=visual.outcome_difference,
-            lower=visual.outcome_ci_lower,
-            upper=visual.outcome_ci_upper,
-            xlim=outcome_axis.get_xlim(),
-        )
-    configure_forest_axis(
-        axis=effect_axis,
-        positions=row_positions,
-        xlabel="ATE difference (above − below)",
-    )
-    configure_forest_axis(
-        axis=outcome_axis,
-        positions=row_positions,
-        xlabel="Outcome difference (above − below)",
-    )
+        draw_bottom_axis(canvas, span, scale, axis_y, label)
+    figure.subplots_adjust(left=0, right=1, bottom=0, top=1)
     return figure
 
 
-def write_column_headers(grid: GridSpec, ci_percent: int) -> None:
-    headers = [
-        "Subgroup",
-        "Patients\n(≥ / <)",
-        f"ATE diff\n({ci_percent}% CI)",
-        "",
-        "P value",
-        f"Outcome diff\n({ci_percent}% CI)",
-        "",
-        "P value",
+def column_layout() -> dict[str, object]:
+    widths = [
+        ("subgroup", SUBGROUP_WIDTH_INCHES),
+        ("patients", PATIENTS_WIDTH_INCHES),
+        ("effect_text", ESTIMATE_WIDTH_INCHES),
+        ("effect_forest", FOREST_WIDTH_INCHES),
+        ("effect_p", P_WIDTH_INCHES),
+        ("outcome_text", ESTIMATE_WIDTH_INCHES),
+        ("outcome_forest", FOREST_WIDTH_INCHES),
+        ("outcome_p", P_WIDTH_INCHES),
     ]
-    for column, header in enumerate(headers):
-        axis = grid.figure.add_subplot(grid[0, column])
-        axis.axis("off")
-        axis.text(
-            0.5 if column in {1, 2, 4, 5, 7} else 0.0,
-            0.5,
-            header,
-            ha="center" if column in {1, 2, 4, 5, 7} else "left",
+    layout: dict[str, object] = {}
+    cursor = MARGIN_INCHES
+    for name, width in widths:
+        layout[name] = (cursor, cursor + width)
+        cursor += width
+    layout["total"] = cursor + MARGIN_INCHES
+    return layout
+
+
+def write_column_headers(canvas, columns: dict[str, object], top: float, ci_percent: int) -> None:
+    headers = {
+        "subgroup": ("Subgroup", "left"),
+        "patients": ("Patients (≥ / <)", "center"),
+        "effect_text": (f"ATE diff ({ci_percent}% CI)", "center"),
+        "effect_p": ("P", "center"),
+        "outcome_text": (f"Outcome diff ({ci_percent}% CI)", "center"),
+        "outcome_p": ("P", "center"),
+    }
+    for key, (text, align) in headers.items():
+        span = columns[key]
+        x = span[0] if align == "left" else (span[0] + span[1]) / 2
+        canvas.text(
+            x,
+            top + HEADER_INCHES / 2,
+            text,
+            fontsize=COLUMN_HEADER_SIZE,
+            color=MUTED_INK,
+            ha=align,
             va="center",
-            fontsize=AXIS_LABEL_SIZE,
+            fontweight="bold",
+        )
+    canvas.plot(
+        [columns["subgroup"][0], columns["outcome_p"][1]],
+        [top + HEADER_INCHES, top + HEADER_INCHES],
+        color=INK,
+        linewidth=0.7,
+    )
+
+
+def write_data_row(canvas, columns: dict[str, object], item: dict[str, object], middle: float) -> None:
+    def text(key: str, value: str, align: str = "center") -> None:
+        span = columns[key]
+        x = span[0] if align == "left" else (span[0] + span[1]) / 2
+        canvas.text(
+            x,
+            middle,
+            value,
+            fontsize=TEXT_FONT_SIZE,
             color=INK,
-            fontweight="bold" if header else "regular",
+            ha=align,
+            va="center",
         )
 
+    text("subgroup", str(item["label"]), align="left")
+    text("patients", f"{item['n_above']} / {item['n_below']}")
+    text("effect_text", format_estimate(item["effect"]))
+    text("effect_p", format_p(float(item["effect_p"])))
+    text("outcome_text", format_estimate(item["outcome"]))
+    text("outcome_p", format_p(float(item["outcome_p"])))
 
-def write_text_cell(
-    grid: GridSpec,
-    grid_row: int,
-    column: int,
-    text: str,
-    ha: str,
-    fontweight: str = "regular",
-) -> None:
-    axis = grid.figure.add_subplot(grid[grid_row, column])
-    axis.axis("off")
-    axis.text(
-        0.5 if ha == "center" else 0.0,
-        0.5,
-        text,
-        ha=ha,
-        va="center",
-        fontsize=TICK_LABEL_SIZE,
-        color=INK,
-        fontweight=fontweight,
+
+def forest_scale(intervals: list[tuple[float, float, float]]) -> tuple[float, float]:
+    """Symmetric window around zero. Endpoints far beyond it are drawn as arrows, not stretched."""
+    estimates = np.array([abs(item[0]) for item in intervals if np.isfinite(item[0])], dtype=float)
+    half_widths = np.array(
+        [abs(item[2] - item[1]) / 2 for item in intervals if np.isfinite(item[1]) and np.isfinite(item[2])],
+        dtype=float,
     )
+    anchor = float(estimates.max()) if estimates.size else 1.0
+    spread = float(np.median(half_widths)) if half_widths.size else 0.0
+    limit = max(anchor * LIMIT_HALF_WIDTH_FACTOR, CAP_CLIP_FACTOR * spread, 1e-6)
+    return -limit, limit
 
 
-def add_forest_axis(grid: GridSpec, column: int, row_count: int) -> Axes:
-    if row_count < 1:
-        raise ValueError("Subgroup figure needs at least one data row.")
-    axis = grid.figure.add_subplot(grid[1 : row_count + 1, column])
-    return axis
+def to_canvas_x(columns_span: tuple[float, float], scale: tuple[float, float], value: float) -> float:
+    low, high = scale
+    left, right = columns_span
+    fraction = (value - low) / (high - low)
+    return left + float(np.clip(fraction, 0.0, 1.0)) * (right - left)
 
 
-def configure_forest_axis(axis: Axes, positions: np.ndarray, xlabel: str) -> None:
-    axis.axvline(0.0, color=REFERENCE_COLOR, linestyle=REFERENCE_LINESTYLE, linewidth=REFERENCE_LINEWIDTH)
-    axis.set_yticks(positions)
-    axis.set_yticklabels([])
-    axis.set_ylim(float(positions.min()) - 0.6, float(positions.max()) + 0.6)
-    axis.set_xlabel(xlabel, fontsize=AXIS_LABEL_SIZE, color=INK)
-    style_axis(axis)
-    axis.tick_params(axis="y", left=False)
-
-
-def draw_capped_interval(
-    axis: Axes,
-    y: float,
-    estimate: float | None,
-    lower: float | None,
-    upper: float | None,
-    xlim: tuple[float, float],
+def draw_interval(
+    canvas,
+    columns_span: tuple[float, float],
+    scale: tuple[float, float],
+    middle: float,
+    interval: tuple[float, float, float],
 ) -> None:
-    if estimate is None or not np.isfinite(estimate):
+    estimate, lower, upper = interval
+    if not np.isfinite(estimate):
         return
-    xmin, xmax = xlim
-    lower_value = lower if lower is not None and np.isfinite(lower) else estimate
-    upper_value = upper if upper is not None and np.isfinite(upper) else estimate
-    draw_lower = max(lower_value, xmin)
-    draw_upper = min(upper_value, xmax)
-    if draw_upper < draw_lower:
-        draw_lower = draw_upper = float(np.clip(estimate, xmin, xmax))
-    axis.plot(
-        [draw_lower, draw_upper],
-        [y, y],
-        color=INK,
-        linewidth=ERROR_LINE_WIDTH,
-        solid_capstyle="butt",
-        zorder=2,
-    )
-    axis.plot(
-        estimate,
-        y,
-        linestyle="none",
+    low, high = scale
+    left = low if not np.isfinite(lower) else max(lower, low)
+    right = high if not np.isfinite(upper) else min(upper, high)
+    x_left = to_canvas_x(columns_span, scale, left)
+    x_right = to_canvas_x(columns_span, scale, right)
+    canvas.plot([x_left, x_right], [middle, middle], color=INK, linewidth=INTERVAL_WIDTH, solid_capstyle="butt", zorder=3)
+    if np.isfinite(lower) and lower < low:
+        canvas.annotate(
+            "",
+            xy=(x_left, middle),
+            xytext=(x_left + ARROW_INCHES * 2, middle),
+            arrowprops={"arrowstyle": "-|>", "color": INK, "lw": 0.8, "mutation_scale": 6},
+            zorder=4,
+        )
+    if np.isfinite(upper) and upper > high:
+        canvas.annotate(
+            "",
+            xy=(x_right, middle),
+            xytext=(x_right - ARROW_INCHES * 2, middle),
+            arrowprops={"arrowstyle": "-|>", "color": INK, "lw": 0.8, "mutation_scale": 6},
+            zorder=4,
+        )
+    canvas.plot(
+        to_canvas_x(columns_span, scale, estimate),
+        middle,
         marker="o",
-        color=INK,
         markersize=MARKER_SIZE,
-        zorder=3,
+        color=INK,
+        zorder=5,
     )
-    cap_length = 0.08 * (xmax - xmin)
-    if lower is not None and np.isfinite(lower) and lower < xmin:
-        axis.annotate(
-            "",
-            xy=(xmin, y),
-            xytext=(xmin + cap_length, y),
-            arrowprops={"arrowstyle": "<|-", "color": INK, "lw": ERROR_LINE_WIDTH},
-            zorder=4,
-        )
-    if upper is not None and np.isfinite(upper) and upper > xmax:
-        axis.annotate(
-            "",
-            xy=(xmax, y),
-            xytext=(xmax - cap_length, y),
-            arrowprops={"arrowstyle": "-|>", "color": INK, "lw": ERROR_LINE_WIDTH},
-            zorder=4,
-        )
-def forest_limits(
-    estimates: list[float | None],
-    lowers: list[float | None],
-    uppers: list[float | None],
-) -> tuple[float, float]:
-    values = []
-    for estimate, lower, upper in zip(estimates, lowers, uppers, strict=True):
-        if estimate is not None and np.isfinite(estimate):
-            values.append(estimate)
-        if lower is not None and np.isfinite(lower):
-            values.append(lower)
-        if upper is not None and np.isfinite(upper):
-            values.append(upper)
-    if not values:
-        return -1.0, 1.0
-    array = np.asarray(values, dtype=float)
-    endpoint_cap = float(np.max(np.abs(array)))
-    endpoint_cap = max(endpoint_cap, MIN_FOREST_HALF_WIDTH)
-    half_width = endpoint_cap * 1.08
-    widest = float(np.max(array) - np.min(array))
-    if widest > FOREST_CAP_TOLERANCE * endpoint_cap:
-        half_width = FOREST_CAP_TOLERANCE * endpoint_cap
-    half_width = max(half_width, MIN_FOREST_HALF_WIDTH)
-    return -half_width, half_width
 
 
-def round_patient_count(value: object) -> int:
-    return int(round(float(value)))
+def draw_bottom_axis(
+    canvas,
+    columns_span: tuple[float, float],
+    scale: tuple[float, float],
+    y: float,
+    label: str,
+) -> None:
+    left, right = columns_span
+    canvas.plot([left, right], [y, y], color=INK, linewidth=0.6, zorder=2)
+    for tick in nice_ticks(scale):
+        x = to_canvas_x(columns_span, scale, tick)
+        canvas.plot([x, x], [y, y + 0.05], color=INK, linewidth=0.6)
+        canvas.text(x, y + 0.08, format_tick(tick), fontsize=TICK_FONT, color=INK, ha="center", va="top")
+    canvas.text(
+        (left + right) / 2,
+        y + 0.30,
+        label,
+        fontsize=TICK_FONT,
+        color=MUTED_INK,
+        ha="center",
+        va="top",
+    )
 
 
-def round_two(value: float | None) -> str:
-    if value is None or not np.isfinite(value):
+def nice_ticks(scale: tuple[float, float]) -> list[float]:
+    low, high = scale
+    span = high - low
+    raw_step = span / max(TICK_TARGET_COUNT - 1, 1)
+    magnitude = 10 ** np.floor(np.log10(raw_step))
+    for multiple in (1.0, 2.0, 2.5, 5.0, 10.0):
+        step = multiple * magnitude
+        if step >= raw_step:
+            break
+    start = np.ceil(low / step) * step
+    ticks = np.arange(start, high + step * 0.5, step)
+    return [float(round(tick, 10)) for tick in ticks if low <= tick <= high]
+
+
+def format_tick(value: float) -> str:
+    return f"{value:g}"
+
+
+def format_estimate(interval: tuple[float, float, float]) -> str:
+    estimate, lower, upper = interval
+    return f"{estimate:.2f} ({lower:.2f}, {upper:.2f})"
+
+
+def format_p(value: float) -> str:
+    if not np.isfinite(value):
         return "NA"
-    return f"{value:.2f}"
-
-
-def format_estimate_ci(
-    estimate: float | None,
-    lower: float | None,
-    upper: float | None,
-) -> str:
-    return f"{round_two(estimate)} ({round_two(lower)}-{round_two(upper)})"
-
-
-def format_p_value(value: float | None) -> str:
-    if value is None or not np.isfinite(value):
-        return "NA"
-    if value < 0.01:
-        return "< 0.01"
+    if value < P_FLOOR:
+        return "<0.01"
     return f"{value:.2f}"

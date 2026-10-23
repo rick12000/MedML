@@ -606,27 +606,33 @@ class PolicyService:
         X_mod = dataset.X_effect_modifiers
         rows: list[dict[str, object]] = []
         cohort_n = len(dataset.df)
+        direction = reward_direction(dataset.data.outcome_favorability)
         leaf_ids = self.subgroup_leaf_ids(policy=policy, X_mod=X_mod)
         for rule in policy.rules:
             if leaf_ids is None:
-                subgroup_scores = scores
-                split_n = len(scores)
+                mask = np.ones(len(scores), dtype=bool)
+            elif rule.included_leaves is not None:
+                mask = np.isin(leaf_ids, list(rule.included_leaves))
+            elif rule.subgroup_leaf is None:
+                continue
             else:
-                if rule.included_leaves is not None:
-                    mask = np.isin(leaf_ids, list(rule.included_leaves))
-                elif rule.subgroup_leaf is None:
-                    continue
-                else:
-                    mask = leaf_ids == rule.subgroup_leaf
-                subgroup_scores = scores.iloc[mask]
-                split_n = int(mask.sum())
+                mask = leaf_ids == rule.subgroup_leaf
+            split_n = int(mask.sum())
             if split_n == 0:
                 continue
+            summary = subgroup_benefit(
+                mask=mask,
+                scores=scores,
+                dataset=dataset,
+                decision=rule.recommended_treatment,
+            )
             interval = self.bootstrap_subgroup_effect(
-                subgroup_scores=subgroup_scores,
-                recommended_treatment=rule.recommended_treatment,
+                subgroup_scores=scores.iloc[mask],
+                recommended_treatment=summary.arm,
                 control_value=dataset.control_value,
             )
+            benefit_low, benefit_high = sorted((direction * interval.ci_lower, direction * interval.ci_upper))
+            decision_is_treat = rule.recommended_treatment != dataset.control_value
             rows.append(
                 {
                     "method": policy.method,
@@ -634,7 +640,8 @@ class PolicyService:
                     "data_split": data_split,
                     "rule_id": rule.rule_id,
                     "rule": rule.rule,
-                    "recommended_treatment": rule.recommended_treatment,
+                    "decision": rule.recommended_treatment,
+                    "effect_arm": summary.arm,
                     "split_n": split_n,
                     "split_prevalence": split_n / cohort_n,
                     "test_n": split_n,
@@ -642,6 +649,10 @@ class PolicyService:
                     "effect_estimate": interval.estimate,
                     "ci_lower_given_rule": interval.ci_lower,
                     "ci_upper_given_rule": interval.ci_upper,
+                    "benefit_estimate": direction * interval.estimate,
+                    "benefit_ci_lower": benefit_low,
+                    "benefit_ci_upper": benefit_high,
+                    "decision_agrees_with_benefit": bool(decision_is_treat == (direction * interval.estimate > 0)),
                     "interval_status": interval.interval_status,
                     "learning_effect": np.nan if rule.learning_effect is None else rule.learning_effect,
                     "debiased_learning_effect": (
@@ -680,6 +691,41 @@ class PolicyService:
             ci_upper=upper,
             interval_status=INTERVAL_STATUS_BOOTSTRAP,
         )
+
+
+@dataclass(frozen=True)
+class SubgroupBenefit:
+    arm: JsonValue
+    raw_effect: float
+    benefit: float
+
+
+def subgroup_benefit(
+    mask: np.ndarray,
+    scores: pd.DataFrame,
+    dataset: CausalDataset,
+    decision: JsonValue,
+) -> SubgroupBenefit:
+    """Treatment effect of one node, shared by the CSV and the tree figures.
+
+    The arm is the decision when the node treats. When the node withholds
+    treatment, the arm is the non-control arm with the best benefit in that
+    node, so the reported effect is always a treatment-vs-control contrast.
+    """
+    direction = reward_direction(dataset.data.outcome_favorability)
+    columns = list(scores.columns)
+    non_control = [value for value in dataset.treatment_values if value != dataset.control_value]
+    means = scores.iloc[mask].mean(axis=0)
+    if decision != dataset.control_value:
+        arm = decision
+    else:
+        arm = max(
+            non_control,
+            key=lambda value: direction
+            * float(means[contrast_column_name(value, dataset.control_value, columns)]),
+        )
+    raw = float(means[contrast_column_name(arm, dataset.control_value, columns)])
+    return SubgroupBenefit(arm=arm, raw_effect=raw, benefit=direction * raw)
 
 
 def reward_direction(favorability: OutcomeFavorability) -> float:

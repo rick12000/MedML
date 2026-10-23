@@ -1,4 +1,4 @@
-"""Decision diagrams for fitted policy trees on learning and held-out data."""
+"""Decision diagrams for fitted policy trees, with training and held-out effects per node."""
 
 from __future__ import annotations
 
@@ -15,33 +15,47 @@ from matplotlib.axes import Axes
 from matplotlib.patches import FancyBboxPatch
 from sklearn.tree import DecisionTreeRegressor, _tree
 
+from causal_pipeline.config import JsonValue
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.estimator_identity import normalize_estimator_alias
-from causal_pipeline.figures import INK, PUBLICATION_RC, TITLE_SIZE
-from causal_pipeline.policy import (
-    FittedPolicy,
-    best_treatment_arm,
-    contrast_column_name,
-    reward_direction,
-)
+from causal_pipeline.figures import INK, PUBLICATION_RC, REFERENCE_COLOR
+from causal_pipeline.policy import FittedPolicy, best_treatment_arm, reward_direction, subgroup_benefit
 from causal_pipeline.policy_tree import ExactPolicyTree, PolicySplitNode
 from causal_pipeline.utils import save_figure
 
-NODE_WIDTH = 0.38
-NODE_HEIGHT = 0.17
-FONT_SIZE = 6.5
-LINE_WIDTH = 0.9
 POLICY_TREE_FIGURE_NAME = "policy_tree.png"
-
+TREAT_FILL = "#E3EEF8"
+TREAT_EDGE = "#0072B2"
+CONTROL_FILL = "#F4F4F4"
+CONTROL_EDGE = "#7A7A7A"
+BOX_WIDTH = 0.94
+BOX_HEIGHT = 0.72
+BODY_FONT_SIZE = 8.0
+HEADER_FONT_SIZE = 8.6
+LEVEL_SPACING_INCHES = 1.25
+LEAF_SPACING_INCHES = 1.55
+EDGE_LINE_WIDTH = 0.9
+BOX_LINE_WIDTH = 0.9
+FOOTNOTE = (
+    "Δ = benefit of treatment vs control in the node (sign-adjusted; positive favours treatment). "
+    "Decisions come from the fitted tree; Δ is computed separately on training and held-out rows."
+)
 
 @dataclass(frozen=True)
-class TreeNodeLayout:
-    node_key: int | str
-    center_x: float
-    center_y: float
-    label: str
+class DrawnNode:
+    key: str
+    header: str
     is_leaf: bool
-    children: tuple[int | str, int | str] | None
+    decision: JsonValue
+    train_n: int
+    train_benefit: float
+    test_n: int
+    test_benefit: float
+    children: tuple[str, str] | None
+    branch_labels: tuple[str, str] | None
+    is_treat: bool
+    depth: int = 0
+    x: float = 0.0
 
 
 def policy_slice_slug(policy: FittedPolicy) -> str:
@@ -74,66 +88,63 @@ def save_policy_slice_figure(
     test_scores: pd.DataFrame,
     save_path: str,
 ) -> None:
-    """One trained tree; train and test effects annotated on the same nodes."""
+    """One fitted tree. Structure and decisions come from training; Δ is shown on both samples."""
     if not policy_supports_tree_figure(policy):
         return
-    title = policy_slice_title(policy)
+    nodes = build_tree_nodes(
+        policy=policy,
+        estimation=estimation,
+        train_scores=train_scores,
+        test=test,
+        test_scores=test_scores,
+    )
+    if not nodes:
+        return
     with plt.rc_context(PUBLICATION_RC):
-        figure, axis = plt.subplots(figsize=(5.8, 5.4))
-        draw_frozen_policy_tree(
-            policy=policy,
-            estimation=estimation,
-            train_scores=train_scores,
-            test=test,
-            test_scores=test_scores,
-            ax=axis,
-        )
-        figure.suptitle(title, fontsize=TITLE_SIZE, y=1.02)
+        figure = render_policy_tree(nodes=nodes, title=policy_slice_title(policy))
         save_figure(save_path, figure)
         plt.close(figure)
 
 
-def draw_frozen_policy_tree(
+def build_tree_nodes(
     policy: FittedPolicy,
     estimation: CausalDataset,
     train_scores: pd.DataFrame,
     test: CausalDataset,
     test_scores: pd.DataFrame,
-    ax: Axes,
-) -> None:
-    ax.axis("off")
-    train_features = estimation.X_effect_modifiers
-    test_features = test.X_effect_modifiers
+) -> list[DrawnNode]:
+    """Collect every node with its train/test masks and decision, using each method's own tree."""
     if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
         if not isinstance(policy.model, ExactPolicyTree) or policy.model.node is None:
-            return
-        layouts = layout_exact_policy_tree(
+            return []
+        specs = exact_tree_specs(
             root=policy.model.node,
             feature_names=policy.feature_names,
-            train_features=train_features,
-            test_features=test_features,
+            train_features=estimation.X_effect_modifiers,
+            test_features=test.X_effect_modifiers,
             train_scores=train_scores,
-            test_scores=test_scores,
             dataset=estimation,
-            policy=policy,
         )
     else:
         sklearn_model = sklearn_policy_tree(policy)
         if sklearn_model is None:
-            return
-        layouts = layout_sklearn_policy_tree(
+            return []
+        specs = sklearn_tree_specs(
             tree=sklearn_model,
             feature_names=policy.feature_names,
-            train_features=train_features,
-            test_features=test_features,
+            train_features=estimation.X_effect_modifiers,
+            test_features=test.X_effect_modifiers,
             train_scores=train_scores,
-            test_scores=test_scores,
             dataset=estimation,
             policy=policy,
         )
-    if not layouts:
-        return
-    render_tree_layout(ax=ax, layouts=layouts)
+    return assemble_nodes(
+        specs=specs,
+        estimation=estimation,
+        train_scores=train_scores,
+        test=test,
+        test_scores=test_scores,
+    )
 
 
 def sklearn_policy_tree(policy: FittedPolicy) -> PolicyTree | DecisionTreeRegressor | None:
@@ -148,365 +159,314 @@ def sklearn_policy_tree(policy: FittedPolicy) -> PolicyTree | DecisionTreeRegres
     return None
 
 
-def layout_sklearn_policy_tree(
+@dataclass(frozen=True)
+class NodeSpec:
+    key: str
+    header: str
+    is_leaf: bool
+    children: tuple[str, str] | None
+    branch_labels: tuple[str, str] | None
+    train_mask: np.ndarray
+    test_mask: np.ndarray
+    decision: JsonValue
+    depth: int
+
+
+def sklearn_tree_specs(
     tree: PolicyTree | DecisionTreeRegressor,
     feature_names: list[str],
     train_features: pd.DataFrame,
     test_features: pd.DataFrame,
     train_scores: pd.DataFrame,
-    test_scores: pd.DataFrame,
     dataset: CausalDataset,
     policy: FittedPolicy,
-) -> list[TreeNodeLayout]:
+) -> list[NodeSpec]:
     sklearn_tree = tree.tree_
     train_path = tree.decision_path(train_features).toarray().astype(bool)
     test_path = tree.decision_path(test_features).toarray().astype(bool)
-    positions, children = sklearn_uniform_layout(sklearn_tree=sklearn_tree)
-    layouts: list[TreeNodeLayout] = []
-    for node_id, (center_x, center_y) in positions.items():
-        train_mask = train_path[:, node_id]
-        test_mask = test_path[:, node_id]
-        feature_index = int(sklearn_tree.feature[node_id])
+    levels = dataset.treatment_values
+    if policy.method == "dr_policy_tree":
+        levels = _control_first_levels(dataset)
+    specs: list[NodeSpec] = []
+
+    def visit(node_id: int, depth: int) -> None:
         is_leaf = sklearn_tree.children_left[node_id] == _tree.TREE_LEAF
         if is_leaf:
-            split_text = "leaf"
+            header = "Leaf"
+            children = None
+            branch_labels = None
         else:
-            feature_name = feature_names[feature_index]
-            threshold = format(float(sklearn_tree.threshold[node_id]), ".6g")
-            split_text = f"{feature_name} ≤ {threshold}"
-        label = dual_split_node_label(
-            split_text=split_text,
-            train_mask=train_mask,
-            test_mask=test_mask,
-            train_scores=train_scores,
-            test_scores=test_scores,
-            train_features=train_features,
-            dataset=dataset,
-            policy=policy,
-        )
-        layouts.append(
-            TreeNodeLayout(
-                node_key=int(node_id),
-                center_x=center_x,
-                center_y=center_y,
-                label=label,
+            feature = feature_names[int(sklearn_tree.feature[node_id])]
+            threshold = format(float(sklearn_tree.threshold[node_id]), ".4g")
+            header = f"{feature} ≤ {threshold}"
+            children = (str(sklearn_tree.children_left[node_id]), str(sklearn_tree.children_right[node_id]))
+            branch_labels = ("≤", ">")
+        if policy.method == "virtual_twins":
+            decision = _best_arm_for_mask(
+                mask=train_path[:, node_id],
+                scores=train_scores,
+                dataset=dataset,
+            )
+        else:
+            action = int(np.argmax(sklearn_tree.value[node_id][:, 0]))
+            decision = levels[action]
+        specs.append(
+            NodeSpec(
+                key=str(node_id),
+                header=header,
                 is_leaf=is_leaf,
-                children=children.get(node_id),
+                children=children,
+                branch_labels=branch_labels,
+                train_mask=train_path[:, node_id],
+                test_mask=test_path[:, node_id],
+                decision=decision,
+                depth=depth,
             )
         )
-    return layouts
+        if not is_leaf:
+            visit(int(sklearn_tree.children_left[node_id]), depth + 1)
+            visit(int(sklearn_tree.children_right[node_id]), depth + 1)
+
+    visit(0, 0)
+    return specs
 
 
-def layout_exact_policy_tree(
+def exact_tree_specs(
     root: PolicySplitNode,
     feature_names: list[str],
     train_features: pd.DataFrame,
     test_features: pd.DataFrame,
     train_scores: pd.DataFrame,
-    test_scores: pd.DataFrame,
     dataset: CausalDataset,
-    policy: FittedPolicy,
-) -> list[TreeNodeLayout]:
+) -> list[NodeSpec]:
     train_matrix = np.asarray(train_features.to_numpy(), dtype=float)
     test_matrix = np.asarray(test_features.to_numpy(), dtype=float)
-    train_info = exact_node_metadata(node=root, features=train_matrix, feature_names=feature_names)
-    test_info = exact_node_metadata(node=root, features=test_matrix, feature_names=feature_names)
-    positions, children = exact_uniform_layout(node=root)
-    layouts: list[TreeNodeLayout] = []
-    for node_key, (center_x, center_y) in positions.items():
-        train_mask = np.asarray(train_info[node_key]["mask"], dtype=bool)
-        test_mask = np.asarray(test_info[node_key]["mask"], dtype=bool)
-        label = dual_split_node_label(
-            split_text=str(train_info[node_key]["split_text"]),
-            train_mask=train_mask,
-            test_mask=test_mask,
-            train_scores=train_scores,
-            test_scores=test_scores,
-            train_features=train_features,
-            dataset=dataset,
-            policy=policy,
-        )
-        layouts.append(
-            TreeNodeLayout(
-                node_key=node_key,
-                center_x=center_x,
-                center_y=center_y,
-                label=label,
-                is_leaf=bool(train_info[node_key]["is_leaf"]),
-                children=children.get(node_key),
+    specs: list[NodeSpec] = []
+
+    def visit(
+        current: PolicySplitNode,
+        key: str,
+        depth: int,
+        train_positions: np.ndarray,
+        test_positions: np.ndarray,
+    ) -> None:
+        train_mask = np.zeros(len(train_matrix), dtype=bool)
+        train_mask[train_positions] = True
+        test_mask = np.zeros(len(test_matrix), dtype=bool)
+        test_mask[test_positions] = True
+        if current.leaf_id is not None:
+            decision = dataset.treatment_values[int(current.action)]
+            specs.append(
+                NodeSpec(key, "Leaf", True, None, None, train_mask, test_mask, decision, depth)
             )
-        )
-    return layouts
-
-
-def dual_split_node_label(
-    split_text: str,
-    train_mask: np.ndarray,
-    test_mask: np.ndarray,
-    train_scores: pd.DataFrame,
-    test_scores: pd.DataFrame,
-    train_features: pd.DataFrame,
-    dataset: CausalDataset,
-    policy: FittedPolicy,
-) -> str:
-    _, treatment = subgroup_effect_and_treatment(
-        mask=train_mask,
-        scores=train_scores,
-        dataset=dataset,
-        policy=policy,
-        features=train_features,
-    )
-    train_effect = effect_for_recommended_treatment(
-        mask=train_mask,
-        scores=train_scores,
-        dataset=dataset,
-        recommended_treatment=treatment,
-    )
-    test_effect = effect_for_recommended_treatment(
-        mask=test_mask,
-        scores=test_scores,
-        dataset=dataset,
-        recommended_treatment=treatment,
-    )
-    return (
-        f"{split_text}\n"
-        f"treat = {treatment}\n"
-        f"train: n = {int(train_mask.sum())}, effect = {format_effect(train_effect)}\n"
-        f"test: n = {int(test_mask.sum())}, effect = {format_effect(test_effect)}"
-    )
-
-
-def subgroup_effect_and_treatment(
-    mask: np.ndarray,
-    scores: pd.DataFrame,
-    dataset: CausalDataset,
-    policy: FittedPolicy,
-    features: pd.DataFrame,
-) -> tuple[float, object]:
-    if not np.any(mask):
-        return float("nan"), dataset.control_value
-    masked_features = features.iloc[mask]
-    sklearn_model = sklearn_policy_tree(policy)
-    if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
-        if isinstance(policy.model, ExactPolicyTree):
-            action = int(policy.model.predict(masked_features)[0])
-            treatment = dataset.treatment_values[action]
-        else:
-            treatment = dataset.control_value
-    elif sklearn_model is not None and isinstance(sklearn_model, PolicyTree):
-        action = int(sklearn_model.predict(masked_features)[0])
-        treatment = dataset.treatment_values[action]
-    elif isinstance(sklearn_model, DecisionTreeRegressor):
-        direction = reward_direction(dataset.data.outcome_favorability)
-        mean_effects = scores.iloc[mask].mean(axis=0)
-        treatment = best_treatment_arm(
-            mean_effects=mean_effects,
-            treatment_values=dataset.treatment_values,
-            control_value=dataset.control_value,
-            direction=direction,
-        )
-    else:
-        treatment = dataset.control_value
-    if treatment == dataset.control_value:
-        return 0.0, treatment
-    column = contrast_column_name(
-        recommended_treatment=treatment,
-        control_value=dataset.control_value,
-        columns=list(scores.columns),
-    )
-    return float(scores.loc[mask, column].mean()), treatment
-
-
-def effect_for_recommended_treatment(
-    mask: np.ndarray,
-    scores: pd.DataFrame,
-    dataset: CausalDataset,
-    recommended_treatment: object,
-) -> float:
-    if not np.any(mask):
-        return float("nan")
-    if recommended_treatment == dataset.control_value:
-        return 0.0
-    column = contrast_column_name(
-        recommended_treatment=recommended_treatment,
-        control_value=dataset.control_value,
-        columns=list(scores.columns),
-    )
-    return float(scores.loc[mask, column].mean())
-
-
-def sklearn_uniform_layout(
-    sklearn_tree: object,
-) -> tuple[dict[int, tuple[float, float]], dict[int, tuple[int, int]]]:
-    leaf_counter = 0
-    positions: dict[int, tuple[float, float]] = {}
-    children: dict[int, tuple[int, int]] = {}
-
-    def visit(node_id: int, depth: int) -> float:
-        nonlocal leaf_counter
-        if sklearn_tree.children_left[node_id] == _tree.TREE_LEAF:
-            center_x = float(leaf_counter)
-            leaf_counter += 1
-            positions[node_id] = (center_x, -float(depth))
-            return center_x
-        left_x = visit(int(sklearn_tree.children_left[node_id]), depth + 1)
-        right_x = visit(int(sklearn_tree.children_right[node_id]), depth + 1)
-        center_x = (left_x + right_x) / 2.0
-        positions[node_id] = (center_x, -float(depth))
-        children[node_id] = (
-            int(sklearn_tree.children_left[node_id]),
-            int(sklearn_tree.children_right[node_id]),
-        )
-        return center_x
-
-    visit(0, 0)
-    if not positions:
-        return {}, {}
-    xs = [position[0] for position in positions.values()]
-    span = max(xs) - min(xs) if len(xs) > 1 else 1.0
-    scale = 1.0 / span if span > 0 else 1.0
-    return (
-        {
-            node_id: ((position[0] - min(xs)) * scale, position[1])
-            for node_id, position in positions.items()
-        },
-        children,
-    )
-
-
-def exact_uniform_layout(
-    node: PolicySplitNode,
-) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[str, str]]]:
-    leaf_counter = 0
-    positions: dict[str, tuple[float, float]] = {}
-    children: dict[str, tuple[str, str]] = {}
-
-    def visit(current: PolicySplitNode, depth: int, node_key: str) -> float:
-        nonlocal leaf_counter
-        if current.leaf_id is not None:
-            center_x = float(leaf_counter)
-            leaf_counter += 1
-            positions[node_key] = (center_x, -float(depth))
-            return center_x
-        if current.left is None or current.right is None:
-            raise RuntimeError("Exact policy node is missing a child.")
-        left_key = f"{node_key}:L"
-        right_key = f"{node_key}:R"
-        children[node_key] = (left_key, right_key)
-        left_x = visit(current.left, depth + 1, left_key)
-        right_x = visit(current.right, depth + 1, right_key)
-        center_x = (left_x + right_x) / 2.0
-        positions[node_key] = (center_x, -float(depth))
-        return center_x
-
-    visit(node, 0, "root")
-    xs = [position[0] for position in positions.values()]
-    span = max(xs) - min(xs) if len(xs) > 1 else 1.0
-    scale = 1.0 / span if span > 0 else 1.0
-    return (
-        {
-            node_key: ((position[0] - min(xs)) * scale, position[1])
-            for node_key, position in positions.items()
-        },
-        children,
-    )
-
-
-def exact_node_metadata(
-    node: PolicySplitNode,
-    features: np.ndarray,
-    feature_names: list[str],
-) -> dict[str, dict[str, object]]:
-    count = features.shape[0]
-    metadata: dict[str, dict[str, object]] = {}
-
-    def visit(current: PolicySplitNode, positions: np.ndarray, node_key: str, path: list[str]) -> None:
-        if current.leaf_id is not None:
-            metadata[node_key] = {
-                "mask": positions.copy(),
-                "split_text": " and ".join(path) if path else "all patients",
-                "is_leaf": True,
-            }
             return
         if current.feature_index is None or current.threshold is None:
             raise RuntimeError("Internal policy node is missing its split.")
         if current.left is None or current.right is None:
             raise RuntimeError("Internal policy node is missing a child.")
-        feature_name = feature_names[current.feature_index]
-        threshold = format(current.threshold, ".6g")
-        metadata[node_key] = {
-            "mask": positions.copy(),
-            "split_text": f"{feature_name} ≤ {threshold}",
-            "is_leaf": False,
-        }
-        values = features[positions, current.feature_index]
-        go_left = values <= current.threshold
-        left_positions = positions[go_left]
-        right_positions = positions[~go_left]
+        feature = feature_names[current.feature_index]
+        header = f"{feature} ≤ {format(current.threshold, '.4g')}"
+        decision = _best_arm_for_mask(mask=train_mask, scores=train_scores, dataset=dataset)
+        specs.append(
+            NodeSpec(
+                key,
+                header,
+                False,
+                (f"{key}L", f"{key}R"),
+                ("≤", ">"),
+                train_mask,
+                test_mask,
+                decision,
+                depth,
+            )
+        )
+        train_values = train_matrix[train_positions, current.feature_index]
+        test_values = test_matrix[test_positions, current.feature_index]
         visit(
             current.left,
-            left_positions,
-            f"{node_key}:L",
-            path + [f"{feature_name} ≤ {threshold}"],
+            f"{key}L",
+            depth + 1,
+            train_positions[train_values <= current.threshold],
+            test_positions[test_values <= current.threshold],
         )
         visit(
             current.right,
-            right_positions,
-            f"{node_key}:R",
-            path + [f"{feature_name} > {threshold}"],
+            f"{key}R",
+            depth + 1,
+            train_positions[train_values > current.threshold],
+            test_positions[test_values > current.threshold],
         )
 
-    visit(node, np.arange(count), "root", [])
-    return metadata
+    visit(root, "0", 0, np.arange(len(train_matrix)), np.arange(len(test_matrix)))
+    return specs
 
 
-def render_tree_layout(ax: Axes, layouts: list[TreeNodeLayout]) -> None:
-    layout_by_key = {layout.node_key: layout for layout in layouts}
-    min_y = min(layout.center_y for layout in layouts)
-    max_y = max(layout.center_y for layout in layouts)
-    y_span = max(max_y - min_y, 1.0)
-    for layout in layouts:
-        if layout.children is None:
-            continue
-        for child_key in layout.children:
-            child = layout_by_key.get(child_key)
-            if child is None:
-                continue
-            ax.plot(
-                [layout.center_x, child.center_x],
-                [layout.center_y, child.center_y],
-                color=INK,
-                linewidth=LINE_WIDTH,
-                zorder=1,
+def assemble_nodes(
+    specs: list[NodeSpec],
+    estimation: CausalDataset,
+    train_scores: pd.DataFrame,
+    test: CausalDataset,
+    test_scores: pd.DataFrame,
+) -> list[DrawnNode]:
+    """Attach benefit values from the shared subgroup definition and x-positions for drawing."""
+    positions = _leaf_x_positions({spec.key: spec for spec in specs})
+    drawn: list[DrawnNode] = []
+    for spec in specs:
+        train_n = int(spec.train_mask.sum())
+        test_n = int(spec.test_mask.sum())
+        train_benefit = (
+            subgroup_benefit(spec.train_mask, train_scores, estimation, spec.decision).benefit
+            if train_n
+            else float("nan")
+        )
+        test_benefit = (
+            subgroup_benefit(spec.test_mask, test_scores, test, spec.decision).benefit
+            if test_n
+            else float("nan")
+        )
+        drawn.append(
+            DrawnNode(
+                key=spec.key,
+                header=spec.header,
+                is_leaf=spec.is_leaf,
+                decision=spec.decision,
+                train_n=train_n,
+                train_benefit=train_benefit,
+                test_n=test_n,
+                test_benefit=test_benefit,
+                children=spec.children,
+                branch_labels=spec.branch_labels,
+                is_treat=spec.decision != estimation.control_value,
+                depth=spec.depth,
+                x=positions[spec.key],
             )
-    for layout in layouts:
-        normalized_y = (layout.center_y - min_y) / y_span
-        box = FancyBboxPatch(
-            (layout.center_x - NODE_WIDTH / 2.0, normalized_y - NODE_HEIGHT / 2.0),
-            NODE_WIDTH,
-            NODE_HEIGHT,
-            boxstyle="round,pad=0.01",
-            linewidth=LINE_WIDTH,
-            edgecolor=INK,
-            facecolor="white",
-            zorder=2,
         )
-        ax.add_patch(box)
+    return drawn
+
+
+def _leaf_x_positions(specs_by_key: dict[str, NodeSpec]) -> dict[str, float]:
+    """Leaves get consecutive x-slots; each internal node sits above the midpoint of its children."""
+    positions: dict[str, float] = {}
+    counter = 0
+
+    def visit(key: str) -> float:
+        nonlocal counter
+        spec = specs_by_key[key]
+        if spec.is_leaf or spec.children is None:
+            positions[key] = float(counter)
+            counter += 1
+            return positions[key]
+        left_x = visit(spec.children[0])
+        right_x = visit(spec.children[1])
+        positions[key] = (left_x + right_x) / 2.0
+        return positions[key]
+
+    visit("0")
+    return positions
+
+
+def _control_first_levels(dataset: CausalDataset) -> list[JsonValue]:
+    return [dataset.control_value] + [
+        value for value in dataset.treatment_values if value != dataset.control_value
+    ]
+
+
+def _best_arm_for_mask(mask: np.ndarray, scores: pd.DataFrame, dataset: CausalDataset) -> JsonValue:
+    if not np.any(mask):
+        return dataset.control_value
+    return best_treatment_arm(
+        mean_effects=scores.iloc[mask].mean(axis=0),
+        treatment_values=dataset.treatment_values,
+        control_value=dataset.control_value,
+        direction=reward_direction(dataset.data.outcome_favorability),
+    )
+
+
+def render_policy_tree(nodes: list[DrawnNode], title: str) -> plt.Figure:
+    leaf_count = sum(1 for node in nodes if node.is_leaf)
+    max_depth = max(node.depth for node in nodes)
+    width = max(7.0, LEAF_SPACING_INCHES * leaf_count + 1.6)
+    height = LEVEL_SPACING_INCHES * (max_depth + 1) + 1.5
+    figure, ax = plt.subplots(figsize=(width, height))
+    by_key = {node.key: node for node in nodes}
+    xs = [node.x for node in nodes]
+    ax.set_xlim(min(xs) - 0.75, max(xs) + 0.75)
+    ax.set_ylim(-max_depth - 0.75, 0.75)
+    ax.axis("off")
+
+    for node in nodes:
+        if node.children is None:
+            continue
+        parent_bottom = -node.depth - BOX_HEIGHT / 2
+        mid_y = -node.depth - 0.5
+        for child_key, label in zip(node.children, node.branch_labels, strict=True):
+            child = by_key[child_key]
+            child_top = -child.depth + BOX_HEIGHT / 2
+            ax.plot(
+                [node.x, node.x, child.x, child.x],
+                [parent_bottom, mid_y, mid_y, child_top],
+                color=REFERENCE_COLOR,
+                linewidth=EDGE_LINE_WIDTH,
+                zorder=1,
+                solid_capstyle="round",
+            )
+            ax.text(
+                child.x + (0.1 if child.x >= node.x else -0.1),
+                mid_y + 0.08,
+                label,
+                ha="left" if child.x >= node.x else "right",
+                va="bottom",
+                fontsize=6.5,
+                color=REFERENCE_COLOR,
+            )
+
+    for node in nodes:
+        draw_node(ax=ax, node=node)
+
+    figure.suptitle(title, fontsize=9.5, color=INK, y=0.985)
+    figure.text(0.5, 0.012, FOOTNOTE, ha="center", va="bottom", fontsize=6.2, color=REFERENCE_COLOR, wrap=True)
+    figure.tight_layout(rect=(0.0, 0.05, 1.0, 0.95))
+    return figure
+
+
+def draw_node(ax: Axes, node: DrawnNode) -> None:
+    y = -node.depth
+    fill, edge = (TREAT_FILL, TREAT_EDGE) if node.is_treat else (CONTROL_FILL, CONTROL_EDGE)
+    box = FancyBboxPatch(
+        (node.x - BOX_WIDTH / 2, y - BOX_HEIGHT / 2),
+        BOX_WIDTH,
+        BOX_HEIGHT,
+        boxstyle="round,pad=0.0,rounding_size=0.06",
+        linewidth=BOX_LINE_WIDTH,
+        edgecolor=edge,
+        facecolor=fill,
+        zorder=2,
+    )
+    ax.add_patch(box)
+    decision_text = f"Treat: {node.decision}" if node.is_treat else "Control"
+    lines = [
+        (node.header, HEADER_FONT_SIZE, "bold"),
+        (decision_text, BODY_FONT_SIZE, "normal"),
+        (f"Train  n={node.train_n}  Δ={format_benefit(node.train_benefit)}", BODY_FONT_SIZE, "normal"),
+        (f"Test   n={node.test_n}  Δ={format_benefit(node.test_benefit)}", BODY_FONT_SIZE, "normal"),
+    ]
+    spacing = 0.165
+    top = y + (len(lines) - 1) * spacing / 2
+    for index, (text, size, weight) in enumerate(lines):
         ax.text(
-            layout.center_x,
-            normalized_y,
-            layout.label,
+            node.x,
+            top - index * spacing,
+            text,
             ha="center",
             va="center",
-            fontsize=FONT_SIZE,
+            fontsize=size,
+            fontweight=weight,
             color=INK,
             zorder=3,
         )
-    ax.set_xlim(-0.15, 1.15)
-    ax.set_ylim(-0.1, 1.1)
 
 
-def format_effect(value: float) -> str:
-    if np.isnan(value):
+def format_benefit(value: float) -> str:
+    if value is None or not np.isfinite(value):
         return "NA"
-    return format(value, ".4g")
+    return f"{value:+.2f}"

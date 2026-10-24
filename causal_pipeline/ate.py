@@ -14,6 +14,7 @@ from causallib.estimation import Standardization
 from doubleml import DoubleMLData
 from doubleml.irm import DoubleMLAPO, DoubleMLAPOS, DoubleMLIRM
 from doubleml.plm import DoubleMLPLR
+from doubleml.utils import PSProcessorConfig
 from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
 
@@ -31,7 +32,6 @@ from causal_pipeline.config import (
 )
 from causal_pipeline.crossfit import (
     aipw_arm_scores,
-    apply_propensity_trim,
     cross_fit_nuisances,
     VARIANCE_PROPENSITY_TREATED_AS_KNOWN,
     factual_predictions,
@@ -56,6 +56,9 @@ from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_dataframe, write_html
 
 logger = logging.getLogger(__name__)
+
+DML_UNCLIPPED_THRESHOLD = 1e-12
+SYMMETRIC_CLIP_TOLERANCE = 1e-8
 
 SENSITIVITY_STRENGTH_CAP = 0.9999
 SENSITIVITY_BISECT_ITERATIONS = 30
@@ -207,14 +210,6 @@ class IPWAdapter(BaseATEEstimator):
         )
         self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
-        if self.spec.trim_bounds is not None:
-            self.treatment, self.outcome, self.propensity, _, self.groups = apply_propensity_trim(
-                treatment=self.treatment,
-                outcome=self.outcome,
-                propensity=self.propensity,
-                trim_bounds=self.spec.trim_bounds,
-                groups=self.groups,
-            )
         return self
 
     def treatment_contrast_scores(self) -> TreatmentContrastScores:
@@ -248,7 +243,7 @@ class IPWAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=scored.groups,
         )
-        table = annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
+        table = annotate_propensity_clip(table, self.spec.clip_bounds)
         table["variance_assumption"] = VARIANCE_PROPENSITY_TREATED_AS_KNOWN
         return table
 
@@ -300,21 +295,6 @@ class AIPWAdapter(BaseATEEstimator):
         self.potential_outcomes = potential_outcomes
         self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
-        if self.spec.trim_bounds is not None:
-            (
-                self.treatment,
-                self.outcome,
-                self.propensity,
-                self.potential_outcomes,
-                self.groups,
-            ) = apply_propensity_trim(
-                treatment=self.treatment,
-                outcome=self.outcome,
-                propensity=self.propensity,
-                trim_bounds=self.spec.trim_bounds,
-                potential_outcomes=self.potential_outcomes,
-                groups=self.groups,
-            )
         self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
         return self
 
@@ -329,7 +309,7 @@ class AIPWAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=scored.groups,
         )
-        return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
+        return annotate_propensity_clip(table, self.spec.clip_bounds)
 
 
 class TMLEAdapter(BaseATEEstimator):
@@ -378,21 +358,6 @@ class TMLEAdapter(BaseATEEstimator):
             raise RuntimeError("TMLE cross-fit did not return potential outcomes.")
         self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
         self.groups = observation_groups(data)
-        if self.spec.trim_bounds is not None:
-            (
-                self.treatment,
-                self.outcome,
-                self.propensity,
-                initial_outcomes,
-                self.groups,
-            ) = apply_propensity_trim(
-                treatment=self.treatment,
-                outcome=self.outcome,
-                propensity=self.propensity,
-                trim_bounds=self.spec.trim_bounds,
-                potential_outcomes=initial_outcomes,
-                groups=self.groups,
-            )
         self.potential_outcomes = target_potential_outcomes(
             outcome=self.outcome,
             treatment=self.treatment,
@@ -416,7 +381,7 @@ class TMLEAdapter(BaseATEEstimator):
             estimand=self.spec.estimand,
             groups=scored.groups,
         )
-        return annotate_propensity_overlap(table, self.spec.clip_bounds, self.spec.trim_bounds)
+        return annotate_propensity_clip(table, self.spec.clip_bounds)
 
 
 class DoubleMLIRMAdapter(BaseATEEstimator):
@@ -455,6 +420,7 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
             n_folds=self.spec.n_folds,
             n_rep=self.spec.n_rep,
             score="ATE",
+            ps_processor_config=doubleml_propensity_processor(self.spec),
         )
         self.model.fit()
         self.scored_positions = np.arange(len(data.df))
@@ -694,6 +660,7 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
             treatment_levels=self.data.treatment_values,
             n_folds=self.spec.n_folds,
             n_rep=self.spec.n_rep,
+            ps_processor_config=doubleml_propensity_processor(self.spec),
         )
         self.model.fit()
         self.scored_positions = np.arange(len(data.df))
@@ -971,18 +938,26 @@ def horvitz_thompson_scores_by_arm(
     }
 
 
-def annotate_propensity_overlap(
+def doubleml_propensity_processor(spec: DoubleMLATEEstimatorSpec) -> PSProcessorConfig:
+    """Map symmetric clip bounds onto DoubleML's propensity clipping threshold."""
+    if spec.clip_bounds is None:
+        return PSProcessorConfig(clipping_threshold=DML_UNCLIPPED_THRESHOLD)
+    lower, upper = spec.clip_bounds
+    if abs(lower + upper - 1.0) > SYMMETRIC_CLIP_TOLERANCE:
+        raise ValueError(
+            "DoubleML clipping uses one threshold. Pass symmetric bounds (lower, 1 - lower)."
+        )
+    return PSProcessorConfig(clipping_threshold=lower)
+
+
+def annotate_propensity_clip(
     table: pd.DataFrame,
     clip_bounds: tuple[float, float] | None,
-    trim_bounds: tuple[float, float] | None,
 ) -> pd.DataFrame:
     annotated = table.copy()
     if clip_bounds is not None:
         annotated["clip_lower"] = clip_bounds[0]
         annotated["clip_upper"] = clip_bounds[1]
-    if trim_bounds is not None:
-        annotated["trim_lower"] = trim_bounds[0]
-        annotated["trim_upper"] = trim_bounds[1]
     return annotated
 
 

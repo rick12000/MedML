@@ -14,10 +14,10 @@ from causal_pipeline.estimator_identity import (
 
 def test_distinct_ipw_specs_get_distinct_ids() -> None:
     clipped = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=(0.02, 0.98))
-    unclipped = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=None)
-    trimmed = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=(0.05, 0.95))
+    unclipped = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None)
+    wider = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=(0.05, 0.95))
 
-    ids = [estimator_id for estimator_id, _ in assign_estimator_ids([clipped, unclipped, trimmed])]
+    ids = [estimator_id for estimator_id, _ in assign_estimator_ids([clipped, unclipped, wider])]
     assert len(set(ids)) == 3
 
 
@@ -26,25 +26,22 @@ def test_normalize_estimator_alias_sanitizes_whitespace() -> None:
 
 
 def test_duplicate_specs_receive_numeric_suffix() -> None:
-    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=None)
+    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None)
     ids = [estimator_id for estimator_id, _ in assign_estimator_ids([spec, spec])]
     assert ids[0] != ids[1]
     assert ids[1].endswith("__2")
 
 
-def test_config_columns_surface_clip_and_trim() -> None:
+def test_config_columns_surface_clip_bounds() -> None:
     clipped = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=(0.02, 0.98))
     columns = estimator_config_columns(clipped)
     assert columns["estimator_kind"] == ATEKind.IPW.value
     assert columns["propensity_clip_lower"] == 0.02
     assert columns["propensity_clip_upper"] == 0.98
-    assert columns["propensity_trim_lower"] is None
     assert "clip_bounds" not in columns
 
-    trimmed = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=(0.05, 0.95))
-    trim_columns = estimator_config_columns(trimmed)
-    assert trim_columns["propensity_trim_lower"] == 0.05
-    assert trim_columns["propensity_trim_upper"] == 0.95
+    unclipped = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None)
+    assert estimator_config_columns(unclipped)["propensity_clip_lower"] is None
 
 
 def test_alias_becomes_estimator_id() -> None:

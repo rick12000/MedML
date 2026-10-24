@@ -10,7 +10,7 @@ from causal_pipeline.config import (
     CATEKind,
     CausalForestCATEEstimatorSpec,
     DEFAULT_LEARNER_RANDOM_STATE,
-    DiagnosticConfig,
+    OverlapConfig,
     DoublyRobustATEEstimatorSpec,
     DoubleMLATEEstimatorSpec,
     DRPolicyTreeMethodSpec,
@@ -26,11 +26,39 @@ from causal_pipeline.learner_defaults import (
 )
 
 
-def materialize_diagnostic_config(
-    config: DiagnosticConfig,
-    random_state: int = DEFAULT_LEARNER_RANDOM_STATE,
-) -> BaseEstimator:
-    return materialize_propensity_learner(config.propensity_learner, random_state=random_state)
+def materialize_overlap_propensity(config: OverlapConfig) -> BaseEstimator:
+    return materialize_propensity_learner(
+        config.propensity_learner,
+        random_state=config.random_state,
+    )
+
+
+def screen_outcome_learners(
+    specs: list[object],
+    outcome_type: OutcomeType,
+    random_state: int,
+) -> list[BaseEstimator]:
+    """One copy of each configured outcome learner. Defaults apply when none are set."""
+    learners: list[BaseEstimator] = []
+    seen: set[str] = set()
+    for spec in specs:
+        if "outcome_learner" not in type(spec).model_fields:
+            continue
+        learner = materialize_outcome_learner(
+            getattr(spec, "outcome_learner"),
+            outcome_type=outcome_type,
+            random_state=random_state,
+        )
+        identity = f"{type(learner).__name__}:{learner.get_params(deep=False)}"
+        if identity in seen:
+            continue
+        seen.add(identity)
+        learners.append(learner)
+    if learners:
+        return learners
+    return [
+        materialize_outcome_learner(None, outcome_type=outcome_type, random_state=random_state),
+    ]
 
 
 def materialize_sensitivity_outcome(

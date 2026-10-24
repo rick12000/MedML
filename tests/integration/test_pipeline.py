@@ -14,7 +14,7 @@ from causal_pipeline.config import (
     CATEKind,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
-    DiagnosticConfig,
+    OverlapConfig,
     DoublyRobustATEEstimatorSpec,
     DoubleMLATEEstimatorSpec,
     IPWATEEstimatorSpec,
@@ -80,7 +80,7 @@ def pipeline_config(
             test_fraction=test_fraction,
             random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
-        diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
+        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=INTEGRATION_FOLDS),
         ate_estimators=[ate_spec],
         cate_estimators=[
             MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, outcome_learner=linear_learner),

@@ -40,6 +40,13 @@ class ResultStore:
                 diag_dir / "covariate_balance.csv",
                 diagnostics.covariate_balance,
             )
+        if diagnostics.covariate_balance_trimmed is not None:
+            persist_dataframe(
+                diag_dir / "covariate_balance_trimmed.csv",
+                diagnostics.covariate_balance_trimmed,
+            )
+        if not diagnostics.overlap_counts.empty:
+            persist_dataframe(diag_dir / "overlap_counts.csv", diagnostics.overlap_counts)
         if diagnostics.propensity_overlap_path is not None:
             write_text(
                 diag_dir / "propensity_overlap_path.txt",

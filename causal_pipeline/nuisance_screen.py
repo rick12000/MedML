@@ -1,4 +1,4 @@
-"""Held-out logistic and gradient-boosted tree screens for propensity and outcome."""
+"""Held-out screens for the propensity and outcome learners used in a run."""
 
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import Colormap, LinearSegmentedColormap
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.base import BaseEstimator, clone
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from xgboost import XGBClassifier, XGBRegressor
 
@@ -23,37 +25,37 @@ from causal_pipeline.config import (
     predict_outcome_mean,
 )
 from causal_pipeline.data import CausalDataset
-from causal_pipeline.learner_defaults import (
-    DEFAULT_XGBOOST_COLSAMPLE,
-    DEFAULT_XGBOOST_LEARNING_RATE,
-    DEFAULT_XGBOOST_N_ESTIMATORS,
-    DEFAULT_XGBOOST_N_JOBS,
-    DEFAULT_XGBOOST_REG_LAMBDA,
-    DEFAULT_XGBOOST_SUBSAMPLE,
-)
+from causal_pipeline.figures import publication_style
 from causal_pipeline.nuisance_metrics import (
     log_nuisance_metric,
     outcome_metric_from_predictions,
     propensity_auc,
 )
-from causal_pipeline.scaling import ScaledClassifier, ScaledLearner, clone_scaled_estimator
+from causal_pipeline.scaling import ScaledClassifier, ScaledLearner
 from causal_pipeline.utils import save_figure, write_dataframe
 
 logger = logging.getLogger(__name__)
 
-LOGISTIC_C_VALUES = (0.1, 1.0, 10.0)
-LOGISTIC_MAX_ITER = 500
-XGBOOST_MAX_DEPTHS: tuple[int, ...] = (3, 6)
-XGBOOST_MIN_CHILD_WEIGHTS: tuple[int, ...] = (5, 12)
 SCREEN_SPLIT_ATTEMPTS = 20
 SHAP_ROW_LIMIT = 200
-CORRELATION_FIGURE_SIZE = 6.0
+CORRELATION_MIN_INCHES = 4.4
+CORRELATION_MAX_INCHES = 11.0
+CORRELATION_CELL_INCHES = 0.36
+CORRELATION_ANNOTATE_LIMIT = 12
+CORRELATION_FULL_TICK_LIMIT = 30
+CORRELATION_TARGET_TICKS = 30
+CORRELATION_LEGEND_ROWS = 22
+CORRELATION_LEGEND_ROW_INCHES = 0.18
+CORRELATION_LEGEND_FONT = 7.0
+CORRELATION_TICK_FONT = 7.0
+CORRELATION_LOW = "#2F5D8C"
+CORRELATION_MID = "#F6F4F1"
+CORRELATION_HIGH = "#B23A48"
+CORRELATION_MISSING = "#E4E1DC"
 COLUMN_DROP_FIGURE_WIDTH = 8.0
 COLUMN_DROP_FIGURE_ROW_HEIGHT = 0.35
 COLUMN_DROP_CI_MULTIPLIER = 1.96
 LOWEST_SELECTION_SCORE = -1.0
-XGBOOST_ARCHITECTURE = "xgboost"
-LOGISTIC_ARCHITECTURE = "logistic_regression"
 
 
 @dataclass(frozen=True)
@@ -63,23 +65,20 @@ class ScreenSplit:
     test: pd.DataFrame
 
 
-@dataclass(frozen=True)
-class XgboostChoice:
-    max_depth: int
-    min_child_weight: int
-
-
 def run_nuisance_screen(
     dataset: CausalDataset,
     screen: NuisanceScreenConfig,
     results_root: Path,
+    propensity_learner: BaseEstimator,
+    outcome_learners: list[BaseEstimator],
 ) -> None:
-    """Tune on a validation slice, refit on train, and score the held-out test rows."""
+    """Fit configured nuisances on an internal split of the estimation sample."""
     root = results_root / "nuisance_screen"
     covariates = dataset.X_adjustment.copy()
     treatment = dataset.treatment_series.copy()
     outcome = dataset.outcome_series.copy()
     binary_outcome = dataset.outcome_type == OutcomeType.BINARY
+    write_correlation(variables=correlation_variables(dataset), destination=root / "correlation")
     split = screen_split(
         frame=screen_frame(dataset),
         group_id=dataset.group_id,
@@ -88,9 +87,9 @@ def run_nuisance_screen(
         validation_fraction=screen.validation_fraction,
         random_state=screen.random_state,
     )
-    write_correlation(covariates=covariates, outcome=outcome, destination=root / "correlation")
     fit_role(
         role="propensity",
+        learner=propensity_learner,
         split=split,
         feature_columns=list(covariates.columns),
         label_column=dataset.treatment,
@@ -99,7 +98,7 @@ def run_nuisance_screen(
         random_state=screen.random_state,
         column_drop_repeats=screen.column_drop_repeats,
         column_drop_top_features=screen.column_drop_top_features,
-        destination=root / "propensity",
+        destination=root / "propensity" / learner_directory_name(propensity_learner),
     )
     outcome_frame = outcome_design(
         covariates=covariates,
@@ -108,19 +107,36 @@ def run_nuisance_screen(
         treatment_name=dataset.treatment,
     )
     outcome_split = align_outcome_split(split=split, design=outcome_frame)
-    fit_role(
-        role="outcome",
-        split=outcome_split,
-        feature_columns=[column for column in outcome_frame.columns if column != dataset.outcome],
-        label_column=dataset.outcome,
-        binary_outcome=binary_outcome,
-        classification=binary_outcome,
-        random_state=screen.random_state,
-        column_drop_repeats=screen.column_drop_repeats,
-        column_drop_top_features=screen.column_drop_top_features,
-        destination=root / "outcome",
-    )
+    used_names: set[str] = set()
+    for learner in outcome_learners:
+        directory_name = learner_directory_name(learner, used_names)
+        fit_role(
+            role="outcome",
+            learner=learner,
+            split=outcome_split,
+            feature_columns=[column for column in outcome_frame.columns if column != dataset.outcome],
+            label_column=dataset.outcome,
+            binary_outcome=binary_outcome,
+            classification=binary_outcome,
+            random_state=screen.random_state,
+            column_drop_repeats=screen.column_drop_repeats,
+            column_drop_top_features=screen.column_drop_top_features,
+            destination=root / "outcome" / directory_name,
+        )
     logger.info("Wrote nuisance screens under %s", root)
+
+
+def learner_directory_name(learner: BaseEstimator, used: set[str] | None = None) -> str:
+    base = type(learner).__name__
+    if used is None:
+        return base
+    name = base
+    suffix = 2
+    while name in used:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    used.add(name)
+    return name
 
 
 def screen_frame(dataset: CausalDataset) -> pd.DataFrame:
@@ -215,21 +231,145 @@ def align_outcome_split(split: ScreenSplit, design: pd.DataFrame) -> ScreenSplit
     )
 
 
-def write_correlation(covariates: pd.DataFrame, outcome: pd.Series, destination: Path) -> None:
-    numeric = pd.concat([covariates, outcome], axis=1).select_dtypes(include="number")
-    matrix = numeric.corr(numeric_only=True)
-    write_dataframe(destination / "correlation.csv", matrix.reset_index(names="feature"))
-    figure, axis = plt.subplots(figsize=(CORRELATION_FIGURE_SIZE, CORRELATION_FIGURE_SIZE))
-    image = axis.imshow(matrix.to_numpy(dtype=float), vmin=-1.0, vmax=1.0, cmap="coolwarm")
-    axis.set_xticks(range(matrix.shape[1]), list(matrix.columns), rotation=90)
-    axis.set_yticks(range(matrix.shape[0]), list(matrix.index))
-    figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+def correlation_variables(dataset: CausalDataset) -> pd.DataFrame:
+    """Numeric analysis columns on the full estimation sample, outcome last."""
+    ordered = list(dict.fromkeys([*dataset.X_adjustment.columns, dataset.treatment, dataset.outcome]))
+    numeric = dataset.df.loc[:, ordered].apply(pd.to_numeric, errors="coerce")
+    kept = [column for column in ordered if numeric[column].notna().any()]
+    if len(kept) < 2:
+        raise ValueError("Correlation needs at least two numeric analysis columns.")
+    return numeric.loc[:, kept].copy()
+
+
+def correlation_matrix(variables: pd.DataFrame) -> pd.DataFrame:
+    """Pearson correlations. Rows and columns stay in the input order."""
+    return variables.corr(method="pearson", numeric_only=True)
+
+
+def correlation_export(matrix: pd.DataFrame) -> pd.DataFrame:
+    """Matrix keyed by 1-based aliases, with the original column name beside each row."""
+    names = [str(column) for column in matrix.columns]
+    aliases = [str(index) for index in range(1, len(names) + 1)]
+    export = matrix.to_numpy(dtype=float)
+    table = pd.DataFrame(export, columns=aliases)
+    table.insert(0, "variable", names)
+    table.insert(0, "alias", aliases)
+    return table
+
+
+def write_correlation(variables: pd.DataFrame, destination: Path) -> None:
+    matrix = correlation_matrix(variables)
+    write_dataframe(destination / "correlation.csv", correlation_export(matrix))
+    figure = plot_correlation(matrix)
     save_figure(destination / "correlation.png", figure)
     plt.close(figure)
 
 
+def plot_correlation(matrix: pd.DataFrame) -> plt.Figure:
+    """Heatmap labeled by alias. The index below maps each alias to its column."""
+    count = matrix.shape[0]
+    names = [str(column) for column in matrix.columns]
+    heat_inches = min(CORRELATION_MAX_INCHES, max(CORRELATION_MIN_INCHES, count * CORRELATION_CELL_INCHES))
+    legend_columns = max(1, int(np.ceil(count / CORRELATION_LEGEND_ROWS)))
+    legend_rows = int(np.ceil(count / legend_columns))
+    legend_inches = max(1.2, legend_rows * CORRELATION_LEGEND_ROW_INCHES + 0.45)
+    longest = max(len(f"{index + 1}  {name}") for index, name in enumerate(names))
+    figure_width = max(heat_inches + 1.05, legend_columns * max(1.7, longest * 0.072))
+    figure_width = min(figure_width, 22.0)
+    with publication_style():
+        figure = plt.figure(figsize=(figure_width, heat_inches + legend_inches))
+        grid = figure.add_gridspec(
+            nrows=2,
+            ncols=1,
+            height_ratios=[heat_inches, legend_inches],
+            hspace=0.08,
+        )
+        heat_axis = figure.add_subplot(grid[0, 0])
+        legend_axis = figure.add_subplot(grid[1, 0])
+        image = heat_axis.imshow(
+            matrix.to_numpy(dtype=float),
+            vmin=-1.0,
+            vmax=1.0,
+            cmap=correlation_colormap(),
+            interpolation="nearest",
+            aspect="equal",
+        )
+        positions = correlation_tick_positions(count)
+        labels = [str(position + 1) for position in positions]
+        heat_axis.set_xticks(positions, labels)
+        heat_axis.set_yticks(positions, labels)
+        heat_axis.tick_params(length=0, labelsize=CORRELATION_TICK_FONT, colors="#1B1B1B")
+        heat_axis.set_title("Pearson correlation", loc="left", pad=8, color="#1B1B1B")
+        for spine in heat_axis.spines.values():
+            spine.set_visible(False)
+        if count <= CORRELATION_ANNOTATE_LIMIT:
+            annotate_correlation(heat_axis, matrix.to_numpy(dtype=float))
+        colorbar = figure.colorbar(image, ax=heat_axis, fraction=0.046, pad=0.03)
+        colorbar.outline.set_visible(False)
+        colorbar.ax.tick_params(length=0, labelsize=CORRELATION_TICK_FONT)
+        colorbar.set_label("Correlation", color="#1B1B1B")
+        draw_correlation_legend(legend_axis, names, legend_columns, legend_rows)
+        figure.subplots_adjust(left=0.06, right=0.92, top=0.94, bottom=0.03)
+    return figure
+
+
+def correlation_colormap() -> Colormap:
+    gradient = LinearSegmentedColormap.from_list(
+        "correlation",
+        [CORRELATION_LOW, CORRELATION_MID, CORRELATION_HIGH],
+    )
+    return gradient.with_extremes(bad=CORRELATION_MISSING)
+
+
+def correlation_tick_positions(count: int) -> list[int]:
+    if count <= CORRELATION_FULL_TICK_LIMIT:
+        return list(range(count))
+    step = int(np.ceil(count / CORRELATION_TARGET_TICKS))
+    positions = list(range(0, count, step))
+    if positions[-1] != count - 1:
+        positions.append(count - 1)
+    return positions
+
+
+def annotate_correlation(axis: plt.Axes, values: np.ndarray) -> None:
+    count = values.shape[0]
+    for row in range(count):
+        for column in range(count):
+            value = values[row, column]
+            if not np.isfinite(value):
+                continue
+            ink = "#1B1B1B" if abs(value) < 0.55 else "#FFFFFF"
+            axis.text(column, row, f"{value:.2f}", ha="center", va="center", fontsize=6.5, color=ink)
+
+
+def draw_correlation_legend(
+    axis: plt.Axes,
+    names: list[str],
+    legend_columns: int,
+    legend_rows: int,
+) -> None:
+    axis.axis("off")
+    axis.set_title("Index", loc="left", pad=2, color="#1B1B1B", fontsize=8)
+    for index, name in enumerate(names):
+        column = index // legend_rows
+        row = index % legend_rows
+        axis.text(
+            (column + 0.02) / legend_columns,
+            1.0 - (row + 0.5) / legend_rows,
+            f"{index + 1}  {name}",
+            ha="left",
+            va="center",
+            fontsize=CORRELATION_LEGEND_FONT,
+            color="#1B1B1B",
+            fontfamily="monospace",
+            transform=axis.transAxes,
+            clip_on=False,
+        )
+
+
 def fit_role(
     role: str,
+    learner: BaseEstimator,
     split: ScreenSplit,
     feature_columns: list[str],
     label_column: str,
@@ -243,206 +383,54 @@ def fit_role(
     train_features = split.train.loc[:, feature_columns]
     validation_features = split.validation.loc[:, feature_columns]
     test_features = split.test.loc[:, feature_columns]
-    train_labels = split.train[label_column]
-    validation_labels = split.validation[label_column]
-    test_labels = split.test[label_column]
-    if classification:
-        logistic_penalty = choose_logistic_penalty(
-            train_features=train_features,
-            train_labels=train_labels,
-            validation_features=validation_features,
-            validation_labels=validation_labels,
-            binary_outcome=binary_outcome,
-            random_state=random_state,
-        )
-        logistic_parameters: dict[str, float | int | None] = {"C": logistic_penalty}
-    else:
-        logistic_penalty = None
-        logistic_parameters = {}
-    logistic = fit_logistic(
-        features=pd.concat([train_features, validation_features], axis=0),
-        labels=pd.concat([train_labels, validation_labels], axis=0),
-        penalty_c=logistic_penalty,
-        classification=classification,
-        random_state=random_state,
-    )
-    xgboost_choice = choose_xgboost(
-        train_features=train_features,
-        train_labels=train_labels,
-        validation_features=validation_features,
-        validation_labels=validation_labels,
-        classification=classification,
-        binary_outcome=binary_outcome,
-        random_state=random_state,
-    )
-    boosted = fit_xgboost(
-        features=pd.concat([train_features, validation_features], axis=0),
-        labels=pd.concat([train_labels, validation_labels], axis=0),
-        choice=xgboost_choice,
-        classification=classification,
-        random_state=random_state,
-    )
     training_features = pd.concat([train_features, validation_features], axis=0)
-    training_labels = pd.concat([train_labels, validation_labels], axis=0)
-    write_model_screen(
-        role=role,
-        architecture=LOGISTIC_ARCHITECTURE,
-        model=logistic,
-        features=test_features,
-        labels=test_labels,
-        training_features=training_features,
-        training_labels=training_labels,
-        classification=classification,
-        binary_outcome=binary_outcome,
-        parameters=logistic_parameters,
-        destination=destination / LOGISTIC_ARCHITECTURE,
+    training_labels = pd.concat(
+        [split.train[label_column], split.validation[label_column]],
+        axis=0,
+    )
+    model = fit_screen_learner(
+        learner=learner,
+        features=training_features,
+        labels=training_labels,
         random_state=random_state,
-        column_drop_repeats=column_drop_repeats,
-        column_drop_top_features=column_drop_top_features,
     )
     write_model_screen(
         role=role,
-        architecture=XGBOOST_ARCHITECTURE,
-        model=boosted,
+        learner=learner,
+        model=model,
         features=test_features,
-        labels=test_labels,
+        labels=split.test[label_column],
         training_features=training_features,
         training_labels=training_labels,
         classification=classification,
         binary_outcome=binary_outcome,
-        parameters={
-            "max_depth": xgboost_choice.max_depth,
-            "min_child_weight": xgboost_choice.min_child_weight,
-        },
-        destination=destination / XGBOOST_ARCHITECTURE,
+        destination=destination,
         random_state=random_state,
         column_drop_repeats=column_drop_repeats,
         column_drop_top_features=column_drop_top_features,
     )
 
 
-def choose_logistic_penalty(
-    train_features: pd.DataFrame,
-    train_labels: pd.Series,
-    validation_features: pd.DataFrame,
-    validation_labels: pd.Series,
-    binary_outcome: bool,
-    random_state: int,
-) -> float:
-    best_penalty = LOGISTIC_C_VALUES[0]
-    best_score = LOWEST_SELECTION_SCORE
-    for penalty_c in LOGISTIC_C_VALUES:
-        model = fit_logistic(
-            features=train_features,
-            labels=train_labels,
-            penalty_c=penalty_c,
-            classification=True,
-            random_state=random_state,
-        )
-        score = validation_score(
-            model=model,
-            features=validation_features,
-            labels=validation_labels,
-            classification=True,
-            binary_outcome=binary_outcome,
-        )
-        if score > best_score:
-            best_score = score
-            best_penalty = penalty_c
-    return best_penalty
-
-
-def choose_xgboost(
-    train_features: pd.DataFrame,
-    train_labels: pd.Series,
-    validation_features: pd.DataFrame,
-    validation_labels: pd.Series,
-    classification: bool,
-    binary_outcome: bool,
-    random_state: int,
-) -> XgboostChoice:
-    best = XgboostChoice(
-        max_depth=XGBOOST_MAX_DEPTHS[0],
-        min_child_weight=XGBOOST_MIN_CHILD_WEIGHTS[0],
-    )
-    best_score = LOWEST_SELECTION_SCORE
-    for max_depth in XGBOOST_MAX_DEPTHS:
-        for min_child_weight in XGBOOST_MIN_CHILD_WEIGHTS:
-            choice = XgboostChoice(max_depth=max_depth, min_child_weight=min_child_weight)
-            model = fit_xgboost(
-                features=train_features,
-                labels=train_labels,
-                choice=choice,
-                classification=classification,
-                random_state=random_state,
-            )
-            score = validation_score(
-                model=model,
-                features=validation_features,
-                labels=validation_labels,
-                classification=classification,
-                binary_outcome=binary_outcome,
-            )
-            if score > best_score:
-                best_score = score
-                best = choice
-    return best
-
-
-def fit_logistic(
+def fit_screen_learner(
+    learner: BaseEstimator,
     features: pd.DataFrame,
     labels: pd.Series,
-    penalty_c: float | None,
-    classification: bool,
     random_state: int,
-) -> ScaledLearner:
-    if classification:
-        if penalty_c is None:
-            raise ValueError("Logistic screens require a penalty C.")
-        estimator = LogisticRegression(C=penalty_c, max_iter=LOGISTIC_MAX_ITER, random_state=random_state)
-    else:
-        estimator = LinearRegression()
-    model = clone_scaled_estimator(estimator)
+) -> BaseEstimator:
+    model = clone_screen_learner(learner, random_state)
     model.fit(features, labels)
     return model
 
 
-def fit_xgboost(
-    features: pd.DataFrame,
-    labels: pd.Series,
-    choice: XgboostChoice,
-    classification: bool,
-    random_state: int,
-) -> XGBClassifier | XGBRegressor:
-    shared = {
-        "n_estimators": DEFAULT_XGBOOST_N_ESTIMATORS,
-        "max_depth": choice.max_depth,
-        "min_child_weight": choice.min_child_weight,
-        "learning_rate": DEFAULT_XGBOOST_LEARNING_RATE,
-        "subsample": DEFAULT_XGBOOST_SUBSAMPLE,
-        "colsample_bytree": DEFAULT_XGBOOST_COLSAMPLE,
-        "reg_lambda": DEFAULT_XGBOOST_REG_LAMBDA,
-        "random_state": random_state,
-        "n_jobs": DEFAULT_XGBOOST_N_JOBS,
-    }
-    if classification:
-        objective = "binary:logistic" if labels.nunique() <= 2 else "multi:softprob"
-        model = XGBClassifier(
-            **shared,
-            objective=objective,
-            eval_metric="mlogloss",
-        )
-    else:
-        model = XGBRegressor(
-            **shared,
-            objective="reg:squarederror",
-        )
-    model.fit(features, labels)
-    return model
+def clone_screen_learner(learner: BaseEstimator, random_state: int) -> BaseEstimator:
+    cloned = clone(learner)
+    if "random_state" in cloned.get_params():
+        cloned.set_params(random_state=random_state)
+    return cloned
 
 
 def validation_score(
-    model: ScaledLearner | XGBClassifier | XGBRegressor,
+    model: BaseEstimator,
     features: pd.DataFrame,
     labels: pd.Series,
     classification: bool,
@@ -466,20 +454,20 @@ def validation_score(
 
 def write_model_screen(
     role: str,
-    architecture: str,
-    model: ScaledLearner | XGBClassifier | XGBRegressor,
+    learner: BaseEstimator,
+    model: BaseEstimator,
     features: pd.DataFrame,
     labels: pd.Series,
     training_features: pd.DataFrame,
     training_labels: pd.Series,
     classification: bool,
     binary_outcome: bool,
-    parameters: dict[str, float | int | None],
     destination: Path,
     random_state: int,
     column_drop_repeats: int,
     column_drop_top_features: int,
 ) -> None:
+    del role
     score = validation_score(
         model=model,
         features=features,
@@ -488,11 +476,12 @@ def write_model_screen(
         binary_outcome=binary_outcome,
     )
     metric_name = "AUC" if classification else "R2"
-    log_nuisance_metric(f"screen {role} {architecture}", model, f"test {metric_name}", score)
-    rows = [{"parameter": name, "value": value} for name, value in parameters.items()]
-    rows.append({"parameter": f"test_{metric_name}", "value": score})
-    write_dataframe(destination / "metrics.csv", pd.DataFrame(rows))
-    if isinstance(model, (XGBClassifier, XGBRegressor)):
+    log_nuisance_metric(f"screen {type(learner).__name__}", model, f"test {metric_name}", score)
+    write_dataframe(
+        destination / "metrics.csv",
+        pd.DataFrame([{"parameter": f"test_{metric_name}", "value": score}]),
+    )
+    if hasattr(model, "feature_importances_"):
         importance = pd.DataFrame(
             {"feature": list(features.columns), "gain_importance": model.feature_importances_}
         )
@@ -500,19 +489,13 @@ def write_model_screen(
             destination / "gain_importance.csv",
             importance.sort_values("gain_importance", ascending=False),
         )
-    write_shap(
-        model=model,
-        features=features,
-        destination=destination,
-        random_state=random_state,
-    )
+    write_shap(model=model, features=features, destination=destination, random_state=random_state)
     write_column_drop_importance(
+        learner=learner,
         training_features=training_features,
         training_labels=training_labels,
         evaluation_features=features,
         evaluation_labels=labels,
-        architecture=architecture,
-        parameters=parameters,
         classification=classification,
         binary_outcome=binary_outcome,
         repeats=column_drop_repeats,
@@ -521,39 +504,6 @@ def write_model_screen(
         random_state=random_state,
     )
 
-
-def refit_screen_model(
-    architecture: str,
-    features: pd.DataFrame,
-    labels: pd.Series,
-    parameters: dict[str, float | int | None],
-    classification: bool,
-    random_state: int,
-) -> ScaledLearner | XGBClassifier | XGBRegressor:
-    if architecture == LOGISTIC_ARCHITECTURE:
-        penalty_c = parameters.get("C")
-        if classification and penalty_c is None:
-            raise ValueError("Logistic column-drop screens require a penalty C.")
-        return fit_logistic(
-            features=features,
-            labels=labels,
-            penalty_c=penalty_c if classification else None,
-            classification=classification,
-            random_state=random_state,
-        )
-    if architecture == XGBOOST_ARCHITECTURE:
-        max_depth = parameters.get("max_depth")
-        min_child_weight = parameters.get("min_child_weight")
-        if max_depth is None or min_child_weight is None:
-            raise ValueError("XGBoost column-drop screens require max_depth and min_child_weight.")
-        return fit_xgboost(
-            features=features,
-            labels=labels,
-            choice=XgboostChoice(max_depth=int(max_depth), min_child_weight=int(min_child_weight)),
-            classification=classification,
-            random_state=random_state,
-        )
-    raise ValueError(f"Unsupported screen architecture for column drop: {architecture}")
 
 
 def performance_drop_metric_name(classification: bool) -> str:
@@ -578,12 +528,11 @@ def summarize_column_drops(drops: np.ndarray) -> tuple[float, float, float, floa
 
 
 def column_drop_importance_table(
+    learner: BaseEstimator,
     training_features: pd.DataFrame,
     training_labels: pd.Series,
     evaluation_features: pd.DataFrame,
     evaluation_labels: pd.Series,
-    architecture: str,
-    parameters: dict[str, float | int | None],
     classification: bool,
     binary_outcome: bool,
     repeats: int,
@@ -597,12 +546,10 @@ def column_drop_importance_table(
     drop_samples: dict[str, list[float]] = {column: [] for column in feature_columns}
     for repeat_index in range(repeats):
         repeat_seed = column_drop_repeat_seed(random_state=random_state, repeat_index=repeat_index)
-        baseline_model = refit_screen_model(
-            architecture=architecture,
+        baseline_model = fit_screen_learner(
+            learner=learner,
             features=training_features,
             labels=training_labels,
-            parameters=parameters,
-            classification=classification,
             random_state=repeat_seed,
         )
         baseline_score = validation_score(
@@ -616,12 +563,10 @@ def column_drop_importance_table(
             remaining_columns = [name for name in feature_columns if name != column]
             reduced_training = training_features.loc[:, remaining_columns]
             reduced_evaluation = evaluation_features.loc[:, remaining_columns]
-            reduced_model = refit_screen_model(
-                architecture=architecture,
+            reduced_model = fit_screen_learner(
+                learner=learner,
                 features=reduced_training,
                 labels=training_labels,
-                parameters=parameters,
-                classification=classification,
                 random_state=repeat_seed,
             )
             reduced_score = validation_score(
@@ -652,12 +597,11 @@ def column_drop_importance_table(
 
 
 def write_column_drop_importance(
+    learner: BaseEstimator,
     training_features: pd.DataFrame,
     training_labels: pd.Series,
     evaluation_features: pd.DataFrame,
     evaluation_labels: pd.Series,
-    architecture: str,
-    parameters: dict[str, float | int | None],
     classification: bool,
     binary_outcome: bool,
     repeats: int,
@@ -666,12 +610,11 @@ def write_column_drop_importance(
     random_state: int,
 ) -> None:
     table = column_drop_importance_table(
+        learner=learner,
         training_features=training_features,
         training_labels=training_labels,
         evaluation_features=evaluation_features,
         evaluation_labels=evaluation_labels,
-        architecture=architecture,
-        parameters=parameters,
         classification=classification,
         binary_outcome=binary_outcome,
         repeats=repeats,
@@ -720,7 +663,7 @@ def plot_column_drop_importance(
 
 
 def write_shap(
-    model: ScaledLearner | XGBClassifier | XGBRegressor,
+    model: BaseEstimator,
     features: pd.DataFrame,
     destination: Path,
     random_state: int,
@@ -737,16 +680,18 @@ def write_shap(
     plt.close("all")
 
 
-def shap_matrix(
-    model: ScaledLearner | XGBClassifier | XGBRegressor,
-    sample: pd.DataFrame,
-) -> np.ndarray:
-    if isinstance(model, (XGBClassifier, XGBRegressor)):
-        explanation = shap.TreeExplainer(model).shap_values(sample)
-        return first_shap_matrix(explanation)
+def shap_matrix(model: BaseEstimator, sample: pd.DataFrame) -> np.ndarray:
     if isinstance(model, (ScaledClassifier, ScaledLearner)):
         transformed = np.asarray(model.scaler_.transform(sample), dtype=float)
         explanation = shap.LinearExplainer(model.model_, transformed).shap_values(transformed)
+        return first_shap_matrix(explanation)
+    if isinstance(model, (XGBClassifier, XGBRegressor)) or hasattr(model, "estimators_"):
+        explanation = shap.TreeExplainer(model).shap_values(sample)
+        return first_shap_matrix(explanation)
+    if isinstance(model, (LogisticRegression, LinearRegression, Ridge)):
+        explanation = shap.LinearExplainer(model, np.asarray(sample, dtype=float)).shap_values(
+            np.asarray(sample, dtype=float)
+        )
         return first_shap_matrix(explanation)
     raise TypeError(f"No SHAP path for {type(model).__name__}.")
 

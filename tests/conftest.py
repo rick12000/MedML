@@ -17,7 +17,7 @@ from causal_pipeline.config import (
     CATEKind,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
-    DiagnosticConfig,
+    OverlapConfig,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
@@ -278,7 +278,7 @@ def pipeline_config_no_policy(
             test_fraction=0.0,
             random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
-        diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
+        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=2),
         ate_estimators=[
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],
@@ -305,7 +305,7 @@ def pipeline_config_with_policy(
     return PipelineConfig(
         data=binary_data_config,
         split=SplitConfig(test_fraction=0.2, random_state=DEFAULT_SPLIT_RANDOM_STATE),
-        diagnostics=DiagnosticConfig(propensity_learner=logistic_learner),
+        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=2),
         ate_estimators=[
             IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         ],

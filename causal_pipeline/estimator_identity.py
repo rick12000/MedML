@@ -53,22 +53,15 @@ def estimator_config_columns(spec: EstimatorSpec) -> dict[str, object]:
             columns["propensity_clip_lower"] = value[0] if value is not None else None
             columns["propensity_clip_upper"] = value[1] if value is not None else None
             continue
-        if name == "trim_bounds":
-            columns["propensity_trim_lower"] = value[0] if value is not None else None
-            columns["propensity_trim_upper"] = value[1] if value is not None else None
-            continue
         columns[name] = _serialize_config_value(value)
     return columns
 
 
 def overlap_slug_part(spec: EstimatorSpec) -> str:
     clip = getattr(spec, "clip_bounds", None)
-    trim = getattr(spec, "trim_bounds", None)
-    if trim is not None:
-        return f"trim_{trim[0]:g}_{trim[1]:g}"
     if clip is not None:
         return f"clip_{clip[0]:g}_{clip[1]:g}"
-    return "no_overlap"
+    return "unclipped"
 
 
 def normalize_estimator_alias(alias: str) -> str:

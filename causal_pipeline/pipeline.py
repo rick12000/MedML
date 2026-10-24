@@ -28,11 +28,11 @@ from causal_pipeline.config import (
     PolicyKind,
 )
 from causal_pipeline.learner_defaults import materialize_propensity_learner
-from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
+from causal_pipeline.learner_resolve import materialize_sensitivity_outcome, screen_outcome_learners
 from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
 from causal_pipeline.crossfit import cross_fit_predictions
-from causal_pipeline.data import CausalDataset, DataSplitter
-from causal_pipeline.diagnostics import DiagnosticsRunner
+from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
+from causal_pipeline.diagnostics import OverlapPreprocessor
 from causal_pipeline.estimator_identity import (
     assign_estimator_ids,
     attach_estimator_metadata,
@@ -159,7 +159,7 @@ class CausalPipeline:
         self,
         config: PipelineConfig,
         splitter: DataSplitter | None = None,
-        diagnostics_runner: DiagnosticsRunner | None = None,
+        overlap_preprocessor: OverlapPreprocessor | None = None,
         sensitivity_analyzer: ATESensitivityAnalyzer | None = None,
         evaluator: CATEEvaluator | None = None,
         policy_service: PolicyService | None = None,
@@ -168,12 +168,10 @@ class CausalPipeline:
         self.config = config
         self.splitter = splitter or DataSplitter()
         self.results = results or ResultStore(config=config)
-        if diagnostics_runner is not None:
-            self.diagnostics_runner = diagnostics_runner
-        elif config.diagnostics is not None:
-            self.diagnostics_runner = DiagnosticsRunner(diagnostics=config.diagnostics)
-        else:
-            self.diagnostics_runner = None
+        self.overlap = overlap_preprocessor or OverlapPreprocessor(
+            overlap=config.overlap,
+            minimum_folds=minimum_groups_for_crossfit(config),
+        )
         if sensitivity_analyzer is not None:
             self.sensitivity_analyzer = sensitivity_analyzer
         elif config.sensitivity is not None:
@@ -202,24 +200,30 @@ class CausalPipeline:
         logger.info("Starting causal pipeline run.")
         analysis_frame, excluded_frame = self.analysis_frame(df_input)
         dataset = CausalDataset(data=self.config.data, df=analysis_frame)
+        partitions = self.splitter.split(dataset, self.config)
+        overlap_run = self.overlap.run(
+            partitions=partitions,
+            results_root=str(self.results.root),
+        )
+        partitions = overlap_run.partitions
+        self.results.save_partitions(partitions)
+        self.results.save_diagnostics(overlap_run.diagnostics)
+        estimation = partitions.estimation
         if self.config.nuisance_screen.enabled:
             run_nuisance_screen(
-                dataset=dataset,
+                dataset=estimation,
                 screen=self.config.nuisance_screen,
                 results_root=self.results.root,
+                propensity_learner=materialize_propensity_learner(
+                    self.config.overlap.propensity_learner,
+                    random_state=self.config.overlap.random_state,
+                ),
+                outcome_learners=screen_outcome_learners(
+                    specs=list(self.config.ate_estimators or []) + list(self.config.cate_estimators or []),
+                    outcome_type=estimation.outcome_type,
+                    random_state=self.config.nuisance_screen.random_state,
+                ),
             )
-        partitions = self.splitter.split(dataset, self.config)
-        self.results.save_partitions(partitions)
-
-        estimation = partitions.estimation
-        if self.config.diagnostics is not None:
-            if self.diagnostics_runner is None:
-                raise RuntimeError("Diagnostics are configured but no diagnostics runner is available.")
-            diagnostics = self.diagnostics_runner.run(
-                train=estimation,
-                results_root=str(self.results.root),
-            )
-            self.results.save_diagnostics(diagnostics)
 
         ate_runs = assign_estimator_ids(self.config.ate_estimators or [])
         cate_runs = assign_estimator_ids(self.config.cate_estimators or [])

@@ -14,6 +14,7 @@ from causal_pipeline.config import (
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
     DoublyRobustATEEstimatorSpec,
+    DoubleMLATEEstimatorSpec,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
@@ -84,7 +85,7 @@ def test_pipeline_config_rejects_a_test_split_without_policy(
             split=SplitConfig(test_fraction=test_fraction, random_state=DEFAULT_SPLIT_RANDOM_STATE),
             ate_estimators=pipeline_config_no_policy.ate_estimators,
             cate_estimators=pipeline_config_no_policy.cate_estimators,
-            diagnostics=pipeline_config_no_policy.diagnostics,
+            overlap=pipeline_config_no_policy.overlap,
         )
 
 
@@ -97,7 +98,7 @@ def test_pipeline_config_requires_positive_test_when_policy_configured(
             split=SplitConfig(test_fraction=0.0, random_state=DEFAULT_SPLIT_RANDOM_STATE),
             ate_estimators=pipeline_config_with_policy.ate_estimators,
             cate_estimators=pipeline_config_with_policy.cate_estimators,
-            diagnostics=pipeline_config_with_policy.diagnostics,
+            overlap=pipeline_config_with_policy.overlap,
             cate_evaluation=pipeline_config_with_policy.cate_evaluation,
             policy=pipeline_config_with_policy.policy,
         )
@@ -229,31 +230,24 @@ def test_multi_treatment_config_accepts_at_least_three_arms(n_arms: int) -> None
     )
 
 
-def test_ate_spec_allows_neither_clip_nor_trim() -> None:
-    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None, trim_bounds=None)
+def test_ate_spec_allows_unclipped_propensity() -> None:
+    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=None)
     assert spec.clip_bounds is None
-    assert spec.trim_bounds is None
 
 
-def test_ate_spec_rejects_clip_and_trim_together() -> None:
+def test_outcome_cate_specs_drop_clip_bounds() -> None:
+    spec = MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, clip_bounds=(0.02, 0.98))
+    assert spec.clip_bounds is None
+
+
+def test_partial_linear_doubleml_drops_clip_bounds() -> None:
+    spec = DoubleMLATEEstimatorSpec(kind=ATEKind.DML_PLR, clip_bounds=(0.02, 0.98))
+    assert spec.clip_bounds is None
+
+
+def test_clip_bounds_must_lie_inside_the_unit_interval() -> None:
     with pytest.raises(ValidationError):
-        IPWATEEstimatorSpec(
-            kind=ATEKind.IPW,
-            clip_bounds=(0.02, 0.98),
-            trim_bounds=(0.05, 0.95),
-        )
-    with pytest.raises(ValidationError):
-        DoublyRobustATEEstimatorSpec(
-            kind=ATEKind.AIPW,
-            clip_bounds=(0.02, 0.98),
-            trim_bounds=(0.05, 0.95),
-        )
-    with pytest.raises(ValidationError):
-        MetaCATEEstimatorSpec(
-            kind=CATEKind.X_LEARNER,
-            clip_bounds=(0.02, 0.98),
-            trim_bounds=(0.05, 0.95),
-        )
+        IPWATEEstimatorSpec(kind=ATEKind.IPW, clip_bounds=(0.0, 0.98))
 
 
 def test_multi_treatment_config_rejects_two_arms() -> None:

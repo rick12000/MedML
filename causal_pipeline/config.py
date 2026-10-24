@@ -78,20 +78,12 @@ class PolicySearchMode(StrEnum):
 DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
 
 
-def validate_propensity_overlap_handling(
-    clip_bounds: tuple[float, float] | None,
-    trim_bounds: tuple[float, float] | None,
-) -> None:
-    if clip_bounds is not None and trim_bounds is not None:
-        raise ValueError(
-            "At most one of clip_bounds and trim_bounds may be set; use clipping or trimming, not both."
-        )
-    for name, bounds in (("clip_bounds", clip_bounds), ("trim_bounds", trim_bounds)):
-        if bounds is None:
-            continue
-        lower, upper = bounds
-        if lower >= upper:
-            raise ValueError(f"{name} must be ordered as (lower, upper) with lower < upper.")
+def validate_probability_bounds(bounds: tuple[float, float] | None, name: str) -> None:
+    if bounds is None:
+        return
+    lower, upper = bounds
+    if not 0.0 < lower < upper < 1.0:
+        raise ValueError(f"{name} must lie strictly inside (0, 1) with lower < upper.")
 DEFAULT_DML_N_FOLDS: int = 5
 DEFAULT_DML_N_REP: int = 1
 DEFAULT_ATE_CONFIDENCE_LEVEL: float = 0.95
@@ -217,7 +209,6 @@ class IPWATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[ATEKind.IPW]
     propensity_learner: BaseEstimator | None = None
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
-    trim_bounds: tuple[float, float] | None = None
     weighting: IPWWeighting = IPWWeighting.HAJEK
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
@@ -226,7 +217,7 @@ class IPWATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
 
     @model_validator(mode="after")
     def validate_propensity_bounds(self) -> IPWATEEstimatorSpec:
-        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        validate_probability_bounds(self.clip_bounds, "clip_bounds")
         return self
 
 
@@ -235,7 +226,6 @@ class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
-    trim_bounds: tuple[float, float] | None = None
     reduced: bool = DEFAULT_TMLE_REDUCED
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
@@ -244,7 +234,7 @@ class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
 
     @model_validator(mode="after")
     def validate_propensity_bounds(self) -> DoublyRobustATEEstimatorSpec:
-        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        validate_probability_bounds(self.clip_bounds, "clip_bounds")
         return self
 
 
@@ -252,10 +242,18 @@ class DoubleMLATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     kind: Literal[ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS]
     outcome_learner: BaseEstimator | None = None
     propensity_learner: BaseEstimator | None = None
+    clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     n_rep: PositiveInt = DEFAULT_DML_N_REP
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
     estimand: str = DEFAULT_ESTIMAND_ATE
+
+    @model_validator(mode="after")
+    def validate_propensity_bounds(self) -> DoubleMLATEEstimatorSpec:
+        validate_probability_bounds(self.clip_bounds, "clip_bounds")
+        if self.kind == ATEKind.DML_PLR:
+            self.clip_bounds = None
+        return self
 
 
 ATEEstimatorSpec = Annotated[
@@ -280,12 +278,13 @@ class MetaCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
     propensity_learner: BaseEstimator | None = None
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
-    trim_bounds: tuple[float, float] | None = None
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
 
     @model_validator(mode="after")
     def validate_propensity_bounds(self) -> MetaCATEEstimatorSpec:
-        validate_propensity_overlap_handling(self.clip_bounds, self.trim_bounds)
+        validate_probability_bounds(self.clip_bounds, "clip_bounds")
+        if self.kind in {CATEKind.S_LEARNER, CATEKind.T_LEARNER}:
+            self.clip_bounds = None
         return self
 
 
@@ -327,10 +326,19 @@ class SplitConfig(BaseModel):
     random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
-class DiagnosticConfig(ArbitraryTypesModel):
+class OverlapConfig(ArbitraryTypesModel):
+    """Cross-fit propensity on the pooled analysis sample, then optionally trim it."""
+
     propensity_learner: BaseEstimator | None = None
+    n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
+    random_state: int = DEFAULT_LEARNER_RANDOM_STATE
+    trim_bounds: tuple[float, float] | None = None
     stabilized_weights: bool = DEFAULT_DIAGNOSTIC_STABILIZED_WEIGHTS
-    propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
+
+    @model_validator(mode="after")
+    def validate_trim_bounds(self) -> OverlapConfig:
+        validate_probability_bounds(self.trim_bounds, "trim_bounds")
+        return self
 
 
 class SensitivityConfig(ArbitraryTypesModel):
@@ -439,10 +447,10 @@ class SubgroupSplit(BaseModel):
 class PipelineConfig(BaseModel):
     data: DataConfig
     split: SplitConfig
+    overlap: OverlapConfig = Field(default_factory=OverlapConfig)
     ate_estimators: list[ATEEstimatorSpec] | None = None
     subgroup_splits: list[SubgroupSplit] | None = None
     cate_estimators: list[CATEEstimatorSpec] | None = None
-    diagnostics: DiagnosticConfig | None = None
     sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig | None = None
     policy: list[PolicyMethodSpec] | None = None

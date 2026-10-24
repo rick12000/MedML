@@ -343,78 +343,6 @@ def maybe_clip_propensity(
     return clip_propensity(propensity, clip_bounds)
 
 
-def observed_arm_propensity(propensity: pd.DataFrame, treatment: pd.Series) -> np.ndarray:
-    values = propensity.to_numpy(dtype=float)
-    column_index = {column: index for index, column in enumerate(propensity.columns)}
-    arm_indices = np.fromiter(
-        (column_index[value] for value in treatment.to_list()),
-        dtype=int,
-        count=len(treatment),
-    )
-    return values[np.arange(len(values)), arm_indices]
-
-
-def propensity_trim_mask(
-    propensity: pd.DataFrame,
-    treatment: pd.Series,
-    trim_bounds: tuple[float, float],
-) -> np.ndarray:
-    lower, upper = trim_bounds
-    observed = observed_arm_propensity(propensity, treatment)
-    return (observed >= lower) & (observed <= upper)
-
-
-def marginal_propensity_frame(
-    learner: BaseEstimator,
-    features: pd.DataFrame,
-    treatment_values: list[JsonValue],
-) -> pd.DataFrame:
-    """P(T = a | X) aligned to treatment_values column order."""
-    probability = np.asarray(learner.predict_proba(features))
-    frame = pd.DataFrame(probability, index=features.index, columns=list(learner.classes_))
-    return frame.reindex(columns=treatment_values)
-
-
-def mask_by_propensity_trim(
-    values: pd.DataFrame | np.ndarray,
-    propensity: pd.DataFrame,
-    treatment: pd.Series,
-    trim_bounds: tuple[float, float],
-) -> pd.DataFrame | np.ndarray:
-    """Set rows outside the overlap region to NaN, matching training-time trimming."""
-    mask = propensity_trim_mask(propensity, treatment, trim_bounds)
-    if isinstance(values, pd.DataFrame):
-        masked = values.copy()
-        masked.loc[~mask, :] = np.nan
-        return masked
-    masked = np.array(values, dtype=float, copy=True)
-    masked[~mask] = np.nan
-    return masked
-
-
-def apply_propensity_trim(
-    treatment: pd.Series,
-    outcome: pd.Series,
-    propensity: pd.DataFrame,
-    trim_bounds: tuple[float, float],
-    potential_outcomes: pd.DataFrame | None = None,
-    groups: np.ndarray | None = None,
-) -> tuple[pd.Series, pd.Series, pd.DataFrame, pd.DataFrame | None, np.ndarray | None]:
-    mask = propensity_trim_mask(propensity, treatment, trim_bounds)
-    trimmed_treatment = treatment.loc[mask]
-    trimmed_outcome = outcome.loc[mask]
-    trimmed_propensity = propensity.loc[mask]
-    trimmed_potential = potential_outcomes.loc[mask] if potential_outcomes is not None else None
-    trimmed_groups = groups[mask] if groups is not None else None
-    return (
-        trimmed_treatment,
-        trimmed_outcome,
-        trimmed_propensity,
-        trimmed_potential,
-        trimmed_groups,
-    )
-
-
 def clip_propensity(propensity: pd.DataFrame, clip_bounds: tuple[float, float]) -> pd.DataFrame:
     """Project each row onto the probability simplex inside the clip bounds."""
     lower, upper = clip_bounds
@@ -590,11 +518,10 @@ def cross_fit_meta_learner_sample(
     n_folds: int,
     random_state: int,
     clip_bounds: tuple[float, float] | None,
-    trim_bounds: tuple[float, float] | None,
     groups: pd.Series | np.ndarray | None = None,
     log_scope: str | None = None,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, dict[JsonValue, np.ndarray]]:
-    """Cross-fit propensity nuisances and optionally trim the meta-learner training sample."""
+    """Cross-fit propensity nuisances for a meta-learner."""
     _, propensity = cross_fit_nuisances(
         covariates=covariates,
         treatment=treatment,
@@ -610,20 +537,11 @@ def cross_fit_meta_learner_sample(
         log_scope=log_scope,
     )
     propensity = maybe_clip_propensity(propensity, clip_bounds)
-    features = covariates
-    treatment_series = treatment
-    outcome_series = outcome
-    if trim_bounds is not None:
-        mask = propensity_trim_mask(propensity, treatment, trim_bounds)
-        features = features.loc[mask]
-        treatment_series = treatment_series.loc[mask]
-        outcome_series = outcome_series.loc[mask]
-        propensity = propensity.loc[mask]
     propensity_map = one_versus_control_propensity(
         propensity=propensity,
         control_value=control_value,
     )
-    return features, treatment_series, outcome_series, propensity_map
+    return covariates, treatment, outcome, propensity_map
 
 
 def dataset_groups(dataset: CausalDataset) -> pd.Series | None:

@@ -15,6 +15,7 @@ from causal_pipeline.config import (
     MetaCATEEstimatorSpec,
     OutcomeFavorability,
 )
+from causal_pipeline.crossfit import dataset_groups
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import CATEEvaluator
 
@@ -55,4 +56,5 @@ def write_linear_meta_learner_evaluation_figures(
         robust_scores=robust_scores,
         results_root=results_root,
         outcome_favorability=data_config.outcome_favorability,
+        groups=dataset_groups(dataset),
     )

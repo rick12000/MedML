@@ -8,9 +8,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from causalml.metrics import get_toc, rate_score
 from pydantic import BaseModel, ConfigDict, Field
-from scipy.stats import t as student_t
+from scipy.stats import norm
 
 from causal_pipeline.config import (
     CATEEvaluationConfig,
@@ -37,6 +36,44 @@ logger = logging.getLogger(__name__)
 
 RATE_WEIGHTING_AUTOC = "autoc"
 RATE_WEIGHTING_QINI = "qini"
+MINIMUM_SAMPLE = 2
+
+
+def require_aligned_scores(
+    left: np.ndarray,
+    right: np.ndarray,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    first = np.asarray(left, dtype=float)
+    second = np.asarray(right, dtype=float)
+    if first.shape != second.shape or first.ndim != 1:
+        raise ValueError(f"{label} must be one-dimensional and aligned.")
+    if len(first) < MINIMUM_SAMPLE:
+        raise ValueError(f"{label} needs at least two observations.")
+    if not np.isfinite(first).all() or not np.isfinite(second).all():
+        raise ValueError(f"{label} must be finite.")
+    return first, second
+
+
+def prediction_bin_indices(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
+    """Equal-count bins. A tie stays in one bin so membership does not follow row order."""
+    if n_bins < 1:
+        raise ValueError("Calibration needs at least one bin.")
+    order = np.argsort(values, kind="mergesort")
+    ordered = values[order]
+    sample_size = len(values)
+    sizes = [len(chunk) for chunk in np.array_split(np.arange(sample_size), n_bins)]
+    bins: list[np.ndarray] = []
+    start = 0
+    for edge in np.cumsum(sizes):
+        end = int(edge)
+        if end <= start:
+            continue
+        while end < sample_size and ordered[end] == ordered[end - 1]:
+            end += 1
+        bins.append(order[start:end])
+        start = end
+    return bins
 
 
 def calibration_bin_rows(
@@ -44,16 +81,17 @@ def calibration_bin_rows(
     gamma: np.ndarray,
     n_bins: int,
 ) -> list[dict[str, float]]:
-    order = np.argsort(tau_hat)
-    bins = np.array_split(order, n_bins)
+    predicted, proxy = require_aligned_scores(
+        tau_hat,
+        gamma,
+        "CATE predictions and proxy scores",
+    )
     rows: list[dict[str, float]] = []
-    for bin_indices in bins:
-        if len(bin_indices) == 0:
-            continue
+    for bin_indices in prediction_bin_indices(predicted, n_bins):
         rows.append(
             {
-                "mean_predicted_cate": float(np.mean(tau_hat[bin_indices])),
-                "mean_robust_proxy": float(np.mean(gamma[bin_indices])),
+                "mean_predicted_cate": float(np.mean(predicted[bin_indices])),
+                "mean_robust_proxy": float(np.mean(proxy[bin_indices])),
                 "bin_size": len(bin_indices),
             }
         )
@@ -71,21 +109,56 @@ def benefit_oriented_scores(
     return oriented_tau, oriented_gamma
 
 
+def prioritized_effects(score: np.ndarray, effect: np.ndarray) -> np.ndarray:
+    """Effects in descending priority. Tied scores contribute their mean effect."""
+    order = np.argsort(-score, kind="mergesort")
+    ordered_score = score[order]
+    ordered_effect = effect[order]
+    tie_ends = np.flatnonzero(np.diff(ordered_score)) + 1
+    starts = np.concatenate(([0], tie_ends))
+    ends = np.concatenate((tie_ends, [len(order)]))
+    prioritized = np.empty(len(order), dtype=float)
+    for start, end in zip(starts, ends, strict=True):
+        prioritized[start:end] = float(np.mean(ordered_effect[start:end]))
+    return prioritized
+
+
+def targeting_operator_curve(
+    score: np.ndarray,
+    effect: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """TOC(q) is the top-q mean effect minus the sample mean. TOC(0) and TOC(1) are 0."""
+    priority, values = require_aligned_scores(score, effect, "Priority scores and effects")
+    prioritized = prioritized_effects(priority, values)
+    counts = np.arange(1, len(priority) + 1, dtype=float)
+    toc_at_counts = np.cumsum(prioritized) / counts - float(np.mean(values))
+    fraction = np.concatenate(([0.0], counts / len(priority)))
+    toc = np.concatenate(([0.0], toc_at_counts))
+    toc[-1] = 0.0
+    return fraction, toc
+
+
+def integrate_toc(fraction: np.ndarray, toc: np.ndarray, weighting: str) -> float:
+    """AUTOC integrates TOC. Qini integrates q · TOC. Both are areas, not normalized weights."""
+    if weighting == RATE_WEIGHTING_AUTOC:
+        integrand = np.asarray(toc, dtype=float)
+    elif weighting == RATE_WEIGHTING_QINI:
+        integrand = np.asarray(fraction, dtype=float) * np.asarray(toc, dtype=float)
+    else:
+        raise ValueError(
+            f"Unknown RATE weighting {weighting!r}. Use {RATE_WEIGHTING_AUTOC!r} or {RATE_WEIGHTING_QINI!r}."
+        )
+    return float(np.trapezoid(integrand, fraction))
+
+
 def ranking_curve(
     tau_hat: np.ndarray,
     gamma: np.ndarray,
     direction: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """TOC curve. AUTOC and Qini RATE are two integrals of this same curve."""
+    """Benefit-oriented TOC. Pass the result to integrate_toc for AUTOC or Qini."""
     oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
-    table = get_toc(
-        rate_input_frame(oriented_tau, oriented_gamma),
-        treatment_effect_col="tau",
-    )
-    return (
-        table.index.to_numpy(dtype=float).copy(),
-        table.iloc[:, 0].to_numpy(dtype=float).copy(),
-    )
+    return targeting_operator_curve(oriented_tau, oriented_gamma)
 
 
 def write_ranking_curve_data(save_path: str | Path, series: Sequence[RankingSeries]) -> Path:
@@ -139,11 +212,6 @@ def save_joint_cate_figures(
         )
         write_calibration_curve_data(calibration_path, calibration_by_contrast[contrast])
         logger.info("Saved joint CATE figures for %s.", contrast)
-
-
-def rate_input_frame(tau_hat: np.ndarray, gamma: np.ndarray) -> pd.DataFrame:
-    """Frame for causalml RATE/TOC: ranking score plus DR proxy as the effect column."""
-    return pd.DataFrame({"cate": np.asarray(tau_hat), "tau": np.asarray(gamma)})
 
 
 class ContrastEvaluation(BaseModel):
@@ -245,6 +313,7 @@ class CATEEvaluator:
         results_root: Path,
         held_out: bool = False,
         outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER,
+        groups: np.ndarray | pd.Series | None = None,
     ) -> dict[str, list[ContrastEvaluation]]:
         direction = reward_direction(outcome_favorability)
         results: dict[str, list[ContrastEvaluation]] = {}
@@ -255,15 +324,21 @@ class CATEEvaluator:
             for contrast in df_cate_predictions.columns:
                 if contrast not in robust_scores.columns:
                     continue
-                tau_hat = df_cate_predictions[contrast].values
-                gamma = robust_scores[contrast].values
+                tau_hat = df_cate_predictions[contrast].to_numpy(dtype=float)
+                gamma = robust_scores[contrast].to_numpy(dtype=float)
+                absolute_tolerance = absolute_eceth_tolerance(
+                    tau_hat=tau_hat,
+                    gamma=gamma,
+                    tolerance_fraction=self.evaluation.eceth_tolerance,
+                )
                 eceth, eceth_se, eceth_pvalue = eceth_hypothesis_test(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     n_bins=self.evaluation.calibration_bins,
-                    tolerance=self.evaluation.eceth_tolerance,
+                    tolerance=absolute_tolerance,
                     bootstrap_samples=self.evaluation.eceth_bootstrap_samples,
                     random_state=self.evaluation.random_state,
+                    groups=groups,
                 )
                 marker = "test_" if held_out else ""
                 rows = calibration_bin_rows(
@@ -278,16 +353,12 @@ class CATEEvaluator:
                     gamma=gamma,
                     direction=direction,
                 )
-                rate_autoc, rate_autoc_p = self.rate_with_bootstrap(
+                rate_autoc, rate_autoc_p, rate_qini, rate_qini_p = rate_hypothesis_test(
                     tau_hat=tau_hat,
                     gamma=gamma,
-                    weighting=RATE_WEIGHTING_AUTOC,
-                    direction=direction,
-                )
-                rate_qini, rate_qini_p = self.rate_with_bootstrap(
-                    tau_hat=tau_hat,
-                    gamma=gamma,
-                    weighting=RATE_WEIGHTING_QINI,
+                    bootstrap_samples=self.evaluation.rate_bootstrap_samples,
+                    random_state=self.evaluation.random_state,
+                    groups=groups,
                     direction=direction,
                 )
                 ranking = RankingSeries(
@@ -330,7 +401,7 @@ class CATEEvaluator:
                         eceth=eceth,
                         eceth_standard_error=eceth_se,
                         eceth_pvalue=eceth_pvalue,
-                        eceth_tolerance=self.evaluation.eceth_tolerance,
+                        eceth_tolerance=absolute_tolerance,
                         rate_autoc=rate_autoc,
                         rate_autoc_pvalue=rate_autoc_p,
                         rate_qini=rate_qini,
@@ -348,23 +419,90 @@ class CATEEvaluator:
         )
         return results
 
-    def rate_with_bootstrap(
-        self,
-        tau_hat: np.ndarray,
-        gamma: np.ndarray,
-        weighting: str,
-        direction: float = 1.0,
-    ) -> tuple[float, float]:
-        oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
-        scored = rate_score(
-            rate_input_frame(oriented_tau, oriented_gamma),
-            treatment_effect_col="tau",
-            weighting=weighting,
-            return_ci=True,
-            n_bootstrap=self.evaluation.rate_bootstrap_samples,
-            random_state=self.evaluation.random_state,
-        )
-        return float(scored["rate"].iloc[0]), float(scored["p_value"].iloc[0])
+
+def absolute_eceth_tolerance(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    tolerance_fraction: float,
+) -> float:
+    """Fraction of Var(τ̂), or of Var(Γ) when every prediction is the same."""
+    if tolerance_fraction <= 0.0:
+        raise ValueError("The ECETH tolerance fraction must be positive.")
+    predicted, scores = require_aligned_scores(
+        tau_hat,
+        gamma,
+        "CATE predictions and proxy scores",
+    )
+    prediction_variance = float(np.var(predicted, ddof=1))
+    scale = prediction_variance if prediction_variance > 0.0 else float(np.var(scores, ddof=1))
+    return tolerance_fraction * scale
+
+
+def resample_positions(
+    sample_size: int,
+    generator: np.random.Generator,
+    groups: np.ndarray | pd.Series | None,
+    replace: bool,
+) -> np.ndarray:
+    """Draw rows. Clusters stay whole. replace=False draws half the rows or clusters."""
+    group_ids = None if groups is None else np.asarray(groups)
+    if group_ids is not None and len(group_ids) != sample_size:
+        raise ValueError("Group ids must have one entry per score.")
+    if group_ids is None:
+        size = sample_size if replace else sample_size // 2
+        if not replace and size < MINIMUM_SAMPLE:
+            raise ValueError("A half-sample needs at least four rows.")
+        return generator.choice(sample_size, size=size, replace=replace)
+    inverse, codes = pd.factorize(group_ids, sort=False)
+    size = len(codes) if replace else len(codes) // 2
+    if not replace and size < MINIMUM_SAMPLE:
+        raise ValueError("A half-sample needs at least four groups.")
+    chosen = generator.choice(len(codes), size=size, replace=replace)
+    if not replace:
+        return np.flatnonzero(np.isin(inverse, chosen))
+    return np.concatenate([np.flatnonzero(inverse == group) for group in chosen])
+
+
+def normal_tail(estimate: float, threshold: float, standard_error: float, lower: bool) -> float:
+    """One-sided normal p-value. lower tests estimate < threshold; otherwise estimate > threshold."""
+    if standard_error == 0.0:
+        beyond = estimate < threshold if lower else estimate > threshold
+        return 0.0 if beyond else 1.0
+    z_score = (estimate - threshold) / standard_error
+    return float(norm.cdf(z_score) if lower else norm.sf(z_score))
+
+
+def rate_hypothesis_test(
+    tau_hat: np.ndarray,
+    gamma: np.ndarray,
+    bootstrap_samples: int,
+    random_state: int,
+    groups: np.ndarray | pd.Series | None = None,
+    direction: float = 1.0,
+) -> tuple[float, float, float, float]:
+    """AUTOC, its p-value, Qini, and its p-value. Both p-values test RATE ≤ 0."""
+    if bootstrap_samples < MINIMUM_SAMPLE:
+        raise ValueError("The RATE test needs at least two bootstrap replicates.")
+    oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
+    fraction, toc = targeting_operator_curve(oriented_tau, oriented_gamma)
+    autoc = integrate_toc(fraction, toc, RATE_WEIGHTING_AUTOC)
+    qini = integrate_toc(fraction, toc, RATE_WEIGHTING_QINI)
+    generator = np.random.default_rng(random_state)
+    autoc_draws = np.empty(bootstrap_samples)
+    qini_draws = np.empty(bootstrap_samples)
+    for replicate in range(bootstrap_samples):
+        drawn = resample_positions(len(oriented_tau), generator, groups, replace=False)
+        draw_fraction, draw_toc = targeting_operator_curve(oriented_tau[drawn], oriented_gamma[drawn])
+        autoc_draws[replicate] = integrate_toc(draw_fraction, draw_toc, RATE_WEIGHTING_AUTOC)
+        qini_draws[replicate] = integrate_toc(draw_fraction, draw_toc, RATE_WEIGHTING_QINI)
+    autoc_error = float(np.std(autoc_draws, ddof=1))
+    qini_error = float(np.std(qini_draws, ddof=1))
+    return (
+        autoc,
+        normal_tail(autoc, 0.0, autoc_error, lower=False),
+        qini,
+        normal_tail(qini, 0.0, qini_error, lower=False),
+    )
 
 
 def compute_eceth(
@@ -372,24 +510,15 @@ def compute_eceth(
     gamma: np.ndarray,
     n_bins: int,
 ) -> float:
-    """Leave-one-out ℓ2 calibration error of Xu and Yadlowsky (2022).
-
-    Within each equal-count bin of predicted CATE, the bin mean of the doubly
-    robust scores is recomputed without patient i. The estimator is the mean
-    product of (score − prediction) and (leave-one-out bin mean − prediction).
-    It can be slightly negative in finite samples; that is the debiased
-    estimator, not a display truncation at zero.
-    """
-    predicted = np.asarray(tau_hat, dtype=float)
-    proxy = np.asarray(gamma, dtype=float)
-    if predicted.shape != proxy.shape or predicted.ndim != 1:
-        raise ValueError("CATE predictions and proxy scores must be one-dimensional and aligned.")
-    if len(predicted) < 2:
-        raise ValueError("ECETH needs at least two observations.")
-    order = np.argsort(predicted, kind="mergesort")
+    """Leave-one-out ℓ2 calibration error. A small negative value is the debiased estimator."""
+    predicted, proxy = require_aligned_scores(
+        tau_hat,
+        gamma,
+        "CATE predictions and proxy scores",
+    )
     products: list[np.ndarray] = []
-    for bin_index in np.array_split(order, n_bins):
-        if len(bin_index) < 2:
+    for bin_index in prediction_bin_indices(predicted, n_bins):
+        if len(bin_index) < MINIMUM_SAMPLE:
             continue
         proxy_bin = proxy[bin_index]
         predicted_bin = predicted[bin_index]
@@ -407,33 +536,25 @@ def eceth_hypothesis_test(
     tolerance: float,
     bootstrap_samples: int,
     random_state: int,
+    groups: np.ndarray | pd.Series | None = None,
 ) -> tuple[float, float, float]:
-    """Test H0: ECETH ≥ tolerance against H1: ECETH < tolerance.
-
-    Xu and Yadlowsky use a one-sided t-test with nonparametric bootstrap
-    standard errors of the leave-one-out estimator. The nuisance scores are
-    held fixed: the estimator is asymptotically linear, so the bootstrap
-    resamples the pairs (prediction, score).
-    """
-    if bootstrap_samples < 2:
+    """Test H0: ECETH ≥ tolerance against H1: ECETH < tolerance. Tolerance is absolute."""
+    if bootstrap_samples < MINIMUM_SAMPLE:
         raise ValueError("The ECETH test needs at least two bootstrap replicates.")
-    predicted = np.asarray(tau_hat, dtype=float)
-    proxy = np.asarray(gamma, dtype=float)
+    predicted, proxy = require_aligned_scores(
+        tau_hat,
+        gamma,
+        "CATE predictions and proxy scores",
+    )
     estimate = compute_eceth(tau_hat=predicted, gamma=proxy, n_bins=n_bins)
     generator = np.random.default_rng(random_state)
     replicates = np.empty(bootstrap_samples)
-    sample_size = len(predicted)
     for replicate in range(bootstrap_samples):
-        drawn = generator.choice(sample_size, size=sample_size, replace=True)
+        drawn = resample_positions(len(predicted), generator, groups, replace=True)
         replicates[replicate] = compute_eceth(
             tau_hat=predicted[drawn],
             gamma=proxy[drawn],
             n_bins=n_bins,
         )
     standard_error = float(np.std(replicates, ddof=1))
-    if standard_error == 0.0:
-        p_value = 0.0 if estimate < tolerance else 1.0
-        return estimate, standard_error, p_value
-    statistic = (estimate - tolerance) / standard_error
-    p_value = float(student_t.cdf(statistic, df=bootstrap_samples - 1))
-    return estimate, standard_error, p_value
+    return estimate, standard_error, normal_tail(estimate, tolerance, standard_error, lower=True)

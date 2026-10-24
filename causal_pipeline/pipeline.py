@@ -30,7 +30,7 @@ from causal_pipeline.config import (
 from causal_pipeline.learner_defaults import materialize_propensity_learner
 from causal_pipeline.learner_resolve import materialize_sensitivity_outcome, screen_outcome_learners
 from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
-from causal_pipeline.crossfit import cross_fit_predictions
+from causal_pipeline.crossfit import cross_fit_predictions, dataset_groups
 from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
 from causal_pipeline.diagnostics import OverlapPreprocessor
 from causal_pipeline.estimator_identity import (
@@ -265,6 +265,7 @@ class CausalPipeline:
                 robust_scores=estimation_scores,
                 results_root=self.results.root,
                 outcome_favorability=estimation.data.outcome_favorability,
+                groups=dataset_groups(estimation),
             )
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation)
 
@@ -580,6 +581,7 @@ class CausalPipeline:
             results_root=self.results.root,
             held_out=True,
             outcome_favorability=test.data.outcome_favorability,
+            groups=dataset_groups(test),
         )
         self.persist_cate_evaluation(cate_evaluation=evaluation, table_name="test_evaluation.csv")
         return evaluation

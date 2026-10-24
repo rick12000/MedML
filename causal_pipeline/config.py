@@ -97,6 +97,7 @@ DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL: ConfidenceLevel = 0.95
 DEFAULT_CATE_EVAL_CROSSFIT_FOLDS: PositiveInt = 5
 DEFAULT_CALIBRATION_BINS: PositiveInt = 10
 DEFAULT_RATE_BOOTSTRAP_SAMPLES: PositiveInt = 1000
+# Dimensionless share of prediction variance. The tested null is this share times Var(τ̂).
 DEFAULT_ECETH_TOLERANCE: float = 0.01
 DEFAULT_EXACT_POLICY_DEPTH: int = 2
 DEFAULT_EXACT_POLICY_MIN_NODE_SIZE: PositiveInt = 1

@@ -37,9 +37,9 @@ LEAF_SPACING_INCHES = 1.55
 EDGE_LINE_WIDTH = 0.9
 BOX_LINE_WIDTH = 0.9
 FOOTNOTE = (
-    "Δ = held-out benefit of treatment vs control in the node (doubly robust scores on the "
-    "test split only; sign-adjusted; positive favours treatment). Tree structure and decisions "
-    "come from the estimation sample."
+    "Δ = held-out mean doubly robust pseudo-outcome (treatment vs control) in the node on the "
+    "test split only; sign-adjusted; positive favours treatment. These scores are not bounded "
+    "by the raw outcome scale. Tree structure and decisions come from the estimation sample."
 )
 
 @dataclass(frozen=True)

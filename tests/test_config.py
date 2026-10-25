@@ -7,6 +7,8 @@ from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+
 from causal_pipeline.config import (
     ATEKind,
     CATEKind,
@@ -194,7 +196,7 @@ def test_data_config_rejects_binary_mode_with_three_arms() -> None:
 def test_predict_outcome_mean_returns_positive_class_probability() -> None:
     features = np.array([[0.0], [1.0], [0.0], [1.0]])
     labels = np.array([0, 1, 0, 1])
-    model = LogisticRegression()
+    model = LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER)
     model.fit(features, labels)
     predicted = predict_outcome_mean(estimator=model, features=features)
     expected = model.predict_proba(features)[:, 1]

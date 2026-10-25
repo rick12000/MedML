@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
@@ -159,7 +161,7 @@ def test_imputed_pipeline_pools_the_ate_and_skips_policy(
             IPWATEEstimatorSpec(
                 kind=ATEKind.IPW,
                 n_folds=PIPELINE_FOLDS,
-                propensity_learner=LogisticRegression(max_iter=200),
+                propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
             )
         ],
         subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],

@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 
 from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
 
 from causal_pipeline.config import NuisanceScreenConfig
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.nuisance_screen import (
     column_drop_importance_table,
@@ -31,39 +31,32 @@ def test_nuisance_screen_writes_test_metrics(
     test_output_dir: Path,
 ) -> None:
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
-    propensity_learner = LogisticRegression(max_iter=200)
-    outcome_learner = XGBClassifier(
-        n_estimators=10,
-        max_depth=2,
+    screen = NuisanceScreenConfig(
+        test_fraction=0.2,
+        validation_fraction=0.25,
         random_state=0,
-        n_jobs=1,
-        eval_metric="logloss",
+        column_drop_repeats=2,
+        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+        outcome_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
     )
     run_nuisance_screen(
         dataset=dataset,
-        screen=NuisanceScreenConfig(
-            test_fraction=0.2,
-            validation_fraction=0.25,
-            random_state=0,
-            column_drop_repeats=2,
-        ),
+        screen=screen,
         results_root=test_output_dir,
-        propensity_learner=propensity_learner,
-        outcome_learners=[outcome_learner],
+        propensity_learner=screen.propensity_learner,
+        outcome_learners=[screen.outcome_learner],
     )
     propensity = test_output_dir / "nuisance_screen" / "propensity" / "LogisticRegression" / "metrics.csv"
-    outcome = test_output_dir / "nuisance_screen" / "outcome" / "XGBClassifier" / "metrics.csv"
-    importance = test_output_dir / "nuisance_screen" / "outcome" / "XGBClassifier" / "gain_importance.csv"
-    column_drop = test_output_dir / "nuisance_screen" / "outcome" / "XGBClassifier" / "column_drop_importance.csv"
+    outcome = test_output_dir / "nuisance_screen" / "outcome" / "LogisticRegression" / "metrics.csv"
+    column_drop = test_output_dir / "nuisance_screen" / "outcome" / "LogisticRegression" / "column_drop_importance.csv"
     column_drop_plot = (
         test_output_dir / "nuisance_screen" / "propensity" / "LogisticRegression" / "column_drop_importance.png"
     )
-    shap_plot = test_output_dir / "nuisance_screen" / "outcome" / "XGBClassifier" / "shap_summary.png"
+    shap_plot = test_output_dir / "nuisance_screen" / "outcome" / "LogisticRegression" / "shap_summary.png"
     correlation = test_output_dir / "nuisance_screen" / "correlation" / "correlation.csv"
     correlation_plot = test_output_dir / "nuisance_screen" / "correlation" / "correlation.png"
     assert propensity.exists()
     assert outcome.exists()
-    assert importance.exists()
     assert column_drop.exists()
     assert column_drop_plot.exists()
     assert shap_plot.exists()
@@ -123,7 +116,7 @@ def test_column_drop_importance_ranks_informative_features(
         axis=0,
     )
     table = column_drop_importance_table(
-        learner=LogisticRegression(max_iter=200),
+        learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
         training_features=training_features,
         training_labels=training_labels,
         evaluation_features=split.test.loc[:, covariates.columns],

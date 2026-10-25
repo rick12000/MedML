@@ -446,8 +446,8 @@ class ImputationConfig(BaseModel):
     random_state: int = DEFAULT_IMPUTATION_RANDOM_STATE
 
 
-class NuisanceScreenConfig(BaseModel):
-    """One train/validation/test pass for a logistic model and a random forest."""
+class NuisanceScreenConfig(ArbitraryTypesModel):
+    """Held-out propensity and outcome nuisance fits with importance diagnostics."""
 
     enabled: bool = True
     test_fraction: Fraction = DEFAULT_NUISANCE_SCREEN_TEST_FRACTION
@@ -455,6 +455,8 @@ class NuisanceScreenConfig(BaseModel):
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
     column_drop_repeats: PositiveInt = DEFAULT_COLUMN_DROP_REPEATS
     column_drop_top_features: PositiveInt = DEFAULT_COLUMN_DROP_TOP_FEATURES
+    propensity_learner: BaseEstimator | None = None
+    outcome_learner: BaseEstimator | None = None
 
 
 class SubgroupSplit(BaseModel):

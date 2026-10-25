@@ -31,13 +31,14 @@ from causal_pipeline.config import (
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.imputation import CovariateImputer
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from tests.cache_paths import (
     TEST_CACHE_ROOT,
     module_cache_key,
     sanitize_cache_segment,
 )
 
-TEST_LOGISTIC_MAX_ITER = 500
+TEST_LOGISTIC_MAX_ITER = DEFAULT_LOGISTIC_MAX_ITER
 TEST_RANDOM_STATE = 0
 TEST_FOREST_N_ESTIMATORS = 10
 TEST_SYNTHETIC_N_OBSERVATIONS = 200

@@ -8,6 +8,7 @@ import pytest
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from causal_pipeline.config import CATEEvaluationConfig, OutcomeFavorability
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.evaluation import (
     CATEEvaluator,
     RATE_WEIGHTING_AUTOC,
@@ -250,7 +251,7 @@ def test_evaluate_cate_models_writes_pipeline_style_artifacts(
     predictions = {"t_learner": pd.DataFrame({"1_vs_0": predicted})}
     scores = pd.DataFrame({"1_vs_0": proxy})
     evaluation = CATEEvaluationConfig(
-        propensity_learner=LogisticRegression(max_iter=500),
+        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
         outcome_learner=LinearRegression(),
         dr_crossfit_folds=3,
         calibration_bins=5,

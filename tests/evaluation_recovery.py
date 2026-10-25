@@ -7,6 +7,8 @@ from pathlib import Path
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+
 from causal_pipeline.cate import create_cate_estimator
 from causal_pipeline.config import (
     CATEEvaluationConfig,
@@ -33,7 +35,7 @@ def write_linear_meta_learner_evaluation_figures(
     """Cross-fit DR scores, fit S/T learners, write TOC and calibration like the pipeline."""
     dataset = CausalDataset(data=data_config, df=frame)
     evaluation = CATEEvaluationConfig(
-        propensity_learner=LogisticRegression(max_iter=500),
+        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
         outcome_learner=LinearRegression(),
         dr_crossfit_folds=RECOVERY_EVAL_FOLDS,
         calibration_bins=5,

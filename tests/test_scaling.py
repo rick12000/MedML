@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+
 from causal_pipeline.scaling import CovariateScaler, clone_scaled_estimator
 
 TRAIN_ROWS = 40
@@ -97,7 +99,7 @@ def test_scaled_learner_returns_one_probability_row_per_input() -> None:
         }
     )
     labels = [0, 1, 0, 1, 0, 1, 0, 1]
-    model = clone_scaled_estimator(LogisticRegression(max_iter=200))
+    model = clone_scaled_estimator(LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER))
     model.fit(features, labels)
     probabilities = model.predict_proba(features)
     assert probabilities.shape == (len(features), 2)

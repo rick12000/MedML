@@ -29,7 +29,11 @@ from causal_pipeline.config import (
     PolicyKind,
 )
 from causal_pipeline.learner_defaults import materialize_propensity_learner
-from causal_pipeline.learner_resolve import materialize_sensitivity_outcome, screen_outcome_learners
+from causal_pipeline.learner_defaults import (
+    materialize_nuisance_screen_outcome_learners,
+    materialize_nuisance_screen_propensity,
+)
+from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
 from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
 from causal_pipeline.crossfit import cross_fit_predictions, dataset_groups
 from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
@@ -422,12 +426,12 @@ class CausalPipeline:
                 dataset=estimation,
                 screen=self.config.nuisance_screen,
                 results_root=results.root,
-                propensity_learner=materialize_propensity_learner(
-                    self.config.overlap.propensity_learner,
-                    random_state=self.config.overlap.random_state,
+                propensity_learner=materialize_nuisance_screen_propensity(
+                    self.config.nuisance_screen.propensity_learner,
+                    random_state=self.config.nuisance_screen.random_state,
                 ),
-                outcome_learners=screen_outcome_learners(
-                    specs=list(self.config.ate_estimators or []) + list(self.config.cate_estimators or []),
+                outcome_learners=materialize_nuisance_screen_outcome_learners(
+                    self.config.nuisance_screen.outcome_learner,
                     outcome_type=estimation.outcome_type,
                     random_state=self.config.nuisance_screen.random_state,
                 ),

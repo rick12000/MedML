@@ -8,7 +8,7 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from causal_pipeline.config import OutcomeType, clone_estimator
 
-DEFAULT_LOGISTIC_MAX_ITER: int = 10_000
+DEFAULT_LOGISTIC_MAX_ITER: int = 2_000
 DEFAULT_LOGISTIC_C: float = 1.0
 DEFAULT_RIDGE_ALPHA: float = 1.0
 DEFAULT_XGBOOST_N_ESTIMATORS: int = 300
@@ -19,6 +19,18 @@ DEFAULT_XGBOOST_COLSAMPLE: float = 0.85
 DEFAULT_XGBOOST_MIN_CHILD_WEIGHT: int = 5
 DEFAULT_XGBOOST_REG_LAMBDA: float = 1.0
 DEFAULT_XGBOOST_N_JOBS: int = 1
+
+
+def default_screen_propensity_learner(random_state: int) -> LogisticRegression:
+    return apply_defaults(LogisticRegression(random_state=random_state))
+
+
+def default_screen_outcome_classifier(random_state: int) -> LogisticRegression:
+    return apply_defaults(LogisticRegression(random_state=random_state))
+
+
+def default_screen_outcome_regressor(random_state: int) -> Ridge:
+    return apply_defaults(Ridge())
 
 
 def default_propensity_classifier(random_state: int) -> XGBClassifier:
@@ -129,3 +141,30 @@ def materialize_effect_learner(
     if learner is None:
         return default_effect_regressor(random_state=random_state)
     return apply_defaults(clone_estimator(learner))
+
+
+def materialize_nuisance_screen_propensity(
+    learner: BaseEstimator | None,
+    random_state: int,
+) -> BaseEstimator:
+    if learner is None:
+        return default_screen_propensity_learner(random_state=random_state)
+    return materialize_propensity_learner(learner, random_state=random_state)
+
+
+def materialize_nuisance_screen_outcome_learners(
+    learner: BaseEstimator | None,
+    outcome_type: OutcomeType,
+    random_state: int,
+) -> list[BaseEstimator]:
+    if learner is not None:
+        return [
+            materialize_outcome_learner(
+                learner,
+                outcome_type=outcome_type,
+                random_state=random_state,
+            ),
+        ]
+    if outcome_type == OutcomeType.BINARY:
+        return [default_screen_outcome_classifier(random_state=random_state)]
+    return [default_screen_outcome_regressor(random_state=random_state)]

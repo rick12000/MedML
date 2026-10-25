@@ -8,6 +8,8 @@ import pytest
 from sklearn.base import BaseEstimator
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
@@ -180,8 +182,8 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
     selected["included"] = (selected["x1"] > 0.0).astype(int)
     sensitivity = SensitivityConfig(
         outcome_learner=LinearRegression(),
-        sampling_learner=LogisticRegression(max_iter=500),
-        propensity_learner=LogisticRegression(max_iter=500),
+        sampling_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
         selection_column="included",
         inclusion_fraction=0.5,
     )

@@ -16,6 +16,7 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split
 
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.config import (
     CATEEstimatorSpec,
     CATEKind,
@@ -366,7 +367,7 @@ def build_trial_estimator(
     if name == "LogisticRegression":
         estimator.set_params(
             C=trial.suggest_float("C", 0.05, 20.0, log=True),
-            max_iter=10_000,
+            max_iter=DEFAULT_LOGISTIC_MAX_ITER,
         )
         return estimator
     if name == "Ridge":

@@ -31,15 +31,17 @@ def normal_interval_from_scores(
     scores: np.ndarray,
     level: float,
     groups: np.ndarray | None = None,
-) -> tuple[float, float, float]:
-    """Mean of an influence function and its normal confidence interval."""
+) -> tuple[float, float, float, float]:
+    """Mean of an influence function, its normal interval, and the standard error."""
     estimate = float(np.mean(scores))
     if groups is None:
         standard_error = float(np.std(scores, ddof=1) / np.sqrt(scores.size))
     else:
         standard_error = cluster_robust_standard_error(scores=scores, groups=groups)
     quantile = float(stats.norm.ppf(0.5 + level / 2.0))
-    return estimate, estimate - quantile * standard_error, estimate + quantile * standard_error
+    lower = estimate - quantile * standard_error
+    upper = estimate + quantile * standard_error
+    return estimate, lower, upper, standard_error
 
 
 def cluster_robust_standard_error(scores: np.ndarray, groups: np.ndarray) -> float:

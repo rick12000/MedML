@@ -447,6 +447,7 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
                 "contrast": [contrast],
                 "estimand": [self.spec.estimand],
                 "estimate": [float(self.model.coef[0])],
+                "standard_error": [scalar_standard_error(self.model.se)],
                 "ci_lower": [float(summary.iloc[0, 0])],
                 "ci_upper": [float(summary.iloc[0, 1])],
             }
@@ -523,6 +524,7 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
                 "contrast": [f"plr_{contrast}"],
                 "estimand": ["partially_linear"],
                 "estimate": [float(self.model.coef[0])],
+                "standard_error": [scalar_standard_error(self.model.se)],
                 "ci_lower": [float(summary.iloc[0, 0])],
                 "ci_upper": [float(summary.iloc[0, 1])],
             }
@@ -727,6 +729,7 @@ def apos_contrast_table(
                 "contrast": name,
                 "estimand": estimand,
                 "estimate": float(np.ravel(contrast.thetas)[0]),
+                "standard_error": scalar_standard_error(contrast.ses),
                 "ci_lower": float(intervals.iloc[0, 0]),
                 "ci_upper": float(intervals.iloc[0, 1]),
             }
@@ -756,6 +759,19 @@ def apos_contrast_scores(
         )
         columns[name] = arm_scores - control_scores
     return pd.DataFrame(columns)
+
+
+def scalar_standard_error(standard_errors: object) -> float:
+    """One published standard error.
+
+    DoubleML's interval is the median of the repetition-wise intervals. With
+    more than one repetition that median need not be symmetric about the median
+    coefficient, so Rubin's rules need ``se`` rather than the interval width.
+    """
+    values = np.ravel(np.asarray(standard_errors, dtype=float))
+    if values.size != 1 or not np.isfinite(values[0]) or float(values[0]) < 0.0:
+        raise ValueError("Each contrast needs one finite, non-negative standard error.")
+    return float(values[0])
 
 
 def treatment_level_index(levels: list[object], arm: JsonValue) -> int:
@@ -799,7 +815,7 @@ def intervals_from_contrast_scores(
 ) -> pd.DataFrame:
     rows = []
     for contrast in scores.columns:
-        estimate, lower, upper = normal_interval_from_scores(
+        estimate, lower, upper, standard_error = normal_interval_from_scores(
             scores[contrast].to_numpy(dtype=float),
             level,
             groups=groups,
@@ -809,6 +825,7 @@ def intervals_from_contrast_scores(
                 "contrast": contrast,
                 "estimand": estimand,
                 "estimate": estimate,
+                "standard_error": standard_error,
                 "ci_lower": lower,
                 "ci_upper": upper,
             }

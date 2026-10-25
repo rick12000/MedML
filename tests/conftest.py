@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,8 @@ from causal_pipeline.config import (
     TreatmentMode,
 )
 from causal_pipeline.data import CausalDataset
-from causal_pipeline.evaluation import CATEEvaluator
+from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
+from causal_pipeline.imputation import CovariateImputer
 from tests.cache_paths import (
     TEST_CACHE_ROOT,
     module_cache_key,
@@ -344,6 +346,56 @@ def df_synthetic_binary() -> pd.DataFrame:
             "x2": covariate_two,
         }
     )
+
+
+@pytest.fixture
+def contrast_evaluation() -> Callable[[float, float], ContrastEvaluation]:
+    """Build a contrast result with the fields pooling does not recompute."""
+
+    def build(eceth: float, rate_autoc: float) -> ContrastEvaluation:
+        return ContrastEvaluation(
+            contrast="1_vs_0",
+            eceth=eceth,
+            eceth_standard_error=1.0,
+            eceth_pvalue=0.5,
+            eceth_tolerance=0.01,
+            rate_autoc=rate_autoc,
+            rate_autoc_standard_error=1.0,
+            rate_autoc_pvalue=0.5,
+            rate_qini=0.0,
+            rate_qini_standard_error=1.0,
+            rate_qini_pvalue=0.5,
+            calibration_path="cate/model/1_vs_0/calibration.png",
+            toc_path="cate/model/1_vs_0/toc.png",
+        )
+
+    return build
+
+
+@pytest.fixture
+def shift_covariate_imputer() -> CovariateImputer:
+    """Fill each missing covariate with its observed mean, shifted by draw."""
+
+    def impute(
+        frame: pd.DataFrame,
+        covariates: list[str],
+        predictors: list[str],
+        datasets: int,
+        iterations: int,
+        random_state: int,
+    ) -> list[pd.DataFrame]:
+        del predictors, iterations, random_state
+        completed = []
+        for dataset_index in range(datasets):
+            filled = frame.copy()
+            shift = (dataset_index - (datasets - 1) / 2.0) * 0.25
+            for column in covariates:
+                observed_mean = float(filled[column].mean(skipna=True))
+                filled[column] = filled[column].fillna(observed_mean + shift)
+            completed.append(filled)
+        return completed
+
+    return impute
 
 
 @pytest.fixture

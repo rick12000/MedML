@@ -61,7 +61,7 @@ def test_skipped_sensitivity_removes_a_previous_bound(
         spec=IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
         data=dataset,
     )
-    pipeline.run_ate_sensitivity(ate_models={"ipw": estimator})
+    pipeline.run_ate_sensitivity(ate_models={"ipw": estimator}, results=pipeline.results)
     assert not stale.exists()
 
 

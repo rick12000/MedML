@@ -223,8 +223,10 @@ class ContrastEvaluation(BaseModel):
     eceth_pvalue: float
     eceth_tolerance: float
     rate_autoc: float
+    rate_autoc_standard_error: float
     rate_autoc_pvalue: float
     rate_qini: float
+    rate_qini_standard_error: float
     rate_qini_pvalue: float
     calibration_path: str = Field(min_length=1)
     toc_path: str = Field(min_length=1)
@@ -353,13 +355,15 @@ class CATEEvaluator:
                     gamma=gamma,
                     direction=direction,
                 )
-                rate_autoc, rate_autoc_p, rate_qini, rate_qini_p = rate_hypothesis_test(
-                    tau_hat=tau_hat,
-                    gamma=gamma,
-                    bootstrap_samples=self.evaluation.rate_bootstrap_samples,
-                    random_state=self.evaluation.random_state,
-                    groups=groups,
-                    direction=direction,
+                rate_autoc, rate_autoc_se, rate_autoc_p, rate_qini, rate_qini_se, rate_qini_p = (
+                    rate_hypothesis_test(
+                        tau_hat=tau_hat,
+                        gamma=gamma,
+                        bootstrap_samples=self.evaluation.rate_bootstrap_samples,
+                        random_state=self.evaluation.random_state,
+                        groups=groups,
+                        direction=direction,
+                    )
                 )
                 ranking = RankingSeries(
                     estimator_id=estimator_id,
@@ -403,8 +407,10 @@ class CATEEvaluator:
                         eceth_pvalue=eceth_pvalue,
                         eceth_tolerance=absolute_tolerance,
                         rate_autoc=rate_autoc,
+                        rate_autoc_standard_error=rate_autoc_se,
                         rate_autoc_pvalue=rate_autoc_p,
                         rate_qini=rate_qini,
+                        rate_qini_standard_error=rate_qini_se,
                         rate_qini_pvalue=rate_qini_p,
                         calibration_path=calibration_path,
                         toc_path=toc_path,
@@ -479,8 +485,12 @@ def rate_hypothesis_test(
     random_state: int,
     groups: np.ndarray | pd.Series | None = None,
     direction: float = 1.0,
-) -> tuple[float, float, float, float]:
-    """AUTOC, its p-value, Qini, and its p-value. Both p-values test RATE ≤ 0."""
+) -> tuple[float, float, float, float, float, float]:
+    """AUTOC, the SD of its half-samples, and a normal tail that treats that SD as a sampling SE.
+
+    The same three values follow for Qini. The half-sample SD is not a sampling
+    variance, so multiple imputation does not pool these tails.
+    """
     if bootstrap_samples < MINIMUM_SAMPLE:
         raise ValueError("The RATE test needs at least two bootstrap replicates.")
     oriented_tau, oriented_gamma = benefit_oriented_scores(tau_hat, gamma, direction)
@@ -499,8 +509,10 @@ def rate_hypothesis_test(
     qini_error = float(np.std(qini_draws, ddof=1))
     return (
         autoc,
+        autoc_error,
         normal_tail(autoc, 0.0, autoc_error, lower=False),
         qini,
+        qini_error,
         normal_tail(qini, 0.0, qini_error, lower=False),
     )
 

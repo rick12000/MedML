@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 class ResultStore:
     """Create directories and persist pipeline outputs."""
 
-    def __init__(self, config: PipelineConfig) -> None:
+    def __init__(self, config: PipelineConfig, root: Path | None = None) -> None:
         self.config = config
-        self.root = ensure_directory(config.results_dir)
+        self.root = ensure_directory(config.results_dir if root is None else root)
 
     def save_partitions(self, partitions: DataPartitions) -> None:
         data_dir = ensure_directory(self.root / "data")

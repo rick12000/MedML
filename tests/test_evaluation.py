@@ -123,19 +123,25 @@ def test_lower_is_better_flips_the_effect_with_the_score(weighting: str) -> None
 
 def test_rate_pvalue_supports_only_a_positive_ranking() -> None:
     score = np.linspace(-2.0, 2.0, 80)
-    autoc, autoc_p, qini, qini_p = rate_hypothesis_test(
+    autoc, autoc_standard_error, autoc_p, qini, qini_standard_error, qini_p = rate_hypothesis_test(
         tau_hat=score,
         gamma=score,
         bootstrap_samples=20,
         random_state=0,
     )
-    bad_autoc, bad_autoc_p, bad_qini, bad_qini_p = rate_hypothesis_test(
-        tau_hat=-score,
-        gamma=score,
-        bootstrap_samples=20,
-        random_state=0,
+    bad_autoc, bad_autoc_standard_error, bad_autoc_p, bad_qini, bad_qini_standard_error, bad_qini_p = (
+        rate_hypothesis_test(
+            tau_hat=-score,
+            gamma=score,
+            bootstrap_samples=20,
+            random_state=0,
+        )
     )
     assert autoc > 0.0
+    assert autoc_standard_error > 0.0
+    assert qini_standard_error > 0.0
+    assert bad_autoc_standard_error > 0.0
+    assert bad_qini_standard_error > 0.0
     assert qini > 0.0
     assert autoc_p < 0.05
     assert qini_p < 0.05

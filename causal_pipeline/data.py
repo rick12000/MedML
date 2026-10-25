@@ -166,8 +166,14 @@ def minimum_groups_for_crossfit(config: PipelineConfig) -> int:
 class DataSplitter:
     """Keep the full sample, or hold out a test set when policy evaluation is on."""
 
-    def split(self, dataset: CausalDataset, config: PipelineConfig) -> DataPartitions:
-        if not config.policy:
+    def split(
+        self,
+        dataset: CausalDataset,
+        config: PipelineConfig,
+        hold_out: bool | None = None,
+    ) -> DataPartitions:
+        use_holdout = bool(config.policy) if hold_out is None else hold_out
+        if not use_holdout:
             logger.info("Using the full sample for cross-fit estimation.")
             return DataPartitions(
                 estimation=CausalDataset(data=dataset.data, df=dataset.df.copy()),

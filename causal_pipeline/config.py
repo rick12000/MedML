@@ -117,6 +117,16 @@ DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION: Fraction = 0.25
 DEFAULT_COLUMN_DROP_REPEATS: PositiveInt = 5
 DEFAULT_COLUMN_DROP_TOP_FEATURES: PositiveInt = 20
 DEFAULT_TUNE_ESTIMATORS: bool = False
+MINIMUM_IMPUTATION_DATASETS: int = 2
+DEFAULT_IMPUTATION_DATASETS: PositiveInt = 20
+DEFAULT_IMPUTATION_ITERATIONS: PositiveInt = 5
+DEFAULT_IMPUTATION_RANDOM_STATE: int = 0
+TRIM_WITH_IMPUTATION_MESSAGE = (
+    "Overlap trimming cannot run while multiple imputation is enabled. "
+    "A separate trim in each imputation would change who remains in the sample, "
+    "so the pooled estimates would no longer refer to one population. "
+    "Clear overlap.trim_bounds, or disable imputation."
+)
 CATE_DEPENDENT_POLICY_KINDS = frozenset(
     {PolicyKind.POLICY_TREE, PolicyKind.EXACT_POLICY_TREE, PolicyKind.VIRTUAL_TWINS}
 )
@@ -427,6 +437,15 @@ PolicyMethodSpec = Annotated[
 ]
 
 
+class ImputationConfig(BaseModel):
+    """Optional covariate imputation. Treatment and outcome stay observed."""
+
+    enabled: bool = False
+    datasets: PositiveInt = DEFAULT_IMPUTATION_DATASETS
+    iterations: PositiveInt = DEFAULT_IMPUTATION_ITERATIONS
+    random_state: int = DEFAULT_IMPUTATION_RANDOM_STATE
+
+
 class NuisanceScreenConfig(BaseModel):
     """One train/validation/test pass for a logistic model and a random forest."""
 
@@ -460,6 +479,7 @@ class PipelineConfig(BaseModel):
     policy_random_state: int = DEFAULT_POLICY_RANDOM_STATE
     results_dir: str = DEFAULT_RESULTS_DIR
     nuisance_screen: NuisanceScreenConfig = Field(default_factory=NuisanceScreenConfig)
+    imputation: ImputationConfig = Field(default_factory=ImputationConfig)
     tune_estimators: bool = DEFAULT_TUNE_ESTIMATORS
 
     @model_validator(mode="after")
@@ -505,4 +525,8 @@ class PipelineConfig(BaseModel):
                 )
         elif test_fraction != 0.0:
             raise ValueError("Without policy methods, test_fraction must be 0.")
+        if self.imputation.enabled and self.imputation.datasets < MINIMUM_IMPUTATION_DATASETS:
+            raise ValueError("Multiple imputation needs at least two datasets.")
+        if self.imputation.enabled and self.overlap.trim_bounds is not None:
+            raise ValueError(TRIM_WITH_IMPUTATION_MESSAGE)
         return self

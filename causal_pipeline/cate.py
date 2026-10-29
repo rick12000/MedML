@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import causalml.inference.meta.rlearner as causalml_rlearner
 from causalml.inference.meta.utils import concat_treatment_col
 from causalml.inference.meta import (
     BaseDRClassifier,
@@ -57,6 +58,7 @@ from causal_pipeline.learner_resolve import (
     materialize_causal_forest_learners,
     materialize_meta_cate_learners,
 )
+from causal_pipeline.parallel import ALL_CORES_N_JOBS, SINGLE_CORE_N_JOBS
 from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
 
 logger = logging.getLogger(__name__)
@@ -129,7 +131,11 @@ def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
     )
 
 
-def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseCATEEstimator:
+def create_cate_estimator(
+    spec: CATEEstimatorSpec,
+    data: CausalDataset,
+    forest_n_jobs: int = ALL_CORES_N_JOBS,
+) -> BaseCATEEstimator:
     ensure_cate_spec_supported(spec=spec)
     if spec.kind == CATEKind.S_LEARNER:
         return MetaLearnerAdapter(spec=spec, data=data, letter="s")
@@ -142,7 +148,7 @@ def create_cate_estimator(spec: CATEEstimatorSpec, data: CausalDataset) -> BaseC
     if spec.kind == CATEKind.DR_LEARNER:
         return MetaLearnerAdapter(spec=spec, data=data, letter="dr")
     if spec.kind == CATEKind.CAUSAL_FOREST:
-        return CausalForestAdapter(spec=spec, data=data)
+        return CausalForestAdapter(spec=spec, data=data, forest_n_jobs=forest_n_jobs)
     if spec.kind == CATEKind.TARNET:
         return TARNetAdapter(spec=spec, data=data)
     if spec.kind == CATEKind.CFRNET:
@@ -225,7 +231,12 @@ def build_meta_learner(
 
 
 class MetaLearnerAdapter(BaseCATEEstimator):
-    def __init__(self, spec: MetaCATEEstimatorSpec, data: CausalDataset, letter: str) -> None:
+    def __init__(
+        self,
+        spec: MetaCATEEstimatorSpec,
+        data: CausalDataset,
+        letter: str,
+    ) -> None:
         self.spec = spec
         self.data = data
         self.letter = letter
@@ -281,7 +292,15 @@ class MetaLearnerAdapter(BaseCATEEstimator):
                 groups=dataset_groups(data),
                 log_scope=f"CATE/{self.letter}-learner",
             )
-        if propensity is None:
+        if self.letter == "r":
+            fit_r_learner(
+                model=self.model,
+                features=features,
+                treatment=treatment,
+                outcome=outcome,
+                propensity=propensity,
+            )
+        elif propensity is None:
             self.model.fit(
                 features,
                 treatment=treatment,
@@ -377,9 +396,15 @@ class MetaLearnerAdapter(BaseCATEEstimator):
 
 
 class CausalForestAdapter(BaseCATEEstimator):
-    def __init__(self, spec: CausalForestCATEEstimatorSpec, data: CausalDataset) -> None:
+    def __init__(
+        self,
+        spec: CausalForestCATEEstimatorSpec,
+        data: CausalDataset,
+        forest_n_jobs: int = ALL_CORES_N_JOBS,
+    ) -> None:
         self.spec = spec
         self.data = data
+        self.forest_n_jobs = forest_n_jobs
         self.model = None
         self.contrast_names = contrast_columns(
             data.control_value,
@@ -402,6 +427,7 @@ class CausalForestAdapter(BaseCATEEstimator):
             model_t=clone_scaled_estimator(propensity_learner),
             discrete_treatment=True,
             discrete_outcome=binary_outcome,
+            n_jobs=self.forest_n_jobs,
         )
         features = data.X_effect_modifiers.copy()
         controls = data.X_controls.copy()
@@ -639,13 +665,47 @@ def meta_learner_factual_outcome(
     return predicted
 
 
+def fit_r_learner(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+    outcome: pd.Series,
+    propensity: pd.DataFrame | None,
+) -> None:
+    """Fit an R-learner without a process pool around its outcome cross-fit.
+
+    causalml requests every core for that cross-fit, including a hardcoded
+    request in the classifier. Those worker processes abort on Windows while
+    XGBoost builds its training matrix.
+    """
+    model.cv_n_jobs = SINGLE_CORE_N_JOBS
+    original = causalml_rlearner.cross_val_predict
+
+    def in_process(*args: object, **kwargs: object) -> np.ndarray:
+        kwargs["n_jobs"] = SINGLE_CORE_N_JOBS
+        return original(*args, **kwargs)
+
+    causalml_rlearner.cross_val_predict = in_process
+    try:
+        if propensity is None:
+            model.fit(features, treatment=treatment, y=outcome)
+        else:
+            model.fit(features, treatment=treatment, y=outcome, p=propensity)
+    finally:
+        causalml_rlearner.cross_val_predict = original
+
+
 def log_r_learner_crossfit_outcome(
     model: BaseEstimator,
     features: pd.DataFrame,
     outcome: pd.Series,
     binary_outcome: bool,
 ) -> None:
-    """Repeat causalml's discarded cross_val_predict so the R-learner outcome nuisance can be scored."""
+    """Repeat causalml's discarded cross_val_predict so the R-learner outcome nuisance can be scored.
+
+    The refit stays in this process. A joblib process pool around XGBoost aborts
+    on Windows while building the training matrix.
+    """
     if hasattr(model.model_mu, "predict_proba"):
         predicted = cross_val_predict(
             model.model_mu,
@@ -653,7 +713,7 @@ def log_r_learner_crossfit_outcome(
             outcome,
             cv=model.cv,
             method="predict_proba",
-            n_jobs=-1,
+            n_jobs=SINGLE_CORE_N_JOBS,
         )[:, 1]
     else:
         predicted = cross_val_predict(
@@ -661,7 +721,7 @@ def log_r_learner_crossfit_outcome(
             features,
             outcome,
             cv=model.cv,
-            n_jobs=model.cv_n_jobs,
+            n_jobs=SINGLE_CORE_N_JOBS,
         )
     metric = outcome_metric_from_predictions(
         outcome=outcome.to_numpy(dtype=float),

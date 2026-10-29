@@ -12,6 +12,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from causal_pipeline.cate import create_cate_estimator
+from causal_pipeline.parallel import available_cores, warm_process_pool
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
@@ -53,6 +54,49 @@ HETEROGENEOUS_EFFECT_SLOPE = 1.2
 HETEROGENEOUS_EFFECT_NOISE = 0.5
 RECOVERY_FOREST_TREES = 40
 RECOVERY_FOREST_DEPTH = 8
+PARALLEL_TIMING_OBSERVATIONS = 5_000
+PARALLEL_TIMING_COVARIATES = 8
+
+@pytest.fixture
+def require_parallel_cores() -> None:
+    if available_cores() < 2:
+        pytest.skip("Process parallelism needs at least two cores.")
+    warm_process_pool()
+
+
+@pytest.fixture
+def parallel_timing_sample() -> tuple[pd.DataFrame, DataConfig]:
+    """A few thousand rows and a handful of confounders, in the range this pipeline fits."""
+    generator = np.random.default_rng(TEST_RANDOM_STATE)
+    covariates = {
+        f"x{index}": generator.normal(size=PARALLEL_TIMING_OBSERVATIONS)
+        for index in range(1, PARALLEL_TIMING_COVARIATES + 1)
+    }
+    propensity_logit = 0.35 * covariates["x1"] - 0.25 * covariates["x2"] + 0.15 * covariates["x3"]
+    propensity = 1.0 / (1.0 + np.exp(-propensity_logit))
+    treatment = generator.binomial(1, propensity)
+    outcome = (
+        1.2 * treatment
+        + 0.4 * covariates["x1"]
+        - 0.2 * covariates["x2"]
+        + generator.normal(scale=0.8, size=PARALLEL_TIMING_OBSERVATIONS)
+    )
+    frame = pd.DataFrame(covariates)
+    frame["t"] = treatment
+    frame["y"] = outcome
+    columns = [f"x{index}" for index in range(1, PARALLEL_TIMING_COVARIATES + 1)]
+    config = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=columns,
+        effect_modifiers=["x1"],
+        outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.BINARY,
+        control_value=0,
+        treatment_values=[0, 1],
+    )
+    return frame, config
+
 
 @pytest.fixture
 def test_output_dir(request: pytest.FixtureRequest) -> Path:

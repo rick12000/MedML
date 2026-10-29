@@ -52,6 +52,7 @@ from causal_pipeline.learner_resolve import (
     materialize_doubleml_learners,
     materialize_ipw_propensity,
 )
+from causal_pipeline.parallel import run_map
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_dataframe, write_html
 
@@ -1087,14 +1088,18 @@ class ATESensitivityAnalyzer:
         estimator: BaseATEEstimator,
         estimator_id: str,
         results_root: str,
+        benchmarks: pd.DataFrame | None = None,
     ) -> SensitivityResult | None:
         sensitivity_config = self.sensitivity
         if estimator_supports_sensitivity(estimator):
+            if benchmarks is None:
+                raise ValueError("DoubleML sensitivity requires covariate benchmarks.")
             return self.analyze_doubleml_native(
                 estimator.model,
                 estimator_id,
                 results_root,
                 sensitivity_config,
+                benchmarks,
             )
         logger.info(
             "Skipping omitted-variable sensitivity for %s. "
@@ -1109,6 +1114,7 @@ class ATESensitivityAnalyzer:
         estimator_id: str,
         results_root: str,
         sensitivity_config: SensitivityConfig,
+        benchmarks: pd.DataFrame,
     ) -> SensitivityResult:
         model.sensitivity_analysis(
             level=sensitivity_config.confidence_level,
@@ -1119,11 +1125,6 @@ class ATESensitivityAnalyzer:
             raise RuntimeError("DoubleML sensitivity analysis did not populate sensitivity_params.")
         point_rv = float(np.ravel(sensitivity_params["rv"])[0])
         interval_rv = float(np.ravel(sensitivity_params["rva"])[0])
-        benchmarks = doubleml_covariate_benchmarks(
-            model=model,
-            null_effect=sensitivity_config.null_effect,
-            level=sensitivity_config.confidence_level,
-        )
         best = benchmarks.iloc[benchmarks["benchmark_bias"].abs().argmax()]
         contour_dir = Path(results_root) / "ate" / estimator_id / "sensitivity"
         figure = model.sensitivity_plot(
@@ -1151,41 +1152,87 @@ class ATESensitivityAnalyzer:
         )
 
 
+class CovariateBenchmarkJob(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    estimator_id: str
+    model: DoubleMLIRM | DoubleMLPLR
+    covariate: str
+    null_effect: float
+    level: float
+
+
+def covariate_benchmark_row(job: CovariateBenchmarkJob) -> dict[str, float | str]:
+    """One omitted-covariate refit. The bisection uses that refit's strengths."""
+    benchmark = job.model.sensitivity_benchmark(benchmarking_set=[job.covariate]).iloc[0]
+    treatment_strength = float(benchmark["cf_d"])
+    outcome_strength = float(benchmark["cf_y"])
+    return {
+        "estimator_id": job.estimator_id,
+        "covariate": job.covariate,
+        "benchmark_treatment_strength": treatment_strength,
+        "benchmark_outcome_strength": outcome_strength,
+        "benchmark_bias": float(benchmark["delta_theta"]),
+        "benchmark_multiple_to_null": confounding_multiple_to_null(
+            model=job.model,
+            treatment_strength=treatment_strength,
+            outcome_strength=outcome_strength,
+            null_effect=job.null_effect,
+            level=job.level,
+            bound=SENSITIVITY_POINT_BOUND,
+        ),
+        "benchmark_multiple_to_null_interval": confounding_multiple_to_null(
+            model=job.model,
+            treatment_strength=treatment_strength,
+            outcome_strength=outcome_strength,
+            null_effect=job.null_effect,
+            level=job.level,
+            bound=SENSITIVITY_INTERVAL_BOUND,
+        ),
+    }
+
+
+def benchmark_sensitivity_models(
+    models: list[tuple[str, DoubleMLIRM | DoubleMLPLR]],
+    null_effect: float,
+    level: float,
+    parallel: bool,
+) -> dict[str, pd.DataFrame]:
+    """Refit every covariate benchmark. One map covers every supplied model."""
+    jobs = [
+        CovariateBenchmarkJob(
+            estimator_id=estimator_id,
+            model=model,
+            covariate=covariate,
+            null_effect=null_effect,
+            level=level,
+        )
+        for estimator_id, model in models
+        for covariate in model._dml_data.x_cols
+    ]
+    rows = run_map(covariate_benchmark_row, jobs, parallel=parallel)
+    frames: dict[str, pd.DataFrame] = {}
+    for estimator_id, model in models:
+        columns = list(model._dml_data.x_cols)
+        owned = [row for row in rows if row["estimator_id"] == estimator_id]
+        frame = pd.DataFrame(owned).drop(columns=["estimator_id"])
+        frames[estimator_id] = frame.set_index("covariate").loc[columns].reset_index()
+    return frames
+
+
 def doubleml_covariate_benchmarks(
     model: DoubleMLIRM | DoubleMLPLR,
     null_effect: float,
     level: float,
+    parallel: bool,
 ) -> pd.DataFrame:
-    rows = []
-    for covariate in model._dml_data.x_cols:
-        benchmark = model.sensitivity_benchmark(benchmarking_set=[covariate]).iloc[0]
-        treatment_strength = float(benchmark["cf_d"])
-        outcome_strength = float(benchmark["cf_y"])
-        rows.append(
-            {
-                "covariate": covariate,
-                "benchmark_treatment_strength": treatment_strength,
-                "benchmark_outcome_strength": outcome_strength,
-                "benchmark_bias": float(benchmark["delta_theta"]),
-                "benchmark_multiple_to_null": confounding_multiple_to_null(
-                    model=model,
-                    treatment_strength=treatment_strength,
-                    outcome_strength=outcome_strength,
-                    null_effect=null_effect,
-                    level=level,
-                    bound=SENSITIVITY_POINT_BOUND,
-                ),
-                "benchmark_multiple_to_null_interval": confounding_multiple_to_null(
-                    model=model,
-                    treatment_strength=treatment_strength,
-                    outcome_strength=outcome_strength,
-                    null_effect=null_effect,
-                    level=level,
-                    bound=SENSITIVITY_INTERVAL_BOUND,
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
+    frames = benchmark_sensitivity_models(
+        models=[("", model)],
+        null_effect=null_effect,
+        level=level,
+        parallel=parallel,
+    )
+    return frames[""]
 
 
 def confounding_multiple_to_null(

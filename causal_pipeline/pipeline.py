@@ -7,13 +7,18 @@ import logging
 import shutil
 import warnings
 from collections.abc import Callable
+from enum import StrEnum
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pydantic import ConfigDict
+from sklearn.base import BaseEstimator
 
 from causal_pipeline.ate import (
     ATESensitivityAnalyzer,
     BaseATEEstimator,
+    benchmark_sensitivity_models,
     initialize_ate_estimator,
     estimator_supports_sensitivity,
 )
@@ -21,9 +26,12 @@ from causal_pipeline.cate import create_cate_estimator, ensure_cate_spec_support
 from causal_pipeline.config import (
     ATEEstimatorSpec,
     ATEKind,
+    ArbitraryTypesModel,
     CATEEstimatorSpec,
+    CATEKind,
     DEFAULT_LEARNER_RANDOM_STATE,
     DEFAULT_PROPENSITY_CLIP,
+    NuisanceScreenConfig,
     OutcomeType,
     PipelineConfig,
     PolicyKind,
@@ -35,7 +43,7 @@ from causal_pipeline.learner_defaults import (
 )
 from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
 from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
-from causal_pipeline.crossfit import cross_fit_predictions, dataset_groups
+from causal_pipeline.crossfit import cross_fit_predictions, cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
 from causal_pipeline.diagnostics import OverlapPreprocessor
 from causal_pipeline.imputed import (
@@ -76,6 +84,13 @@ from causal_pipeline.figures import (
 )
 from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
 from causal_pipeline.nuisance_screen import run_nuisance_screen
+from causal_pipeline.parallel import (
+    ALL_CORES_N_JOBS,
+    imputation_draws_are_parallel,
+    pool_workers,
+    run_map,
+    worker_library_jobs,
+)
 from causal_pipeline.policy import (
     POLICY_DATA_SPLIT_TEST,
     FittedPolicy,
@@ -127,6 +142,13 @@ DML_ATE_KINDS = frozenset(
         ATEKind.DML_APOS,
     }
 )
+IN_PROCESS_CATE_KINDS = frozenset(
+    {
+        CATEKind.TARNET,
+        CATEKind.CFRNET,
+        CATEKind.DRAGONNET,
+    }
+)
 
 R_EXTRA_INSTALL = 'pip install "medml[r]"'
 
@@ -146,13 +168,18 @@ def predict_cate_fold(
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
     tune_estimators: bool = False,
+    forest_n_jobs: int = ALL_CORES_N_JOBS,
 ) -> pd.DataFrame:
     fold_spec = resolve_cate_spec_for_outer_train(
         train=train,
         spec=spec,
         tune=tune_estimators,
     )
-    estimator = create_cate_estimator(spec=fold_spec, data=train)
+    estimator = create_cate_estimator(
+        spec=fold_spec,
+        data=train,
+        forest_n_jobs=forest_n_jobs,
+    )
     estimator.fit(data=train)
     if outcome_records is not None:
         predicted = estimator.factual_outcome(held_out)
@@ -171,6 +198,7 @@ def cate_fold_predictor(
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
     tune_estimators: bool = False,
+    forest_n_jobs: int = ALL_CORES_N_JOBS,
 ) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
     def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
         return predict_cate_fold(
@@ -179,9 +207,541 @@ def cate_fold_predictor(
             spec=spec,
             outcome_records=outcome_records,
             tune_estimators=tune_estimators,
+            forest_n_jobs=forest_n_jobs,
         )
 
     return predict_fold
+
+
+class IndependentFitKind(StrEnum):
+    SCREEN = "screen"
+    ATE = "ate"
+    CATE = "cate"
+    ROBUST_SCORES = "robust_scores"
+
+
+class ImputedDraw(ArbitraryTypesModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    config: PipelineConfig
+    df_included: pd.DataFrame
+    df_excluded: pd.DataFrame | None
+    results_root: str
+    parallel: bool
+
+
+class IndependentFit(ArbitraryTypesModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    kind: IndependentFitKind
+    results_root: Path
+    dataset: CausalDataset
+    estimator_id: str
+    ate_spec: ATEEstimatorSpec | None
+    cate_spec: CATEEstimatorSpec | None
+    tune_ate: bool
+    tune_cate: bool
+    cate_folds: int
+    split_random_state: int
+    forest_n_jobs: int
+    screen: NuisanceScreenConfig | None
+    propensity_learner: BaseEstimator | None
+    outcome_learners: tuple[BaseEstimator, ...]
+    evaluator: CATEEvaluator | None
+    held_out: CausalDataset | None = None
+    held_out_positions: np.ndarray | None = None
+
+
+class IndependentFitResult(ArbitraryTypesModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    kind: IndependentFitKind
+    estimator_id: str
+    ate_model: BaseATEEstimator | None
+    ate_estimate: pd.DataFrame | None
+    cate_predictions: pd.DataFrame | None
+    robust_scores: pd.DataFrame | None
+    held_out_positions: np.ndarray | None = None
+    outcome_observed: np.ndarray | None = None
+    outcome_predicted: np.ndarray | None = None
+    outcome_learner_name: str | None = None
+
+
+class HeldOutCATEJob(ArbitraryTypesModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    estimator_id: str
+    spec: CATEEstimatorSpec
+    estimation: CausalDataset
+    test: CausalDataset
+    tune: bool
+    forest_n_jobs: int
+
+
+def fit_imputed_draw(draw: ImputedDraw) -> CompletedAnalysis:
+    """Fit one completed imputation on its own results directory."""
+    logger.info("Fitting imputation draw under %s.", draw.results_root)
+    store = ResultStore(config=draw.config, root=Path(draw.results_root))
+    pipeline = CausalPipeline(config=draw.config, results=store)
+    return pipeline.run_completed(
+        df_included=draw.df_included,
+        df_excluded=draw.df_excluded,
+        results=store,
+        fit_policy=False,
+        fit_sensitivity=False,
+        write_unseen_bounds=False,
+        parallel=draw.parallel,
+    )
+
+
+def fit_ate_estimator(
+    estimator_id: str,
+    spec: ATEEstimatorSpec,
+    train: CausalDataset,
+    tune: bool,
+) -> BaseATEEstimator:
+    logger.info("Fitting ATE estimator %s.", estimator_id)
+    estimator = initialize_ate_estimator(spec=spec, data=train)
+    estimator.fit(train, tune_estimators=tune)
+    return estimator
+
+
+def cross_fit_one_cate(
+    estimation: CausalDataset,
+    estimator_id: str,
+    spec: CATEEstimatorSpec,
+    n_folds: int,
+    random_state: int,
+    tune: bool,
+    results_root: Path,
+    forest_n_jobs: int,
+) -> pd.DataFrame:
+    logger.info("Cross-fitting CATE estimator %s.", estimator_id)
+    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
+    binary_outcome = estimation.outcome_type == OutcomeType.BINARY
+    df_effects = cross_fit_predictions(
+        dataset=estimation,
+        n_folds=n_folds,
+        random_state=random_state,
+        predict_fold=cate_fold_predictor(
+            spec,
+            outcome_records,
+            tune_estimators=tune,
+            forest_n_jobs=forest_n_jobs,
+        ),
+    )
+    log_pooled_factual_outcome(
+        records=outcome_records,
+        role=f"CATE/{estimator_id} outcome",
+        binary_outcome=binary_outcome,
+        metric_prefix="OOF",
+    )
+    write_dataframe(
+        results_root / "cate" / estimator_id / "crossfit_predictions.parquet",
+        df_effects,
+    )
+    return df_effects
+
+
+def fit_held_out_cate(job: HeldOutCATEJob) -> tuple[str, pd.DataFrame]:
+    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
+    predictions = predict_cate_fold(
+        train=job.estimation,
+        held_out=job.test,
+        spec=job.spec,
+        outcome_records=outcome_records,
+        tune_estimators=job.tune,
+        forest_n_jobs=job.forest_n_jobs,
+    )
+    log_pooled_factual_outcome(
+        records=outcome_records,
+        role=f"CATE/{job.estimator_id} outcome",
+        binary_outcome=job.test.outcome_type == OutcomeType.BINARY,
+        metric_prefix="test",
+    )
+    return job.estimator_id, predictions
+
+
+def cate_map_width(spec: CATEEstimatorSpec, parallel: bool, n_folds: int) -> int:
+    """Fold count dispatched as separate tasks. Neural fits stay in one process."""
+    if spec.kind in IN_PROCESS_CATE_KINDS:
+        return 1
+    if pool_workers(parallel=parallel, n_tasks=n_folds) == 1:
+        return 1
+    return n_folds
+
+
+def fit_cate_fold_job(job: IndependentFit) -> IndependentFitResult:
+    if job.cate_spec is None or job.held_out is None or job.held_out_positions is None:
+        raise ValueError("A CATE fold is missing its spec or held-out rows.")
+    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
+    predictions = predict_cate_fold(
+        train=job.dataset,
+        held_out=job.held_out,
+        spec=job.cate_spec,
+        outcome_records=outcome_records,
+        tune_estimators=job.tune_cate,
+        forest_n_jobs=job.forest_n_jobs,
+    )
+    observed = None
+    predicted = None
+    learner_label = None
+    if outcome_records:
+        observed, predicted, logged_model = outcome_records[0]
+        learner_label = type(logged_model).__name__
+    return IndependentFitResult(
+        kind=job.kind,
+        estimator_id=job.estimator_id,
+        ate_model=None,
+        ate_estimate=None,
+        cate_predictions=predictions,
+        robust_scores=None,
+        held_out_positions=job.held_out_positions,
+        outcome_observed=observed,
+        outcome_predicted=predicted,
+        outcome_learner_name=learner_label,
+    )
+
+
+def execute_independent_fit(job: IndependentFit) -> IndependentFitResult:
+    if job.kind == IndependentFitKind.SCREEN:
+        if job.screen is None or job.propensity_learner is None:
+            raise ValueError("A nuisance screen fit is missing its learners.")
+        run_nuisance_screen(
+            dataset=job.dataset,
+            screen=job.screen,
+            results_root=job.results_root,
+            propensity_learner=job.propensity_learner,
+            outcome_learners=list(job.outcome_learners),
+        )
+        return IndependentFitResult(
+            kind=job.kind,
+            estimator_id=job.estimator_id,
+            ate_model=None,
+            ate_estimate=None,
+            cate_predictions=None,
+            robust_scores=None,
+        )
+    if job.kind == IndependentFitKind.ATE:
+        if job.ate_spec is None:
+            raise ValueError("An ATE fit is missing its spec.")
+        model = fit_ate_estimator(
+            estimator_id=job.estimator_id,
+            spec=job.ate_spec,
+            train=job.dataset,
+            tune=job.tune_ate,
+        )
+        df_estimate = attach_estimator_metadata(
+            model.estimate(),
+            estimator_id=job.estimator_id,
+            spec=job.ate_spec,
+        )
+        write_dataframe(job.results_root / "ate" / job.estimator_id / "estimate.csv", df_estimate)
+        return IndependentFitResult(
+            kind=job.kind,
+            estimator_id=job.estimator_id,
+            ate_model=model,
+            ate_estimate=df_estimate,
+            cate_predictions=None,
+            robust_scores=None,
+        )
+    if job.kind == IndependentFitKind.CATE:
+        if job.cate_spec is None:
+            raise ValueError("A CATE fit is missing its spec.")
+        if job.held_out is not None:
+            return fit_cate_fold_job(job)
+        predictions = cross_fit_one_cate(
+            estimation=job.dataset,
+            estimator_id=job.estimator_id,
+            spec=job.cate_spec,
+            n_folds=job.cate_folds,
+            random_state=job.split_random_state,
+            tune=job.tune_cate,
+            results_root=job.results_root,
+            forest_n_jobs=job.forest_n_jobs,
+        )
+        return IndependentFitResult(
+            kind=job.kind,
+            estimator_id=job.estimator_id,
+            ate_model=None,
+            ate_estimate=None,
+            cate_predictions=predictions,
+            robust_scores=None,
+        )
+    if job.kind != IndependentFitKind.ROBUST_SCORES:
+        raise ValueError(f"Unknown independent fit: {job.kind}.")
+    if job.evaluator is None:
+        raise ValueError("Robust-score cross-fitting is missing its evaluator.")
+    return IndependentFitResult(
+        kind=job.kind,
+        estimator_id=job.estimator_id,
+        ate_model=None,
+        ate_estimate=None,
+        cate_predictions=None,
+        robust_scores=job.evaluator.build_robust_scores(dataset=job.dataset),
+    )
+
+
+def cate_fit_job(
+    estimation: CausalDataset,
+    results_root: Path,
+    estimator_id: str,
+    spec: CATEEstimatorSpec,
+    tune_estimators: bool,
+    cate_folds: int,
+    split_random_state: int,
+    library_jobs: int,
+    held_out: CausalDataset | None,
+    held_out_positions: np.ndarray | None,
+) -> IndependentFit:
+    return IndependentFit(
+        kind=IndependentFitKind.CATE,
+        results_root=results_root,
+        dataset=estimation,
+        estimator_id=estimator_id,
+        ate_spec=None,
+        cate_spec=spec,
+        tune_ate=False,
+        tune_cate=tune_estimators,
+        cate_folds=cate_folds,
+        split_random_state=split_random_state,
+        forest_n_jobs=library_jobs,
+        screen=None,
+        propensity_learner=None,
+        outcome_learners=(),
+        evaluator=None,
+        held_out=held_out,
+        held_out_positions=held_out_positions,
+    )
+
+
+def independent_fit_jobs(
+    estimation: CausalDataset,
+    results_root: Path,
+    screen: NuisanceScreenConfig | None,
+    ate_runs: list[tuple[str, ATEEstimatorSpec]],
+    cate_runs: list[tuple[str, CATEEstimatorSpec]],
+    tune_estimators: bool,
+    cate_folds: int,
+    split_random_state: int,
+    evaluator: CATEEvaluator | None,
+    parallel: bool,
+) -> list[IndependentFit]:
+    fold_widths = [cate_map_width(spec=spec, parallel=parallel, n_folds=cate_folds) for _, spec in cate_runs]
+    n_tasks = len(ate_runs) + sum(fold_widths)
+    if screen is not None:
+        n_tasks += 1
+    if evaluator is not None:
+        n_tasks += 1
+    library_jobs = worker_library_jobs(parallel=parallel, n_tasks=n_tasks)
+    fold_splits = None
+    if any(width > 1 for width in fold_widths):
+        fold_splits = cross_fit_splits(
+            features=np.arange(len(estimation.df)),
+            treatment=estimation.treatment_series,
+            n_folds=cate_folds,
+            random_state=split_random_state,
+            groups=dataset_groups(estimation),
+        )
+    jobs: list[IndependentFit] = []
+    if screen is not None:
+        jobs.append(
+            IndependentFit(
+                kind=IndependentFitKind.SCREEN,
+                results_root=results_root,
+                dataset=estimation,
+                estimator_id="",
+                ate_spec=None,
+                cate_spec=None,
+                tune_ate=False,
+                tune_cate=False,
+                cate_folds=cate_folds,
+                split_random_state=split_random_state,
+                forest_n_jobs=library_jobs,
+                screen=screen,
+                propensity_learner=materialize_nuisance_screen_propensity(
+                    screen.propensity_learner,
+                    random_state=screen.random_state,
+                ),
+                outcome_learners=tuple(
+                    materialize_nuisance_screen_outcome_learners(
+                        screen.outcome_learner,
+                        outcome_type=estimation.outcome_type,
+                        random_state=screen.random_state,
+                    )
+                ),
+                evaluator=None,
+            )
+        )
+    for estimator_id, spec in ate_runs:
+        jobs.append(
+            IndependentFit(
+                kind=IndependentFitKind.ATE,
+                results_root=results_root,
+                dataset=estimation,
+                estimator_id=estimator_id,
+                ate_spec=spec,
+                cate_spec=None,
+                tune_ate=tune_estimators and spec.kind not in DML_ATE_KINDS,
+                tune_cate=False,
+                cate_folds=cate_folds,
+                split_random_state=split_random_state,
+                forest_n_jobs=library_jobs,
+                screen=None,
+                propensity_learner=None,
+                outcome_learners=(),
+                evaluator=None,
+            )
+        )
+    for (estimator_id, spec), width in zip(cate_runs, fold_widths, strict=True):
+        if width == 1 or fold_splits is None:
+            jobs.append(
+                cate_fit_job(
+                    estimation=estimation,
+                    results_root=results_root,
+                    estimator_id=estimator_id,
+                    spec=spec,
+                    tune_estimators=tune_estimators,
+                    cate_folds=cate_folds,
+                    split_random_state=split_random_state,
+                    library_jobs=library_jobs,
+                    held_out=None,
+                    held_out_positions=None,
+                )
+            )
+            continue
+        for train_positions, held_out_positions in fold_splits:
+            jobs.append(
+                cate_fit_job(
+                    estimation=estimation.subset(train_positions),
+                    results_root=results_root,
+                    estimator_id=estimator_id,
+                    spec=spec,
+                    tune_estimators=tune_estimators,
+                    cate_folds=cate_folds,
+                    split_random_state=split_random_state,
+                    library_jobs=library_jobs,
+                    held_out=estimation.subset(held_out_positions),
+                    held_out_positions=held_out_positions,
+                )
+            )
+    if evaluator is not None:
+        jobs.append(
+            IndependentFit(
+                kind=IndependentFitKind.ROBUST_SCORES,
+                results_root=results_root,
+                dataset=estimation,
+                estimator_id="",
+                ate_spec=None,
+                cate_spec=None,
+                tune_ate=False,
+                tune_cate=False,
+                cate_folds=cate_folds,
+                split_random_state=split_random_state,
+                forest_n_jobs=library_jobs,
+                screen=None,
+                propensity_learner=None,
+                outcome_learners=(),
+                evaluator=evaluator,
+            )
+        )
+    return jobs
+
+
+def collect_independent_fits(
+    pieces: list[IndependentFitResult],
+    row_count: int,
+    results_root: Path,
+    binary_outcome: bool,
+) -> tuple[
+    dict[str, BaseATEEstimator],
+    dict[str, pd.DataFrame],
+    dict[str, pd.DataFrame],
+    pd.DataFrame | None,
+]:
+    ate_models: dict[str, BaseATEEstimator] = {}
+    ate_by_estimator: dict[str, pd.DataFrame] = {}
+    cate_by_estimator: dict[str, pd.DataFrame] = {}
+    fold_pieces: dict[str, list[IndependentFitResult]] = {}
+    robust_scores = None
+    for piece in pieces:
+        if piece.kind == IndependentFitKind.ATE:
+            if piece.ate_model is None or piece.ate_estimate is None:
+                raise RuntimeError(f"ATE fit {piece.estimator_id} returned no estimate.")
+            ate_models[piece.estimator_id] = piece.ate_model
+            ate_by_estimator[piece.estimator_id] = piece.ate_estimate
+        elif piece.kind == IndependentFitKind.CATE and piece.held_out_positions is not None:
+            fold_pieces.setdefault(piece.estimator_id, []).append(piece)
+        elif piece.kind == IndependentFitKind.CATE:
+            if piece.cate_predictions is None:
+                raise RuntimeError(f"CATE fit {piece.estimator_id} returned no predictions.")
+            cate_by_estimator[piece.estimator_id] = piece.cate_predictions
+        elif piece.kind == IndependentFitKind.ROBUST_SCORES:
+            robust_scores = piece.robust_scores
+    for estimator_id, folds in fold_pieces.items():
+        if estimator_id in cate_by_estimator:
+            raise RuntimeError(f"CATE fit {estimator_id} returned both a full fit and fold fits.")
+        cate_by_estimator[estimator_id] = publish_cate_folds(
+            estimator_id=estimator_id,
+            folds=folds,
+            row_count=row_count,
+            results_root=results_root,
+            binary_outcome=binary_outcome,
+        )
+    return ate_models, ate_by_estimator, cate_by_estimator, robust_scores
+
+
+def publish_cate_folds(
+    estimator_id: str,
+    folds: list[IndependentFitResult],
+    row_count: int,
+    results_root: Path,
+    binary_outcome: bool,
+) -> pd.DataFrame:
+    predictions = combine_cate_folds(folds=folds, row_count=row_count)
+    outcome_records = [
+        (fold.outcome_observed, fold.outcome_predicted, fold.outcome_learner_name)
+        for fold in folds
+        if fold.outcome_observed is not None
+        and fold.outcome_predicted is not None
+        and fold.outcome_learner_name is not None
+    ]
+    log_pooled_factual_outcome(
+        records=outcome_records,
+        role=f"CATE/{estimator_id} outcome",
+        binary_outcome=binary_outcome,
+        metric_prefix="OOF",
+    )
+    write_dataframe(
+        results_root / "cate" / estimator_id / "crossfit_predictions.parquet",
+        predictions,
+    )
+    return predictions
+
+
+def combine_cate_folds(folds: list[IndependentFitResult], row_count: int) -> pd.DataFrame:
+    if not folds or folds[0].cate_predictions is None:
+        raise RuntimeError("CATE fold fits returned no predictions.")
+    combined = pd.DataFrame(
+        index=np.arange(row_count),
+        columns=list(folds[0].cate_predictions.columns),
+        dtype=float,
+    )
+    filled = np.zeros(row_count, dtype=bool)
+    for fold in folds:
+        if fold.cate_predictions is None or fold.held_out_positions is None:
+            raise RuntimeError("A CATE fold is missing predictions or positions.")
+        positions = np.asarray(fold.held_out_positions)
+        block = fold.cate_predictions.to_numpy()
+        if len(block) != len(positions):
+            raise ValueError("Fold prediction length does not match the held-out rows.")
+        combined_values = combined.to_numpy(copy=True)
+        combined_values[positions] = block
+        combined = pd.DataFrame(combined_values, index=combined.index, columns=combined.columns)
+        filled[positions] = True
+    if not filled.all():
+        raise RuntimeError("Cross-fitting left some rows without a prediction.")
+    return combined.reset_index(drop=True)
 
 
 def log_pooled_factual_outcome(
@@ -274,6 +834,7 @@ class CausalPipeline:
                 fit_policy=bool(self.config.policy),
                 fit_sensitivity=self.config.sensitivity is not None,
                 write_unseen_bounds=True,
+                parallel=self.config.parallel,
             )
 
     def run_imputed(self, df_included: pd.DataFrame, df_excluded: pd.DataFrame | None) -> None:
@@ -305,23 +866,22 @@ class CausalPipeline:
                 random_state=imputation.random_state + EXCLUDED_IMPUTATION_SEED_OFFSET,
                 imputer=self.imputer,
             )
-        completed_runs: list[CompletedAnalysis] = []
-        for draw_index, df_draw in enumerate(df_draws):
-            logger.info("Fitting imputation %s of %s.", draw_index + 1, imputation.datasets)
-            df_excluded_draw = None if df_excluded_draws is None else df_excluded_draws[draw_index]
-            completed_runs.append(
-                self.run_completed(
-                    df_included=df_draw,
-                    df_excluded=df_excluded_draw,
-                    results=ResultStore(
-                        config=self.config,
-                        root=self.results.root / "imputation" / str(draw_index),
-                    ),
-                    fit_policy=False,
-                    fit_sensitivity=False,
-                    write_unseen_bounds=False,
-                )
+        draw_parallel = imputation_draws_are_parallel(
+            parallel=self.config.parallel,
+            n_draws=len(df_draws),
+        )
+        inner_parallel = self.config.parallel and not draw_parallel
+        draws = [
+            ImputedDraw(
+                config=self.config,
+                df_included=df_draw,
+                df_excluded=None if df_excluded_draws is None else df_excluded_draws[draw_index],
+                results_root=str(self.results.root / "imputation" / str(draw_index)),
+                parallel=inner_parallel,
             )
+            for draw_index, df_draw in enumerate(df_draws)
+        ]
+        completed_runs = run_map(fit_imputed_draw, draws, parallel=draw_parallel)
         self.publish_imputed(completed_runs)
 
     def publish_imputed(self, completed_runs: list[CompletedAnalysis]) -> None:
@@ -405,6 +965,7 @@ class CausalPipeline:
         fit_policy: bool,
         fit_sensitivity: bool,
         write_unseen_bounds: bool,
+        parallel: bool,
     ) -> CompletedAnalysis:
         """Fit ATE, CATE, diagnostics, and the optional policy holdout on one complete sample.
 
@@ -421,40 +982,44 @@ class CausalPipeline:
         results.save_partitions(partitions)
         results.save_diagnostics(overlap_run.diagnostics)
         estimation = partitions.estimation
-        if self.config.nuisance_screen.enabled:
-            run_nuisance_screen(
-                dataset=estimation,
-                screen=self.config.nuisance_screen,
-                results_root=results.root,
-                propensity_learner=materialize_nuisance_screen_propensity(
-                    self.config.nuisance_screen.propensity_learner,
-                    random_state=self.config.nuisance_screen.random_state,
-                ),
-                outcome_learners=materialize_nuisance_screen_outcome_learners(
-                    self.config.nuisance_screen.outcome_learner,
-                    outcome_type=estimation.outcome_type,
-                    random_state=self.config.nuisance_screen.random_state,
-                ),
-            )
-
         ate_runs = assign_estimator_ids(self.config.ate_estimators or [])
         cate_runs = assign_estimator_ids(self.config.cate_estimators or [])
         ate_spec_by_id = dict(ate_runs)
         cate_spec_by_id = dict(cate_runs)
-
-        ate_models = self.fit_ate_estimators(train=estimation, ate_runs=ate_runs)
-        ate_by_estimator = self.estimate_ate_models(
-            ate_models=ate_models,
-            spec_by_id=ate_spec_by_id,
-            results=results,
+        score_cate = self.evaluator is not None and (bool(cate_runs) or fit_policy)
+        jobs = independent_fit_jobs(
+            estimation=estimation,
+            results_root=results.root,
+            screen=self.config.nuisance_screen if self.config.nuisance_screen.enabled else None,
+            ate_runs=ate_runs,
+            cate_runs=cate_runs,
+            tune_estimators=self.config.tune_estimators,
+            cate_folds=self.config.cate_crossfit_folds,
+            split_random_state=self.config.split.random_state,
+            evaluator=self.evaluator if score_cate else None,
+            parallel=parallel,
         )
+        pieces = run_map(execute_independent_fit, jobs, parallel=parallel)
+        ate_models, ate_by_estimator, cate_by_estimator, estimation_scores = collect_independent_fits(
+            pieces=pieces,
+            row_count=len(estimation.df),
+            results_root=results.root,
+            binary_outcome=estimation.outcome_type == OutcomeType.BINARY,
+        )
+        if ate_by_estimator:
+            results.write_dataframe(
+                "ate/summary.csv",
+                pd.concat(list(ate_by_estimator.values()), ignore_index=True),
+            )
         df_subgroups = self.write_subgroup_splits(
             estimation=estimation,
             ate_models=ate_models,
             results=results,
         )
         sensitivity_summaries = (
-            self.run_ate_sensitivity(ate_models=ate_models, results=results) if fit_sensitivity else {}
+            self.run_ate_sensitivity(ate_models=ate_models, results=results, parallel=parallel)
+            if fit_sensitivity
+            else {}
         )
         df_transport = self.run_selection_analyses(
             estimation=estimation,
@@ -464,7 +1029,6 @@ class CausalPipeline:
             results=results,
         )
 
-        cate_by_estimator = self.cross_fit_cate_predictions(estimation, cate_runs, results)
         mean_cate_by_estimator = {
             estimator_id: mean_cate_table(df_predictions)
             for estimator_id, df_predictions in cate_by_estimator.items()
@@ -480,9 +1044,6 @@ class CausalPipeline:
             )
 
         cate_evaluation: dict[str, list[ContrastEvaluation]] = {}
-        estimation_scores = None
-        if self.evaluator is not None and (cate_by_estimator or fit_policy):
-            estimation_scores = self.evaluator.build_robust_scores(dataset=estimation)
         if self.evaluator is not None and cate_by_estimator and estimation_scores is not None:
             cate_evaluation = self.evaluator.evaluate_cate_models(
                 predictions=cate_by_estimator,
@@ -507,13 +1068,18 @@ class CausalPipeline:
                 predictions=cate_by_estimator,
                 robust_scores=estimation_scores,
             )
-            df_test_scores = self.evaluator.build_robust_scores(dataset=partitions.test)
+            df_test_scores = self.evaluator.build_test_validation_scores(
+                estimation=estimation,
+                test=partitions.test,
+                signal=self.config.test_validation_signal,
+            )
             held_out_evaluation = self.evaluate_held_out_cate(
                 estimation=estimation,
                 test=partitions.test,
                 df_test_scores=df_test_scores,
                 cate_runs=cate_runs,
                 results=results,
+                parallel=parallel,
             )
             df_policy = self.policy_service.evaluate_policies(
                 policies=policies,
@@ -662,14 +1228,15 @@ class CausalPipeline:
         train: CausalDataset,
         ate_runs: list[tuple[str, ATEEstimatorSpec]],
     ) -> dict[str, BaseATEEstimator]:
-        models: dict[str, BaseATEEstimator] = {}
-        for estimator_id, spec in ate_runs:
-            logger.info("Fitting ATE estimator %s.", estimator_id)
-            estimator = initialize_ate_estimator(spec=spec, data=train)
-            tune = self.config.tune_estimators and spec.kind not in DML_ATE_KINDS
-            estimator.fit(train, tune_estimators=tune)
-            models[estimator_id] = estimator
-        return models
+        return {
+            estimator_id: fit_ate_estimator(
+                estimator_id=estimator_id,
+                spec=spec,
+                train=train,
+                tune=self.config.tune_estimators and spec.kind not in DML_ATE_KINDS,
+            )
+            for estimator_id, spec in ate_runs
+        }
 
     def estimate_ate_models(
         self,
@@ -725,33 +1292,49 @@ class CausalPipeline:
         self,
         ate_models: dict[str, BaseATEEstimator],
         results: ResultStore,
+        parallel: bool,
     ) -> dict[str, pd.DataFrame]:
         summaries: dict[str, pd.DataFrame] = {}
         if self.config.sensitivity is not None and ate_models:
             if self.sensitivity_analyzer is None:
                 raise RuntimeError("Sensitivity is configured but no sensitivity analyzer is available.")
             analyzer = self.sensitivity_analyzer
+            supported: list[tuple[str, BaseATEEstimator]] = []
             for estimator_id, model in ate_models.items():
-                if not estimator_supports_sensitivity(model):
+                if estimator_supports_sensitivity(model):
+                    supported.append((estimator_id, model))
+                else:
                     logger.info(
                         "Skipping sensitivity for %s. DoubleML score bounds are the supported analysis.",
                         estimator_id,
                     )
                     self.clear_sensitivity_output(estimator_id, results)
+            fitted_models = [
+                (estimator_id, model.model)
+                for estimator_id, model in supported
+                if model.model is not None
+            ]
+            benchmark_frames = benchmark_sensitivity_models(
+                models=fitted_models,
+                null_effect=self.config.sensitivity.null_effect,
+                level=self.config.sensitivity.confidence_level,
+                parallel=parallel,
+            )
+            for estimator_id, model in supported:
+                logger.info("Running sensitivity analysis for %s.", estimator_id)
+                result = analyzer.analyze(
+                    estimator=model,
+                    estimator_id=estimator_id,
+                    results_root=str(results.root),
+                    benchmarks=benchmark_frames[estimator_id],
+                )
+                if result is None:
+                    self.clear_sensitivity_output(estimator_id, results)
                 else:
-                    logger.info("Running sensitivity analysis for %s.", estimator_id)
-                    result = analyzer.analyze(
-                        estimator=model,
-                        estimator_id=estimator_id,
-                        results_root=str(results.root),
-                    )
-                    if result is None:
-                        self.clear_sensitivity_output(estimator_id, results)
-                    else:
-                        sensitivity_dir = results.ate_dir(estimator_id) / "sensitivity"
-                        write_dataframe(sensitivity_dir / "summary.csv", result.summary)
-                        write_dataframe(sensitivity_dir / "benchmarks.csv", result.benchmarks)
-                        summaries[estimator_id] = result.summary
+                    sensitivity_dir = results.ate_dir(estimator_id) / "sensitivity"
+                    write_dataframe(sensitivity_dir / "summary.csv", result.summary)
+                    write_dataframe(sensitivity_dir / "benchmarks.csv", result.benchmarks)
+                    summaries[estimator_id] = result.summary
         return summaries
 
     def clear_sensitivity_output(self, estimator_id: str, results: ResultStore) -> None:
@@ -765,33 +1348,27 @@ class CausalPipeline:
         estimation: CausalDataset,
         cate_runs: list[tuple[str, CATEEstimatorSpec]],
         results: ResultStore,
+        parallel: bool,
     ) -> dict[str, pd.DataFrame]:
-        predictions: dict[str, pd.DataFrame] = {}
-        binary_outcome = estimation.outcome_type == OutcomeType.BINARY
-        for estimator_id, spec in cate_runs:
-            logger.info("Cross-fitting CATE estimator %s.", estimator_id)
-            outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
-            df_effects = cross_fit_predictions(
-                dataset=estimation,
-                n_folds=self.config.cate_crossfit_folds,
-                random_state=self.config.split.random_state,
-                predict_fold=cate_fold_predictor(
-                    spec,
-                    outcome_records,
-                    tune_estimators=self.config.tune_estimators,
-                ),
-            )
-            log_pooled_factual_outcome(
-                records=outcome_records,
-                role=f"CATE/{estimator_id} outcome",
-                binary_outcome=binary_outcome,
-                metric_prefix="OOF",
-            )
-            predictions[estimator_id] = df_effects
-            write_dataframe(
-                results.cate_dir(estimator_id) / "crossfit_predictions.parquet",
-                df_effects,
-            )
+        jobs = independent_fit_jobs(
+            estimation=estimation,
+            results_root=results.root,
+            screen=None,
+            ate_runs=[],
+            cate_runs=cate_runs,
+            tune_estimators=self.config.tune_estimators,
+            cate_folds=self.config.cate_crossfit_folds,
+            split_random_state=self.config.split.random_state,
+            evaluator=None,
+            parallel=parallel,
+        )
+        pieces = run_map(execute_independent_fit, jobs, parallel=parallel)
+        _, _, predictions, _ = collect_independent_fits(
+            pieces=pieces,
+            row_count=len(estimation.df),
+            results_root=results.root,
+            binary_outcome=estimation.outcome_type == OutcomeType.BINARY,
+        )
         return predictions
 
     def evaluate_held_out_cate(
@@ -801,27 +1378,28 @@ class CausalPipeline:
         df_test_scores: pd.DataFrame,
         cate_runs: list[tuple[str, CATEEstimatorSpec]],
         results: ResultStore,
+        parallel: bool,
     ) -> dict[str, list[ContrastEvaluation]]:
         """Score CATE models fit on the estimation sample against test-set robust scores."""
         evaluation: dict[str, list[ContrastEvaluation]] = {}
         if self.evaluator is not None and cate_runs:
-            binary_outcome = test.outcome_type == OutcomeType.BINARY
-            predictions = {}
-            for estimator_id, spec in cate_runs:
-                outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
-                predictions[estimator_id] = predict_cate_fold(
-                    train=estimation,
-                    held_out=test,
-                    spec=spec,
-                    outcome_records=outcome_records,
-                    tune_estimators=self.config.tune_estimators,
-                )
-                log_pooled_factual_outcome(
-                    records=outcome_records,
-                    role=f"CATE/{estimator_id} outcome",
-                    binary_outcome=binary_outcome,
-                    metric_prefix="test",
-                )
+            library_jobs = worker_library_jobs(parallel=parallel, n_tasks=len(cate_runs))
+            fitted = run_map(
+                fit_held_out_cate,
+                [
+                    HeldOutCATEJob(
+                        estimator_id=estimator_id,
+                        spec=spec,
+                        estimation=estimation,
+                        test=test,
+                        tune=self.config.tune_estimators,
+                        forest_n_jobs=library_jobs,
+                    )
+                    for estimator_id, spec in cate_runs
+                ],
+                parallel=parallel,
+            )
+            predictions = dict(fitted)
             evaluation = self.evaluator.evaluate_cate_models(
                 predictions=predictions,
                 robust_scores=df_test_scores,

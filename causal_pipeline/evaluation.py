@@ -10,11 +10,14 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.stats import norm
+from sklearn.base import BaseEstimator
 
 from causal_pipeline.config import (
     CATEEvaluationConfig,
+    JsonValue,
     OutcomeFavorability,
     OutcomeType,
+    TestValidationSignal,
     predict_outcome_mean,
 )
 from causal_pipeline.policy import reward_direction
@@ -33,6 +36,21 @@ from causal_pipeline.figures import (
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+def contrast_scores_from_arms(
+    gamma_by_arm: dict[JsonValue, np.ndarray],
+    dataset: CausalDataset,
+) -> pd.DataFrame:
+    control = dataset.control_value
+    treated = [value for value in dataset.treatment_values if value != control]
+    columns = contrast_columns(control, dataset.treatment_values)
+    return pd.DataFrame(
+        {
+            name: gamma_by_arm[arm] - gamma_by_arm[control]
+            for name, arm in zip(columns, treated, strict=True)
+        }
+    )
 
 RATE_WEIGHTING_AUTOC = "autoc"
 RATE_WEIGHTING_QINI = "qini"
@@ -241,13 +259,91 @@ class CATEEvaluator:
     def build_robust_scores(self, dataset: CausalDataset) -> pd.DataFrame:
         return self.build_multi_arm_robust_scores(dataset)
 
+    def build_test_validation_scores(
+        self,
+        estimation: CausalDataset,
+        test: CausalDataset,
+        signal: TestValidationSignal,
+    ) -> pd.DataFrame:
+        """Scores for held-out policy value and CATE calibration.
+
+        Cross-fit training scores are left untouched. Estimation-full-fit learns the
+        nuisances on every estimation row, then inserts the test treatment and outcome.
+        Test-fit cross-fits those nuisances inside the test set.
+        """
+        if signal == TestValidationSignal.TEST_FIT:
+            return self.build_robust_scores(dataset=test)
+        propensity_template, outcome_template = materialize_evaluation_learners(
+            self.evaluation,
+            outcome_type=estimation.outcome_type,
+        )
+        contrasts, propensity, outcomes = self.doubly_robust_contrasts(
+            train=estimation,
+            score_rows=test,
+            propensity_template=propensity_template,
+            outcome_template=outcome_template,
+        )
+        log_crossfit_nuisances(
+            scope="CATE/test validation DR",
+            treatment=test.treatment_series,
+            outcome=test.outcome_series,
+            propensity=propensity,
+            propensity_learner=propensity_template,
+            potential_outcomes=outcomes,
+            outcome_learner=outcome_template,
+            binary_outcome=test.outcome_type == OutcomeType.BINARY,
+        )
+        return contrasts
+
+    def doubly_robust_contrasts(
+        self,
+        train: CausalDataset,
+        score_rows: CausalDataset,
+        propensity_template: BaseEstimator,
+        outcome_template: BaseEstimator,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Fit arm nuisances on train and return contrast scores on score_rows."""
+        clip_min, clip_max = self.evaluation.propensity_clip
+        levels = train.treatment_values
+        train_covariates = train.X_adjustment.copy()
+        score_covariates = score_rows.X_adjustment.copy()
+        train_outcome = train.outcome_series.to_numpy(dtype=float)
+        train_treatment = train.treatment_series
+        score_outcome = score_rows.outcome_series.to_numpy(dtype=float)
+        score_treatment = score_rows.treatment_series.to_numpy()
+        propensity_learner = clone_scaled_estimator(propensity_template)
+        propensity_learner.fit(train_covariates, train_treatment)
+        propensity = pd.DataFrame(
+            propensity_learner.predict_proba(score_covariates),
+            columns=list(propensity_learner.classes_),
+        )
+        outcomes = pd.DataFrame(index=score_covariates.index, columns=levels, dtype=float)
+        gamma_by_arm: dict[JsonValue, np.ndarray] = {}
+        for arm in levels:
+            outcome_learner = clone_scaled_estimator(outcome_template)
+            arm_mask = train_treatment.to_numpy() == arm
+            outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
+            outcome_mean = predict_outcome_mean(outcome_learner, score_covariates)
+            outcomes[arm] = outcome_mean
+            arm_propensity = np.clip(probability_of_arm(propensity, arm), clip_min, clip_max)
+            observed = score_treatment == arm
+            gamma_by_arm[arm] = (
+                outcome_mean + observed * (score_outcome - outcome_mean) / arm_propensity
+            )
+        aligned_propensity = propensity.reindex(columns=levels)
+        aligned_propensity.index = score_covariates.index
+        return (
+            contrast_scores_from_arms(gamma_by_arm, train),
+            aligned_propensity,
+            outcomes,
+        )
+
     def build_multi_arm_robust_scores(self, dataset: CausalDataset) -> pd.DataFrame:
         covariates = dataset.X_adjustment.copy()
         treatment = dataset.treatment_series
-        outcome_values = dataset.outcome_series.to_numpy(dtype=float)
         levels = dataset.treatment_values
-        clip_min, clip_max = self.evaluation.propensity_clip
-        gamma_by_arm = {level: np.zeros(len(outcome_values)) for level in levels}
+        contrast_names = contrast_columns(dataset.control_value, levels)
+        contrast_values = {name: np.zeros(len(dataset.df)) for name in contrast_names}
         oof_propensity = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         oof_outcomes = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         propensity_template, outcome_template = materialize_evaluation_learners(
@@ -262,31 +358,16 @@ class CATEEvaluator:
             random_state=self.evaluation.random_state,
             groups=dataset_groups(dataset),
         ):
-            train_covariates = covariates.iloc[train_idx].copy()
-            test_covariates = covariates.iloc[test_idx].copy()
-            train_outcome = outcome_values[train_idx]
-            train_treatment = treatment.iloc[train_idx]
-            propensity_learner = clone_scaled_estimator(propensity_template)
-            propensity_learner.fit(train_covariates, train_treatment)
-            propensity = pd.DataFrame(
-                propensity_learner.predict_proba(test_covariates),
-                columns=list(propensity_learner.classes_),
+            contrasts, propensity, outcomes = self.doubly_robust_contrasts(
+                train=dataset.subset(train_idx),
+                score_rows=dataset.subset(test_idx),
+                propensity_template=propensity_template,
+                outcome_template=outcome_template,
             )
-            aligned_propensity = propensity.reindex(columns=levels)
-            oof_propensity.iloc[test_idx] = aligned_propensity.to_numpy()
-            for arm in levels:
-                outcome_learner = clone_scaled_estimator(outcome_template)
-                arm_mask = train_treatment.to_numpy() == arm
-                outcome_learner.fit(train_covariates.iloc[arm_mask].copy(), train_outcome[arm_mask])
-                outcome_mean = predict_outcome_mean(outcome_learner, test_covariates)
-                arm_column = oof_outcomes.columns.get_loc(arm)
-                oof_outcomes.iloc[test_idx, arm_column] = outcome_mean
-                arm_propensity = np.clip(probability_of_arm(propensity, arm), clip_min, clip_max)
-                observed = treatment.iloc[test_idx].to_numpy() == arm
-                gamma_by_arm[arm][test_idx] = (
-                    outcome_mean
-                    + observed * (outcome_values[test_idx] - outcome_mean) / arm_propensity
-                )
+            oof_propensity.iloc[test_idx] = propensity.to_numpy()
+            oof_outcomes.iloc[test_idx] = outcomes.to_numpy()
+            for name in contrast_names:
+                contrast_values[name][test_idx] = contrasts[name].to_numpy()
 
         log_crossfit_nuisances(
             scope="CATE/evaluation DR",
@@ -298,15 +379,7 @@ class CATEEvaluator:
             outcome_learner=outcome_template,
             binary_outcome=dataset.outcome_type == OutcomeType.BINARY,
         )
-        control = dataset.control_value
-        contrasts = {}
-        for column, arm in zip(
-            contrast_columns(control, levels),
-            [value for value in levels if value != control],
-            strict=True,
-        ):
-            contrasts[column] = gamma_by_arm[arm] - gamma_by_arm[control]
-        return pd.DataFrame(contrasts)
+        return pd.DataFrame(contrast_values)
 
     def evaluate_cate_models(
         self,

@@ -7,7 +7,15 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from causal_pipeline.config import CATEEvaluationConfig, OutcomeFavorability
+from causal_pipeline.config import (
+    CATEEvaluationConfig,
+    DataConfig,
+    OutcomeFavorability,
+    OutcomeType,
+    TestValidationSignal,
+    TreatmentMode,
+)
+from causal_pipeline.data import CausalDataset
 from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.evaluation import (
     CATEEvaluator,
@@ -341,3 +349,67 @@ def test_prioritization_matches_the_oracle_ranking(
                 )
             ),
         )
+
+
+def test_estimation_full_fit_scores_test_outcomes_from_estimation_nuisances() -> None:
+    generator = np.random.default_rng(0)
+    estimation_treatment = np.tile([0, 1], 20)
+    test_treatment = np.array([0, 0, 1, 1])
+    estimation_covariate = generator.normal(size=len(estimation_treatment))
+    test_covariate = generator.normal(size=len(test_treatment))
+    estimation_outcome = estimation_covariate + estimation_treatment + generator.normal(scale=0.1, size=40)
+    test_outcome = test_covariate + test_treatment
+    data = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=["x"],
+        effect_modifiers=["x"],
+        outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.BINARY,
+        control_value=0,
+        treatment_values=[0, 1],
+    )
+    estimation = CausalDataset(
+        data=data,
+        df=pd.DataFrame({"y": estimation_outcome, "t": estimation_treatment, "x": estimation_covariate}),
+    )
+    test = CausalDataset(
+        data=data,
+        df=pd.DataFrame({"y": test_outcome, "t": test_treatment, "x": test_covariate}),
+    )
+    evaluator = CATEEvaluator(
+        evaluation=CATEEvaluationConfig(
+            propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+            outcome_learner=LinearRegression(),
+            dr_crossfit_folds=5,
+            random_state=0,
+        )
+    )
+    scores = evaluator.build_test_validation_scores(
+        estimation=estimation,
+        test=test,
+        signal=TestValidationSignal.ESTIMATION_FULL_FIT,
+    )
+    changed_outcome = test_outcome.copy()
+    changed_outcome[2] += 1.0
+    changed_test = CausalDataset(
+        data=data,
+        df=pd.DataFrame({"y": changed_outcome, "t": test_treatment, "x": test_covariate}),
+    )
+    changed_scores = evaluator.build_test_validation_scores(
+        estimation=estimation,
+        test=changed_test,
+        signal=TestValidationSignal.ESTIMATION_FULL_FIT,
+    )
+    with pytest.raises(ValueError):
+        evaluator.build_test_validation_scores(
+            estimation=estimation,
+            test=test,
+            signal=TestValidationSignal.TEST_FIT,
+        )
+
+    assert scores.shape == (len(test_treatment), 1)
+    assert list(scores.columns) == ["1_vs_0"]
+    difference = changed_scores.iloc[:, 0].to_numpy() - scores.iloc[:, 0].to_numpy()
+    assert np.flatnonzero(np.abs(difference) > 1e-8).tolist() == [2]
+    assert difference[2] > 1.0

@@ -75,6 +75,13 @@ class PolicySearchMode(StrEnum):
     CAPITAL = "capital"
 
 
+class TestValidationSignal(StrEnum):
+    """Doubly robust scores used only to score a held-out test set."""
+
+    ESTIMATION_FULL_FIT = "estimation_full_fit"
+    TEST_FIT = "test_fit"
+
+
 DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
 
 
@@ -117,6 +124,7 @@ DEFAULT_NUISANCE_SCREEN_VALIDATION_FRACTION: Fraction = 0.25
 DEFAULT_COLUMN_DROP_REPEATS: PositiveInt = 5
 DEFAULT_COLUMN_DROP_TOP_FEATURES: PositiveInt = 20
 DEFAULT_TUNE_ESTIMATORS: bool = False
+DEFAULT_PARALLEL: bool = False
 MINIMUM_IMPUTATION_DATASETS: int = 2
 DEFAULT_IMPUTATION_DATASETS: PositiveInt = 20
 DEFAULT_IMPUTATION_ITERATIONS: PositiveInt = 5
@@ -475,6 +483,7 @@ class PipelineConfig(BaseModel):
     cate_estimators: list[CATEEstimatorSpec] | None = None
     sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig | None = None
+    test_validation_signal: TestValidationSignal = TestValidationSignal.ESTIMATION_FULL_FIT
     policy: list[PolicyMethodSpec] | None = None
     cate_crossfit_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     policy_bootstrap_samples: PositiveInt = DEFAULT_POLICY_BOOTSTRAP_SAMPLES
@@ -483,6 +492,7 @@ class PipelineConfig(BaseModel):
     nuisance_screen: NuisanceScreenConfig = Field(default_factory=NuisanceScreenConfig)
     imputation: ImputationConfig = Field(default_factory=ImputationConfig)
     tune_estimators: bool = DEFAULT_TUNE_ESTIMATORS
+    parallel: bool = DEFAULT_PARALLEL
 
     @model_validator(mode="after")
     def validate_pipeline_contract(self) -> PipelineConfig:

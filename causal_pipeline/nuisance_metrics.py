@@ -49,7 +49,9 @@ def factual_potential_outcome(
     return potential_outcomes.to_numpy()[row_index, column_index]
 
 
-def learner_name(learner: BaseEstimator) -> str:
+def learner_name(learner: object) -> str:
+    if isinstance(learner, str):
+        return learner
     return type(learner).__name__
 
 

@@ -38,4 +38,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "integration: end-to-end pipeline tests",
+    "slow: process-parallel runtime comparisons",
 ]

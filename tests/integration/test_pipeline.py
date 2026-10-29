@@ -7,13 +7,17 @@ import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from xgboost import XGBClassifier, XGBRegressor
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER, DEFAULT_XGBOOST_MAX_DEPTH
+from causal_pipeline.parallel import available_cores
 
 from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
+    CATEEstimatorSpec,
     CATEKind,
+    CausalForestCATEEstimatorSpec,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
     OverlapConfig,
@@ -21,11 +25,13 @@ from causal_pipeline.config import (
     DoubleMLATEEstimatorSpec,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
+    OutcomeType,
     PipelineConfig,
     PolicyKind,
     PolicyTreeMethodSpec,
     SensitivityConfig,
     SplitConfig,
+    TreatmentMode,
 )
 from causal_pipeline.pipeline import CausalPipeline
 from causal_pipeline.utils import read_dataframe
@@ -34,11 +40,21 @@ INTEGRATION_FOLDS = 2
 INTEGRATION_BOOTSTRAP_SAMPLES = 8
 INTEGRATION_TEST_FRACTION = 0.25
 INTEGRATION_ATE_TOLERANCE = 0.05
+INTEGRATION_LEARNER_OBSERVATIONS = 800
+INTEGRATION_BOOST_TREES = 20
 INTEGRATION_ATE_KINDS = [
     ATEKind.IPW,
     ATEKind.AIPW,
     ATEKind.DML_IRM,
     ATEKind.DML_PLR,
+]
+INTEGRATION_CATE_KINDS = [
+    CATEKind.S_LEARNER,
+    CATEKind.T_LEARNER,
+    CATEKind.X_LEARNER,
+    CATEKind.R_LEARNER,
+    CATEKind.DR_LEARNER,
+    CATEKind.CAUSAL_FOREST,
 ]
 
 
@@ -155,7 +171,7 @@ def test_pipeline_recovers_constant_effect(
         policy_table = read_dataframe(policy_summary)
         assert policy_table.shape[0] >= 1
         assert policy_table["effect_estimate"].notna().all()
-        assert set(policy_table["data_split"]) == {"train", "test"}
+        assert set(policy_table["data_split"]) == {"test"}
         assert policy_table["rule"].str.startswith("leaf_").sum() == 0
         slice_dirs = list((test_output_dir / "policy" / "slices").glob("*"))
         assert slice_dirs
@@ -209,3 +225,143 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
     assert (test_output_dir / "ate" / dml_id / "sensitivity" / "contour.html").is_file()
     assert (test_output_dir / "ate" / dml_id / "sensitivity" / "contour.csv").is_file()
     assert (test_output_dir / "ate" / dml_id / "selection" / "unseen.csv").is_file()
+
+
+def integration_cohort(outcome_type: OutcomeType) -> tuple[pd.DataFrame, DataConfig]:
+    generator = np.random.default_rng(DEFAULT_SPLIT_RANDOM_STATE)
+    covariate_one = generator.normal(size=INTEGRATION_LEARNER_OBSERVATIONS)
+    covariate_two = generator.normal(size=INTEGRATION_LEARNER_OBSERVATIONS)
+    propensity = 1.0 / (1.0 + np.exp(-(0.5 * covariate_one - 0.4 * covariate_two)))
+    treatment = generator.binomial(1, propensity)
+    if outcome_type == OutcomeType.BINARY:
+        outcome_probability = 1.0 / (1.0 + np.exp(-(0.4 * covariate_one + treatment)))
+        outcome = generator.binomial(1, outcome_probability)
+    else:
+        outcome = 1.5 * treatment + 0.8 * covariate_one + generator.normal(
+            scale=0.5,
+            size=INTEGRATION_LEARNER_OBSERVATIONS,
+        )
+    frame = pd.DataFrame({"y": outcome, "t": treatment, "x1": covariate_one, "x2": covariate_two})
+    config = DataConfig(
+        outcome="y",
+        treatment="t",
+        confounders=["x1", "x2"],
+        effect_modifiers=["x1"],
+        outcome_type=outcome_type,
+        treatment_mode=TreatmentMode.BINARY,
+        control_value=0,
+        treatment_values=[0, 1],
+    )
+    return frame, config
+
+
+def integration_cate_spec(
+    kind: CATEKind,
+    outcome_learner: BaseEstimator,
+    effect_learner: BaseEstimator,
+    propensity_learner: BaseEstimator,
+) -> CATEEstimatorSpec:
+    if kind == CATEKind.CAUSAL_FOREST:
+        return CausalForestCATEEstimatorSpec(
+            kind=kind,
+            alias=kind.value,
+            outcome_learner=outcome_learner,
+            propensity_learner=propensity_learner,
+        )
+    return MetaCATEEstimatorSpec(
+        kind=kind,
+        alias=kind.value,
+        outcome_learner=outcome_learner,
+        effect_learner=effect_learner,
+        propensity_learner=propensity_learner,
+        n_folds=INTEGRATION_FOLDS,
+        random_state=DEFAULT_SPLIT_RANDOM_STATE,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("outcome_type", [OutcomeType.CONTINUOUS, OutcomeType.BINARY])
+@pytest.mark.parametrize("cate_kind", INTEGRATION_CATE_KINDS)
+def test_pipeline_fits_each_learner_end_to_end(
+    cate_kind: CATEKind,
+    outcome_type: OutcomeType,
+    parallel: bool,
+    test_output_dir: Path,
+) -> None:
+    if parallel and available_cores() < 2:
+        pytest.skip("Process parallelism needs at least two cores.")
+    frame, data_config = integration_cohort(outcome_type)
+    propensity_learner = XGBClassifier(
+        n_estimators=INTEGRATION_BOOST_TREES,
+        max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
+        n_jobs=1,
+        random_state=DEFAULT_SPLIT_RANDOM_STATE,
+        eval_metric="logloss",
+    )
+    effect_learner = XGBRegressor(
+        n_estimators=INTEGRATION_BOOST_TREES,
+        max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
+        n_jobs=1,
+        random_state=DEFAULT_SPLIT_RANDOM_STATE + 1,
+    )
+    if outcome_type == OutcomeType.BINARY:
+        outcome_learner = XGBClassifier(
+            n_estimators=INTEGRATION_BOOST_TREES,
+            max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
+            n_jobs=1,
+            random_state=DEFAULT_SPLIT_RANDOM_STATE + 2,
+            eval_metric="logloss",
+        )
+    else:
+        outcome_learner = XGBRegressor(
+            n_estimators=INTEGRATION_BOOST_TREES,
+            max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
+            n_jobs=1,
+            random_state=DEFAULT_SPLIT_RANDOM_STATE + 2,
+        )
+    config = PipelineConfig(
+        data=data_config,
+        split=SplitConfig(test_fraction=0.0, random_state=DEFAULT_SPLIT_RANDOM_STATE),
+        overlap=OverlapConfig(propensity_learner=propensity_learner, n_folds=INTEGRATION_FOLDS),
+        ate_estimators=[
+            IPWATEEstimatorSpec(
+                kind=ATEKind.IPW,
+                alias="ipw",
+                propensity_learner=propensity_learner,
+                n_folds=INTEGRATION_FOLDS,
+            )
+        ],
+        cate_estimators=[
+            integration_cate_spec(
+                kind=cate_kind,
+                outcome_learner=outcome_learner,
+                effect_learner=effect_learner,
+                propensity_learner=propensity_learner,
+            )
+        ],
+        cate_evaluation=CATEEvaluationConfig(
+            propensity_learner=propensity_learner,
+            outcome_learner=outcome_learner,
+            dr_crossfit_folds=INTEGRATION_FOLDS,
+            rate_bootstrap_samples=INTEGRATION_BOOTSTRAP_SAMPLES,
+            eceth_bootstrap_samples=INTEGRATION_BOOTSTRAP_SAMPLES,
+        ),
+        cate_crossfit_folds=INTEGRATION_FOLDS,
+        parallel=parallel,
+        results_dir=str(test_output_dir),
+    )
+    CausalPipeline(config=config).run(df_input=frame)
+
+    ate_summary = read_dataframe(test_output_dir / "summary" / "ate_estimators.csv")
+    cate_summary = read_dataframe(test_output_dir / "summary" / "cate_estimators.csv")
+    assert ate_summary.shape[0] == 1
+    assert cate_summary.shape[0] == 1
+    assert list(ate_summary["estimator_kind"]) == [ATEKind.IPW.value]
+    assert list(cate_summary["estimator_kind"]) == [cate_kind.value]
+    assert np.isfinite(ate_summary["estimate"]).all()
+    assert np.isfinite(cate_summary["mean_crossfit_cate"]).all()
+    assert (test_output_dir / "diagnostics" / "propensity_overlap.csv").is_file()
+    assert (test_output_dir / "data" / "estimation.parquet").is_file()
+    assert (test_output_dir / "cate" / cate_kind.value / "crossfit_predictions.parquet").is_file()
+    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "toc.csv").is_file()

@@ -73,6 +73,7 @@ def run_nuisance_screen(
     outcome_learners: list[BaseEstimator],
 ) -> None:
     """Fit configured nuisances on an internal split of the estimation sample."""
+    logger.info("Running nuisance learner screens...")
     root = results_root / "nuisance_screen"
     covariates = dataset.X_adjustment.copy()
     treatment = dataset.treatment_series.copy()
@@ -124,6 +125,7 @@ def run_nuisance_screen(
             destination=root / "outcome" / directory_name,
         )
     logger.info("Wrote nuisance screens under %s", root)
+    logger.info("...Finished nuisance learner screens")
 
 
 def learner_directory_name(learner: BaseEstimator, used: set[str] | None = None) -> str:

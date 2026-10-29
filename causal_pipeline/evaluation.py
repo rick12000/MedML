@@ -229,7 +229,7 @@ def save_joint_cate_figures(
             save_path=str(calibration_path),
         )
         write_calibration_curve_data(calibration_path, calibration_by_contrast[contrast])
-        logger.info("Saved joint CATE figures for %s.", contrast)
+        logger.info("Saved joint CATE figures for %s", contrast)
 
 
 class ContrastEvaluation(BaseModel):
@@ -339,6 +339,10 @@ class CATEEvaluator:
         )
 
     def build_multi_arm_robust_scores(self, dataset: CausalDataset) -> pd.DataFrame:
+        logger.info(
+            "Cross-fitting doubly robust CATE scores (%s folds)...",
+            self.evaluation.dr_crossfit_folds,
+        )
         covariates = dataset.X_adjustment.copy()
         treatment = dataset.treatment_series
         levels = dataset.treatment_values
@@ -351,13 +355,21 @@ class CATEEvaluator:
             outcome_type=dataset.outcome_type,
         )
 
-        for train_idx, test_idx in cross_fit_splits(
-            features=covariates,
-            treatment=treatment,
-            n_folds=self.evaluation.dr_crossfit_folds,
-            random_state=self.evaluation.random_state,
-            groups=dataset_groups(dataset),
-        ):
+        splits = list(
+            cross_fit_splits(
+                features=covariates,
+                treatment=treatment,
+                n_folds=self.evaluation.dr_crossfit_folds,
+                random_state=self.evaluation.random_state,
+                groups=dataset_groups(dataset),
+            )
+        )
+        for fold_index, (train_idx, test_idx) in enumerate(splits, start=1):
+            logger.debug(
+                "Doubly robust score fold %s/%s",
+                fold_index,
+                len(splits),
+            )
             contrasts, propensity, outcomes = self.doubly_robust_contrasts(
                 train=dataset.subset(train_idx),
                 score_rows=dataset.subset(test_idx),
@@ -379,6 +391,7 @@ class CATEEvaluator:
             outcome_learner=outcome_template,
             binary_outcome=dataset.outcome_type == OutcomeType.BINARY,
         )
+        logger.info("...Finished cross-fitting doubly robust CATE scores")
         return pd.DataFrame(contrast_values)
 
     def evaluate_cate_models(
@@ -390,6 +403,12 @@ class CATEEvaluator:
         outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER,
         groups: np.ndarray | pd.Series | None = None,
     ) -> dict[str, list[ContrastEvaluation]]:
+        label = "held-out" if held_out else "estimation"
+        logger.info(
+            "Evaluating CATE models on the %s sample (%s estimators)...",
+            label,
+            len(predictions),
+        )
         direction = reward_direction(outcome_favorability)
         results: dict[str, list[ContrastEvaluation]] = {}
         ranking_by_contrast: dict[str, list[RankingSeries]] = {}
@@ -496,6 +515,7 @@ class CATEEvaluator:
             results_root=results_root,
             held_out=held_out,
         )
+        logger.info("...Finished evaluating CATE models on the %s sample", label)
         return results
 
 

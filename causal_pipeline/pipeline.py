@@ -110,6 +110,7 @@ from causal_pipeline.selection import (
 )
 from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
 from causal_pipeline.subgroup_figures import SUBGROUP_SPLITS_FIGURE_NAME, plot_subgroup_splits_table
+from causal_pipeline.logging_config import configure_package_runtime
 from causal_pipeline.utils import read_dataframe, write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -280,10 +281,10 @@ class HeldOutCATEJob(ArbitraryTypesModel):
 
 def fit_imputed_draw(draw: ImputedDraw) -> CompletedAnalysis:
     """Fit one completed imputation on its own results directory."""
-    logger.info("Fitting imputation draw under %s.", draw.results_root)
+    logger.info("Fitting imputation draw under %s...", draw.results_root)
     store = ResultStore(config=draw.config, root=Path(draw.results_root))
     pipeline = CausalPipeline(config=draw.config, results=store)
-    return pipeline.run_completed(
+    completed = pipeline.run_completed(
         df_included=draw.df_included,
         df_excluded=draw.df_excluded,
         results=store,
@@ -292,6 +293,8 @@ def fit_imputed_draw(draw: ImputedDraw) -> CompletedAnalysis:
         write_unseen_bounds=False,
         parallel=draw.parallel,
     )
+    logger.info("...Finished imputation draw under %s", draw.results_root)
+    return completed
 
 
 def fit_ate_estimator(
@@ -300,9 +303,20 @@ def fit_ate_estimator(
     train: CausalDataset,
     tune: bool,
 ) -> BaseATEEstimator:
-    logger.info("Fitting ATE estimator %s.", estimator_id)
+    logger.info("Fitting ATE estimator %s...", estimator_id)
+    logger.debug(
+        "ATE sample: %s rows, %s columns.",
+        len(train.df),
+        train.X_adjustment.shape[1],
+    )
+    logger.debug(
+        "Treatment balance (%s): %s.",
+        train.treatment,
+        train.treatment_series.value_counts().to_dict(),
+    )
     estimator = initialize_ate_estimator(spec=spec, data=train)
     estimator.fit(train, tune_estimators=tune)
+    logger.info("...Finished fitting ATE estimator %s", estimator_id)
     return estimator
 
 
@@ -316,7 +330,7 @@ def cross_fit_one_cate(
     results_root: Path,
     forest_n_jobs: int,
 ) -> pd.DataFrame:
-    logger.info("Cross-fitting CATE estimator %s.", estimator_id)
+    logger.info("Cross-fitting CATE estimator %s...", estimator_id)
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
     binary_outcome = estimation.outcome_type == OutcomeType.BINARY
     df_effects = cross_fit_predictions(
@@ -340,10 +354,12 @@ def cross_fit_one_cate(
         results_root / "cate" / estimator_id / "crossfit_predictions.parquet",
         df_effects,
     )
+    logger.info("...Finished cross-fitting CATE estimator %s", estimator_id)
     return df_effects
 
 
 def fit_held_out_cate(job: HeldOutCATEJob) -> tuple[str, pd.DataFrame]:
+    logger.info("Fitting held-out CATE predictions for %s...", job.estimator_id)
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
     predictions = predict_cate_fold(
         train=job.estimation,
@@ -359,6 +375,7 @@ def fit_held_out_cate(job: HeldOutCATEJob) -> tuple[str, pd.DataFrame]:
         binary_outcome=job.test.outcome_type == OutcomeType.BINARY,
         metric_prefix="test",
     )
+    logger.info("...Finished held-out CATE predictions for %s", job.estimator_id)
     return job.estimator_id, predictions
 
 
@@ -812,7 +829,9 @@ class CausalPipeline:
         estimates at the results root. Policy trees, omitted-variable sensitivity,
         and unit-level conditional effect intervals are omitted from that pooled output.
         """
-        logger.info("Starting causal pipeline run.")
+        configure_package_runtime()
+        logger.info("Starting causal pipeline run...")
+        logger.debug("Input cohort: %s rows, %s columns.", len(df_input), df_input.shape[1])
         sensitivity = self.config.sensitivity
         if sensitivity is not None and sensitivity.selection_column is not None:
             require_selection_observed(frame=df_input, column=sensitivity.selection_column)
@@ -836,11 +855,17 @@ class CausalPipeline:
                 write_unseen_bounds=True,
                 parallel=self.config.parallel,
             )
+        logger.info("...Finished causal pipeline run")
 
     def run_imputed(self, df_included: pd.DataFrame, df_excluded: pd.DataFrame | None) -> None:
         """Impute covariates, fit each completed draw, then pool at the results root."""
         imputation = self.config.imputation
         covariates = covariate_columns(self.config.data)
+        logger.info(
+            "Imputing %s covariate draws (%s iterations each)...",
+            imputation.datasets,
+            imputation.iterations,
+        )
         self.results.write_dataframe(
             "imputation/missingness.csv",
             missingness_report(frame=df_included, covariates=covariates),
@@ -882,7 +907,10 @@ class CausalPipeline:
             for draw_index, df_draw in enumerate(df_draws)
         ]
         completed_runs = run_map(fit_imputed_draw, draws, parallel=draw_parallel)
+        logger.info("...Finished fitting %s imputation draws", len(draws))
+        logger.info("Pooling imputation draws at the results root...")
         self.publish_imputed(completed_runs)
+        logger.info("...Finished pooling imputation draws")
 
     def publish_imputed(self, completed_runs: list[CompletedAnalysis]) -> None:
         """Write pooled estimates at the results root. Per-draw files stay under imputation/<m>."""
@@ -955,7 +983,11 @@ class CausalPipeline:
             cate_summary=df_cate_summary,
             results=self.results,
         )
-        logger.info("Pooled %s imputations into %s.", len(completed_runs), self.results.root)
+        logger.info(
+            "Pooled %s imputations into %s",
+            len(completed_runs),
+            self.results.root,
+        )
 
     def run_completed(
         self,
@@ -972,7 +1004,19 @@ class CausalPipeline:
         `results` is the directory for this draw. The canonical store on the pipeline
         stays pointed at the results root, including while an imputation draw is fit.
         """
+        configure_package_runtime()
+        logger.info("Fitting analysis on results under %s...", results.root)
         dataset = CausalDataset(data=self.config.data, df=df_included)
+        logger.debug(
+            "Analysis sample: %s rows, %s columns.",
+            len(dataset.df),
+            dataset.X_adjustment.shape[1],
+        )
+        logger.debug(
+            "Treatment balance (%s): %s.",
+            dataset.treatment,
+            dataset.treatment_series.value_counts().to_dict(),
+        )
         partitions = self.splitter.split(dataset, self.config, hold_out=fit_policy)
         overlap_run = self.overlap.run(
             partitions=partitions,
@@ -999,6 +1043,7 @@ class CausalPipeline:
             evaluator=self.evaluator if score_cate else None,
             parallel=parallel,
         )
+        logger.debug("Dispatching %s independent fit jobs", len(jobs))
         pieces = run_map(execute_independent_fit, jobs, parallel=parallel)
         ate_models, ate_by_estimator, cate_by_estimator, estimation_scores = collect_independent_fits(
             pieces=pieces,
@@ -1117,7 +1162,7 @@ class CausalPipeline:
             cate_summary=df_cate_summary,
             results=results,
         )
-        logger.info("Causal pipeline run completed.")
+        logger.info("...Finished analysis on results under %s", results.root)
         group_name = estimation.group_id
         return CompletedAnalysis(
             ate_by_estimator=ate_by_estimator,
@@ -1145,7 +1190,7 @@ class CausalPipeline:
                 blocked_columns=blocked,
             )
             logger.info(
-                "Restricted the analysis to %s included patients and held out %s excluded patients.",
+                "Restricted the analysis to %s included patients and held out %s excluded patients",
                 len(df_included),
                 len(df_excluded),
             )
@@ -1269,7 +1314,10 @@ class CausalPipeline:
         splits = available_subgroup_splits(estimation.df.columns, configured or [])
         df_subgroups = None
         if configured and splits:
-            logger.info("Estimating pre-specified subgroup splits for %s cutoffs.", len(splits))
+            logger.info(
+                "Estimating pre-specified subgroup splits (%s cutoffs)...",
+                len(splits),
+            )
             df_tables = [
                 subgroup_split_table(
                     dataset=estimation,
@@ -1286,6 +1334,7 @@ class CausalPipeline:
                 split_order=[(split.column, split.cutoff) for split in splits],
                 save_path=str(results.root / "ate" / SUBGROUP_SPLITS_FIGURE_NAME),
             )
+            logger.info("...Finished estimating pre-specified subgroup splits")
         return df_subgroups
 
     def run_ate_sensitivity(
@@ -1305,7 +1354,7 @@ class CausalPipeline:
                     supported.append((estimator_id, model))
                 else:
                     logger.info(
-                        "Skipping sensitivity for %s. DoubleML score bounds are the supported analysis.",
+                        "Skipping sensitivity for %s (DoubleML score bounds are the supported analysis)",
                         estimator_id,
                     )
                     self.clear_sensitivity_output(estimator_id, results)
@@ -1321,7 +1370,6 @@ class CausalPipeline:
                 parallel=parallel,
             )
             for estimator_id, model in supported:
-                logger.info("Running sensitivity analysis for %s.", estimator_id)
                 result = analyzer.analyze(
                     estimator=model,
                     estimator_id=estimator_id,

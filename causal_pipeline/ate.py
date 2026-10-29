@@ -1102,8 +1102,7 @@ class ATESensitivityAnalyzer:
                 benchmarks,
             )
         logger.info(
-            "Skipping omitted-variable sensitivity for %s. "
-            "The bound is reported only for cross-fit DoubleML scores.",
+            "Skipping omitted-variable sensitivity for %s (DoubleML score bounds are the supported analysis)",
             estimator_id,
         )
         return None
@@ -1116,6 +1115,7 @@ class ATESensitivityAnalyzer:
         sensitivity_config: SensitivityConfig,
         benchmarks: pd.DataFrame,
     ) -> SensitivityResult:
+        logger.info("Running DoubleML sensitivity analysis for %s...", estimator_id)
         model.sensitivity_analysis(
             level=sensitivity_config.confidence_level,
             null_hypothesis=sensitivity_config.null_effect,
@@ -1145,11 +1145,13 @@ class ATESensitivityAnalyzer:
                 "benchmark_multiple_to_null_interval": [best["benchmark_multiple_to_null_interval"]],
             }
         )
-        return SensitivityResult(
+        result = SensitivityResult(
             summary=summary,
             benchmarks=benchmarks,
             contour_path=contour_path,
         )
+        logger.info("...Finished DoubleML sensitivity analysis for %s", estimator_id)
+        return result
 
 
 class CovariateBenchmarkJob(BaseModel):
@@ -1199,6 +1201,7 @@ def benchmark_sensitivity_models(
     parallel: bool,
 ) -> dict[str, pd.DataFrame]:
     """Refit every covariate benchmark. One map covers every supplied model."""
+    logger.debug("Computing sensitivity benchmarks for %s model(s)", len(models))
     jobs = [
         CovariateBenchmarkJob(
             estimator_id=estimator_id,

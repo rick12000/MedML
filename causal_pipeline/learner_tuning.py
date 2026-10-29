@@ -245,9 +245,11 @@ def run_study(
     objective: Callable[[optuna.Trial], float],
     random_state: int,
 ) -> dict[str, object]:
+    logger.debug("Running hyperparameter search (%s trials)", TUNING_N_TRIALS)
     sampler = make_tuning_sampler(random_state=random_state)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=TUNING_N_TRIALS, show_progress_bar=False)
+    logger.debug("Finished hyperparameter search")
     return study.best_params
 
 

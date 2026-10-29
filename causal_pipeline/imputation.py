@@ -222,7 +222,7 @@ def miceforest_impute(
     """Chained lightgbm imputation. Complete treatment and outcome stay predictors."""
     targets = [column for column in covariates if frame[column].isna().any()]
     if not targets:
-        logger.info("Covariates are complete. Each imputation repeats the observed sample.")
+        logger.info("Covariates are complete; each imputation repeats the observed sample")
         return [frame.copy() for _dataset in range(datasets)]
     if importlib.util.find_spec("miceforest") is None:
         raise ImportError(
@@ -232,6 +232,16 @@ def miceforest_impute(
 
     model_columns = list(dict.fromkeys([*covariates, *predictors]))
     model_frame = frame.loc[:, model_columns].copy()
+    logger.info(
+        "Imputing %s datasets with miceforest (%s iterations)...",
+        datasets,
+        iterations,
+    )
+    logger.debug(
+        "Imputation model frame: %s rows, %s columns.",
+        len(model_frame),
+        len(model_columns),
+    )
     for column in predictors:
         if column not in model_frame.columns:
             continue
@@ -252,6 +262,7 @@ def miceforest_impute(
         filled = frame.copy()
         filled.loc[:, covariates] = completed_model.loc[:, covariates]
         completed_frames.append(filled)
+    logger.info("...Finished imputing %s datasets with miceforest", datasets)
     return completed_frames
 
 

@@ -141,6 +141,10 @@ def transport_included_effects(
     propensity_clip: tuple[float, float],
 ) -> pd.DataFrame:
     """Transport each arm-versus-control effect onto the excluded covariate distribution."""
+    logger.info(
+        "Transporting included effects onto %s excluded patients...",
+        len(excluded_covariates),
+    )
     if len(excluded_covariates) == 0:
         raise ValueError("Transport needs at least one excluded patient with covariates.")
     require_classifier(sampling_learner, "sampling_learner")
@@ -203,7 +207,8 @@ def transport_included_effects(
                 "inverse_odds": inverse_odds,
             }
         )
-    logger.info("Transported %s contrasts onto %s excluded patients.", len(rows), len(excluded))
+    logger.info("Transported %s contrasts onto %s excluded patients", len(rows), len(excluded))
+    logger.info("...Finished transporting included effects onto excluded patients")
     return pd.DataFrame(rows)
 
 

@@ -174,12 +174,22 @@ class DataSplitter:
     ) -> DataPartitions:
         use_holdout = bool(config.policy) if hold_out is None else hold_out
         if not use_holdout:
-            logger.info("Using the full sample for cross-fit estimation.")
+            logger.info("Using the full sample for cross-fit estimation")
+            logger.debug(
+                "Estimation sample: %s rows, %s columns.",
+                len(dataset.df),
+                dataset.X_adjustment.shape[1],
+            )
+            logger.debug(
+                "Treatment balance (%s): %s.",
+                dataset.treatment,
+                dataset.treatment_series.value_counts().to_dict(),
+            )
             return DataPartitions(
                 estimation=CausalDataset(data=dataset.data, df=dataset.df.copy()),
             )
 
-        logger.info("Holding out a test set for policy evaluation.")
+        logger.info("Holding out a test set for policy evaluation...")
         estimation_frame, test_frame = self.hold_out_test(
             df=dataset.df,
             group_id=dataset.group_id,
@@ -189,6 +199,17 @@ class DataSplitter:
             random_state=config.split.random_state,
             minimum_groups=minimum_groups_for_crossfit(config),
         )
+        logger.debug(
+            "Estimation sample: %s rows, %s columns.",
+            len(estimation_frame),
+            estimation_frame.shape[1],
+        )
+        logger.debug(
+            "Held-out test sample: %s rows, %s columns.",
+            len(test_frame),
+            test_frame.shape[1],
+        )
+        logger.info("...Finished holding out the test set")
         return DataPartitions(
             estimation=CausalDataset(data=dataset.data, df=estimation_frame),
             test=CausalDataset(data=dataset.data, df=test_frame),

@@ -184,7 +184,7 @@ def debias_qualifying_subgroup(
             }
         )
         logger.info(
-            "Virtual twins debiasing for %s used %s replicates. Bias %.4f.",
+            "Virtual twins debiasing for %s used %s replicates (bias %.4f)",
             contrast,
             len(optimism),
             bias,

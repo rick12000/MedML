@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import numpy as np
@@ -25,6 +26,8 @@ TMLE_GLM_MAX_ITER = 100
 SIMPLEX_PROJECTION_ITERATIONS = 20
 SIMPLEX_SUM_TOLERANCE = 1e-10
 VARIANCE_PROPENSITY_TREATED_AS_KNOWN = "propensity_treated_as_known"
+
+logger = logging.getLogger(__name__)
 
 
 def normal_interval_from_scores(
@@ -95,13 +98,22 @@ def cross_fit_predictions(
     """Predict every row from a model fit on the other folds."""
     positions = np.arange(len(dataset.df))
     combined: pd.DataFrame | None = None
-    for train_positions, held_out_positions in cross_fit_splits(
-        features=positions,
-        treatment=dataset.treatment_series,
-        n_folds=n_folds,
-        random_state=random_state,
-        groups=dataset_groups(dataset),
-    ):
+    splits = list(
+        cross_fit_splits(
+            features=positions,
+            treatment=dataset.treatment_series,
+            n_folds=n_folds,
+            random_state=random_state,
+            groups=dataset_groups(dataset),
+        )
+    )
+    for fold_index, (train_positions, held_out_positions) in enumerate(splits, start=1):
+        logger.debug(
+            "Cross-fit fold %s/%s (%s held-out rows)",
+            fold_index,
+            len(splits),
+            len(held_out_positions),
+        )
         prediction = predict_fold(
             dataset.subset(train_positions),
             dataset.subset(held_out_positions),
@@ -147,18 +159,28 @@ def cross_fit_nuisances(
     tune_estimators: bool = False,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     """Out-of-fold potential outcomes and propensity, columns aligned to treatment_values."""
+    scope_label = log_scope or "nuisances"
     propensity = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
     outcome_predictions = None
     if outcome_learner is not None:
         outcome_predictions = pd.DataFrame(np.nan, index=covariates.index, columns=treatment_values)
 
-    for train_index, test_index in cross_fit_splits(
-        features=covariates,
-        treatment=treatment,
-        n_folds=n_folds,
-        random_state=random_state,
-        groups=groups,
-    ):
+    splits = list(
+        cross_fit_splits(
+            features=covariates,
+            treatment=treatment,
+            n_folds=n_folds,
+            random_state=random_state,
+            groups=groups,
+        )
+    )
+    for fold_index, (train_index, test_index) in enumerate(splits, start=1):
+        logger.debug(
+            "Cross-fit nuisance fold %s/%s for %s",
+            fold_index,
+            len(splits),
+            scope_label,
+        )
         X_train = covariates.iloc[train_index]
         X_test = covariates.iloc[test_index]
         treatment_train = treatment.iloc[train_index]

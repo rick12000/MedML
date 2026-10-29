@@ -109,6 +109,7 @@ class PolicyService:
         predictions: dict[str, pd.DataFrame],
         robust_scores: pd.DataFrame | None = None,
     ) -> list[FittedPolicy]:
+        logger.info("Fitting %s policy method(s)...", len(self.methods))
         X_mod = estimation.X_effect_modifiers.copy()
         policies: list[FittedPolicy] = []
 
@@ -152,6 +153,7 @@ class PolicyService:
             elif method.kind == PolicyKind.MOB:
                 policies.append(self.fit_mob(spec=method, dataset=estimation))
 
+        logger.info("...Finished fitting %s policy model(s)", len(policies))
         return policies
 
     def fit_standard_policy_tree(
@@ -162,7 +164,7 @@ class PolicyService:
         X_mod: pd.DataFrame,
         robust_scores: pd.DataFrame | None,
     ) -> FittedPolicy:
-        logger.info("Fitting standard PolicyTree for %s.", estimator_id)
+        logger.info("Fitting standard PolicyTree for %s...", estimator_id)
         if robust_scores is None:
             raise ValueError("The policy tree reward is the cross-fit doubly robust score.")
         reward = reward_matrix(
@@ -180,13 +182,15 @@ class PolicyService:
             source_cate_model=estimator_id,
             dataset=dataset,
         )
-        return FittedPolicy(
+        fitted = FittedPolicy(
             method="policy_tree",
             source_cate_model=estimator_id,
             model=tree,
             rules=rules,
             feature_names=list(X_mod.columns),
         )
+        logger.info("...Finished fitting standard PolicyTree for %s", estimator_id)
+        return fitted
 
     def fit_exact_policy_tree(
         self,
@@ -196,7 +200,7 @@ class PolicyService:
         X_mod: pd.DataFrame,
         predictions: pd.DataFrame,
     ) -> FittedPolicy:
-        logger.info("Fitting exact %s policy tree for %s.", spec.mode.value, estimator_id)
+        logger.info("Fitting exact %s policy tree for %s...", spec.mode.value, estimator_id)
         control_action = dataset.treatment_values.index(dataset.control_value)
         direction = reward_direction(dataset.data.outcome_favorability)
         if spec.mode == PolicySearchMode.CAPITAL:
@@ -235,7 +239,7 @@ class PolicyService:
         if excluded:
             logger.info(
                 "Exact policy tree for %s: fitting on %s patient(s), excluding %s with "
-                "non-finite CATE rewards outside the overlap region.",
+                "non-finite CATE rewards outside the overlap region",
                 estimator_id,
                 int(overlap_rows.sum()),
                 excluded,
@@ -252,20 +256,26 @@ class PolicyService:
             source_cate_model=estimator_id,
             dataset=dataset,
         )
-        return FittedPolicy(
+        fitted = FittedPolicy(
             method=method_name(spec.mode),
             source_cate_model=estimator_id,
             model=tree,
             rules=rules,
             feature_names=list(X_mod.columns),
         )
+        logger.info(
+            "...Finished fitting exact %s policy tree for %s",
+            spec.mode.value,
+            estimator_id,
+        )
+        return fitted
 
     def fit_dr_policy_tree(
         self,
         spec: DRPolicyTreeMethodSpec,
         dataset: CausalDataset,
     ) -> FittedPolicy:
-        logger.info("Fitting DRPolicyTree.")
+        logger.info("Fitting DRPolicyTree...")
         levels = control_first_arms(dataset.treatment_values, dataset.control_value)
         outcome_learner, propensity_learner = materialize_dr_policy_learners(
             spec,
@@ -298,13 +308,15 @@ class PolicyService:
             dataset=dataset,
             action_levels=levels,
         )
-        return FittedPolicy(
+        fitted = FittedPolicy(
             method="dr_policy_tree",
             source_cate_model=None,
             model=tree,
             rules=rules,
             feature_names=list(dataset.X_effect_modifiers.columns),
         )
+        logger.info("...Finished fitting DRPolicyTree")
+        return fitted
 
     def fit_virtual_twins(
         self,
@@ -315,7 +327,7 @@ class PolicyService:
         effects: pd.DataFrame,
         robust_scores: pd.DataFrame | None,
     ) -> FittedPolicy:
-        logger.info("Fitting virtual twins for %s.", estimator_id)
+        logger.info("Fitting virtual twins for %s...", estimator_id)
         tree = clone_estimator(spec.tree)
         if not isinstance(tree, DecisionTreeRegressor):
             raise TypeError("Virtual twins require a regression tree.")
@@ -340,16 +352,18 @@ class PolicyService:
             source_cate_model=estimator_id,
             dataset=dataset,
         )
-        return FittedPolicy(
+        fitted = FittedPolicy(
             method=VIRTUAL_TWINS_METHOD,
             source_cate_model=estimator_id,
             model=twins.model,
             rules=rules,
             feature_names=list(X_mod.columns),
         )
+        logger.info("...Finished fitting virtual twins for %s", estimator_id)
+        return fitted
 
     def fit_mob(self, spec: MOBMethodSpec, dataset: CausalDataset) -> FittedPolicy:
-        logger.info("Fitting MOB via partykit (%s).", spec.kind.value)
+        logger.info("Fitting MOB via partykit (%s)...", spec.kind.value)
         try:
             import rpy2.robjects as ro
             from rpy2.robjects import pandas2ri
@@ -392,13 +406,15 @@ class PolicyService:
             dataset=dataset,
             direction=reward_direction(dataset.data.outcome_favorability),
         )
-        return FittedPolicy(
+        fitted = FittedPolicy(
             method="mob",
             source_cate_model=None,
             model=ro.r["mob_fit"],
             rules=rules,
             feature_names=list(dataset.X_effect_modifiers.columns),
         )
+        logger.info("...Finished fitting MOB via partykit (%s)", spec.kind.value)
+        return fitted
 
     def extract_policy_tree_rules(
         self,

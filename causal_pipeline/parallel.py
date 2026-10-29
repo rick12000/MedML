@@ -15,6 +15,8 @@ from typing import TypeVar
 
 from joblib.externals.loky import get_reusable_executor
 
+from causal_pipeline.logging_config import configure_package_runtime
+
 logger = logging.getLogger(__name__)
 
 MINIMUM_PARALLEL_TASKS: int = 2
@@ -69,18 +71,24 @@ def imputation_draws_are_parallel(parallel: bool, n_draws: int) -> bool:
 
 
 def run_map(function: Callable[[Job], Result], items: Sequence[Job], parallel: bool) -> list[Result]:
+    configure_package_runtime()
+
+    def run_item(item: Job) -> Result:
+        configure_package_runtime()
+        return function(item)
+
     workers = pool_workers(parallel=parallel, n_tasks=len(items))
     if workers == 1:
-        return [function(item) for item in items]
-    # One pool sized to the machine. Shrinking it between calls would restart
-    # the workers and pay interpreter startup again.
-    logger.info("Running %s independent fits on %s workers.", len(items), workers)
+        return [run_item(item) for item in items]
+    logger.info("Running %s independent fits on %s workers...", len(items), workers)
     executor = get_reusable_executor(
         max_workers=available_cores(),
         timeout=WORKER_POOL_TIMEOUT_SECONDS,
         env=WORKER_THREAD_ENV,
     )
-    return list(executor.map(function, items))
+    results = list(executor.map(run_item, items))
+    logger.info("...Finished %s independent fits on %s workers", len(items), workers)
+    return results
 
 
 def load_parallel_worker(worker_index: int) -> int:

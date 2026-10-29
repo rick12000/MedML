@@ -92,7 +92,7 @@ class OverlapPreprocessor:
         partitions: DataPartitions,
         results_root: str | None = None,
     ) -> OverlapRun:
-        logger.info("Cross-fitting the overlap propensity on the pooled analysis sample.")
+        logger.info("Running overlap preprocessing on the pooled analysis sample...")
         pooled = stack_partitions(partitions)
         propensity_learner = materialize_overlap_propensity(self.overlap)
         _, propensity = cross_fit_nuisances(
@@ -161,6 +161,7 @@ class OverlapPreprocessor:
                 ),
             )
         counts = overlap_counts(before=partitions, after=reduced)
+        logger.info("...Finished overlap preprocessing")
         return OverlapRun(
             partitions=reduced,
             diagnostics=DiagnosticResult(
@@ -202,7 +203,7 @@ def trim_partitions(
     if test is not None:
         require_overlap_sample(test, 1, "test")
     logger.info(
-        "Trimmed the overlap sample from %s to %s estimation rows.",
+        "Trimmed the overlap sample from %s to %s estimation rows",
         len(partitions.estimation.df),
         len(estimation.df),
     )

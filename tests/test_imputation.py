@@ -198,8 +198,13 @@ def test_imputed_pipeline_pools_the_ate_and_skips_policy(
     expected_tipping = -INCLUSION_FRACTION / (1.0 - INCLUSION_FRACTION) * pooled_effect
     assert unseen.loc[0, "tipping_point"] == pytest.approx(expected_tipping)
     subgroup = read_dataframe(test_output_dir / "ate" / "subgroup_splits.csv")
-    assert len(subgroup) == 1
-    assert subgroup.loc[0, "imputations"] == IMPUTATION_COUNT
+    assert len(subgroup) == 2
+    total = subgroup.loc[subgroup["cutoff"].isna()].iloc[0]
+    summary = read_dataframe(test_output_dir / "ate" / "summary.csv")
+    assert total["effect_difference"] == pytest.approx(float(summary.loc[0, "estimate"]))
+    assert total["effect_ci_lower"] == pytest.approx(float(summary.loc[0, "ci_lower"]))
+    assert total["effect_ci_upper"] == pytest.approx(float(summary.loc[0, "ci_upper"]))
+    assert subgroup.loc[subgroup["cutoff"].notna(), "imputations"].iloc[0] == IMPUTATION_COUNT
 
 
 def test_nuisance_screen_metrics_are_averaged(test_output_dir) -> None:

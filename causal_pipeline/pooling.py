@@ -258,40 +258,61 @@ def pool_subgroup_table(
 
     ``effect_se`` and ``outcome_se`` become the square root of Rubin's total
     variance. The intervals and p-values use the Barnard–Rubin t reference.
+    Rows with no cutoff are the overall ATE: only the effect contrast is pooled.
     """
-    keys = ["estimator", "contrast", "column", "cutoff"]
-    indexed = align_on(frames, keys)
     rows = []
-    for key in indexed[0].index:
-        members = [frame.loc[key] for frame in indexed]
-        template = members[0].to_dict()
-        level = float(members[0][level_column])
-        for prefix in ("effect", "outcome"):
-            pooled = pool_scalar(
-                estimates=np.asarray([float(row[f"{prefix}_difference"]) for row in members]),
-                variances=np.square([float(row[f"{prefix}_se"]) for row in members]),
-                sample_size=sample_size,
-                level=level,
-            )
-            template[f"{prefix}_difference"] = pooled.estimate
-            template[f"{prefix}_se"] = float(np.sqrt(pooled.total_variance))
-            template[f"{prefix}_ci_lower"] = pooled.ci_lower
-            template[f"{prefix}_ci_upper"] = pooled.ci_upper
-            template[f"{prefix}_pvalue"] = two_sided_tail(
-                estimate=pooled.estimate,
-                standard_error=float(np.sqrt(pooled.total_variance)),
-                degrees_of_freedom=pooled.degrees_of_freedom,
-            )
-            template[f"{prefix}_above"] = float(
-                np.mean([float(row[f"{prefix}_above"]) for row in members])
-            )
-            template[f"{prefix}_below"] = float(
-                np.mean([float(row[f"{prefix}_below"]) for row in members])
-            )
-        template["n_above"] = int(round(float(np.mean([float(row["n_above"]) for row in members]))))
-        template["n_below"] = int(round(float(np.mean([float(row["n_below"]) for row in members]))))
-        template["imputations"] = len(members)
-        rows.append(template)
+    partitions = (
+        (
+            [frame.loc[frame["cutoff"].notna()] for frame in frames],
+            ["estimator", "contrast", "column", "cutoff"],
+            ("effect", "outcome"),
+        ),
+        (
+            [frame.loc[frame["cutoff"].isna()] for frame in frames],
+            ["estimator", "contrast"],
+            ("effect",),
+        ),
+    )
+    for subset, keys, prefixes in partitions:
+        if subset[0].empty:
+            continue
+        indexed = align_on(subset, keys)
+        for key in indexed[0].index:
+            members = [frame.loc[key] for frame in indexed]
+            template = members[0].to_dict()
+            level = float(members[0][level_column])
+            for prefix in prefixes:
+                pooled = pool_scalar(
+                    estimates=np.asarray([float(row[f"{prefix}_difference"]) for row in members]),
+                    variances=np.square([float(row[f"{prefix}_se"]) for row in members]),
+                    sample_size=sample_size,
+                    level=level,
+                )
+                template[f"{prefix}_difference"] = pooled.estimate
+                template[f"{prefix}_se"] = float(np.sqrt(pooled.total_variance))
+                template[f"{prefix}_ci_lower"] = pooled.ci_lower
+                template[f"{prefix}_ci_upper"] = pooled.ci_upper
+                template[f"{prefix}_pvalue"] = two_sided_tail(
+                    estimate=pooled.estimate,
+                    standard_error=float(np.sqrt(pooled.total_variance)),
+                    degrees_of_freedom=pooled.degrees_of_freedom,
+                )
+                if "cutoff" in keys:
+                    template[f"{prefix}_above"] = float(
+                        np.mean([float(row[f"{prefix}_above"]) for row in members])
+                    )
+                    template[f"{prefix}_below"] = float(
+                        np.mean([float(row[f"{prefix}_below"]) for row in members])
+                    )
+            if "cutoff" in keys:
+                template["n_above"] = int(
+                    round(float(np.mean([float(row["n_above"]) for row in members])))
+                )
+                template["n_below"] = int(
+                    round(float(np.mean([float(row["n_below"]) for row in members])))
+                )
+            template["imputations"] = len(members)
+            rows.append(template)
     return pd.DataFrame(rows)
 
 

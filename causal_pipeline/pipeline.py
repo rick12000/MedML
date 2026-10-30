@@ -1324,6 +1324,7 @@ class CausalPipeline:
                     splits=splits,
                     scores=model.treatment_contrast_scores(),
                     estimator_id=estimator_id,
+                    estimates=model.estimate(),
                 )
                 for estimator_id, model in ate_models.items()
             ]

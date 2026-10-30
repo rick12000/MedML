@@ -42,6 +42,8 @@ SUBGROUP_SPLIT_COLUMNS = [
     "outcome_pvalue",
 ]
 
+POPULATION_TOTAL_LABEL = "Overall (all patients)"
+
 
 @dataclass(frozen=True)
 class MeanDifference:
@@ -59,11 +61,14 @@ def subgroup_split_table(
     splits: list[SubgroupSplit],
     scores: TreatmentContrastScores,
     estimator_id: str,
+    estimates: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Wald tests for treatment-effect and raw-outcome gaps at declared cutoffs.
 
     The effect gap averages the estimator's treatment-contrast scores on each
     side. The outcome gap is the unadjusted mean outcome on those same rows.
+    When ``estimates`` is the fitted ATE table, one overall row per contrast is
+    appended. Split columns on that row stay empty.
     """
     scored_rows = dataset.df.iloc[np.asarray(scores.positions, dtype=int)]
     outcome = scored_rows[dataset.outcome].to_numpy(dtype=float)
@@ -119,6 +124,28 @@ def subgroup_split_table(
                     "outcome_pvalue": outcome_gap.pvalue,
                 }
             )
+    if estimates is not None:
+        for _, estimate_row in estimates.iterrows():
+            estimate = float(estimate_row["estimate"])
+            standard_error = float(estimate_row["standard_error"])
+            if standard_error == 0.0:
+                pvalue = 0.0 if estimate != 0.0 else 1.0
+            else:
+                pvalue = float(2.0 * stats.norm.sf(abs(estimate / standard_error)))
+            row = dict.fromkeys(SUBGROUP_SPLIT_COLUMNS, np.nan)
+            row.update(
+                {
+                    "estimator": estimator_id,
+                    "contrast": estimate_row["contrast"],
+                    "confidence_level": scores.confidence_level,
+                    "effect_difference": estimate,
+                    "effect_se": standard_error,
+                    "effect_ci_lower": float(estimate_row["ci_lower"]),
+                    "effect_ci_upper": float(estimate_row["ci_upper"]),
+                    "effect_pvalue": pvalue,
+                }
+            )
+            rows.append(row)
     return pd.DataFrame(rows, columns=SUBGROUP_SPLIT_COLUMNS)
 
 

@@ -81,6 +81,62 @@ def test_subgroup_split_reports_effect_and_outcome_gaps() -> None:
     assert modifier["effect_difference"] == pytest.approx(2.0 / 3.0)
 
 
+def test_subgroup_population_total_row_matches_ate_estimate() -> None:
+    dataset = CausalDataset(
+        data=DataConfig(
+            outcome="y",
+            treatment="t",
+            confounders=["x1"],
+            effect_modifiers=["x1"],
+            outcome_type=OutcomeType.CONTINUOUS,
+            treatment_mode=TreatmentMode.BINARY,
+            control_value=0,
+            treatment_values=[0, 1],
+        ),
+        df=pd.DataFrame(
+            {
+                "y": [4.0, 6.0, 10.0, 10.0, 10.0, 10.0],
+                "t": [0, 1, 0, 1, 0, 1],
+                "x1": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                "age": [40.0, 50.0, 60.0, 70.0, 80.0, 90.0],
+            }
+        ),
+    )
+    scores = TreatmentContrastScores(
+        values=pd.DataFrame({"1_vs_0": [1.0, 1.0, 2.0, 2.0, 2.0, 2.0]}),
+        positions=np.arange(len(dataset.df)),
+        groups=None,
+        confidence_level=CONFIDENCE_LEVEL,
+    )
+    estimates = pd.DataFrame(
+        {
+            "contrast": ["1_vs_0"],
+            "estimand": ["ATE"],
+            "estimate": [1.5],
+            "standard_error": [0.25],
+            "ci_lower": [1.0],
+            "ci_upper": [2.0],
+        }
+    )
+    table = subgroup_split_table(
+        dataset=dataset,
+        splits=[SubgroupSplit(column="age", cutoff=60.0)],
+        scores=scores,
+        estimator_id="ipw",
+        estimates=estimates,
+    )
+    assert len(table) == 2
+    total = table.iloc[1]
+    assert pd.isna(total["column"])
+    assert pd.isna(total["cutoff"])
+    assert pd.isna(total["n_above"])
+    assert total["effect_difference"] == 1.5
+    assert total["effect_se"] == 0.25
+    assert total["effect_ci_lower"] == 1.0
+    assert total["effect_ci_upper"] == 2.0
+    assert pd.isna(total["outcome_difference"])
+
+
 def test_clustered_effect_difference_uses_the_cluster_scores() -> None:
     dataset = CausalDataset(
         data=DataConfig(
@@ -177,6 +233,16 @@ def test_subgroup_split_figure_renders(test_output_dir) -> None:
         splits=[SubgroupSplit(column="age", cutoff=60.0)],
         scores=scores,
         estimator_id="ipw",
+        estimates=pd.DataFrame(
+            {
+                "contrast": ["1_vs_0"],
+                "estimand": ["ATE"],
+                "estimate": [1.5],
+                "standard_error": [0.25],
+                "ci_lower": [1.0],
+                "ci_upper": [2.0],
+            }
+        ),
     )
     output = test_output_dir / "subgroup" / "subgroup_splits.png"
     output.parent.mkdir(parents=True, exist_ok=True)

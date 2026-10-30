@@ -16,7 +16,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from causal_pipeline.figures import INK, REFERENCE_COLOR, display_contrast, display_estimator, publication_style
-from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE
+from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE, POPULATION_TOTAL_LABEL
 from causal_pipeline.utils import save_figure
 
 SUBGROUP_SPLITS_FIGURE_NAME = "subgroup_splits.png"
@@ -70,29 +70,43 @@ def build_items(table: pd.DataFrame, split_order: list[tuple[str, float]]) -> li
     for estimator in dict.fromkeys(table["estimator"].astype(str)):
         estimator_rows = table.loc[table["estimator"].astype(str) == estimator]
         items.append({"kind": "header", "label": display_estimator(estimator)})
+        labeled: list[tuple[pd.Series, str]] = []
+        split_rows = estimator_rows.loc[estimator_rows["cutoff"].notna()]
         for column, cutoff in split_order:
-            matches = estimator_rows.loc[
-                (estimator_rows["column"] == column) & (estimator_rows["cutoff"] == cutoff)
+            matches = split_rows.loc[
+                (split_rows["column"] == column) & (split_rows["cutoff"] == cutoff)
             ]
             for _, record in matches.iterrows():
-                items.append(
-                    {
-                        "kind": "data",
-                        "label": split_label(
+                labeled.append(
+                    (
+                        record,
+                        split_label(
                             column=column,
                             cutoff=cutoff,
                             above_rule=str(record["above_rule"]),
                             contrast=str(record["contrast"]),
                             multi_contrast=multi_contrast,
                         ),
-                        "n_above": int(round(float(record["n_above"]))),
-                        "n_below": int(round(float(record["n_below"]))),
-                        "effect": interval_values(record, "effect"),
-                        "outcome": interval_values(record, "outcome"),
-                        "effect_p": float(record["effect_pvalue"]),
-                        "outcome_p": float(record["outcome_pvalue"]),
-                    }
+                    )
                 )
+        for _, record in estimator_rows.loc[estimator_rows["cutoff"].isna()].iterrows():
+            label = POPULATION_TOTAL_LABEL
+            if multi_contrast:
+                label = f"{label} · {display_contrast(str(record['contrast']))}"
+            labeled.append((record, label))
+        for record, label in labeled:
+            items.append(
+                {
+                    "kind": "data",
+                    "label": label,
+                    "n_above": record["n_above"],
+                    "n_below": record["n_below"],
+                    "effect": interval_values(record, "effect"),
+                    "outcome": interval_values(record, "outcome"),
+                    "effect_p": record["effect_pvalue"],
+                    "outcome_p": record["outcome_pvalue"],
+                }
+            )
     return items
 
 
@@ -244,11 +258,14 @@ def write_data_row(canvas, columns: dict[str, object], item: dict[str, object], 
         )
 
     text("subgroup", str(item["label"]), align="left")
-    text("patients", f"{item['n_above']} / {item['n_below']}")
-    text("effect_text", format_estimate(item["effect"]))
-    text("effect_p", format_p(float(item["effect_p"])))
-    text("outcome_text", format_estimate(item["outcome"]))
-    text("outcome_p", format_p(float(item["outcome_p"])))
+    if pd.notna(item["n_above"]) and pd.notna(item["n_below"]):
+        text("patients", f"{int(round(float(item['n_above'])))} / {int(round(float(item['n_below'])))}")
+    if np.isfinite(item["effect"][0]):
+        text("effect_text", format_estimate(item["effect"]))
+        text("effect_p", format_p(float(item["effect_p"])))
+    if np.isfinite(item["outcome"][0]):
+        text("outcome_text", format_estimate(item["outcome"]))
+        text("outcome_p", format_p(float(item["outcome_p"])))
 
 
 def forest_scale(intervals: list[tuple[float, float, float]]) -> tuple[float, float]:

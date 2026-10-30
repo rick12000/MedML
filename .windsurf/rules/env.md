@@ -1,0 +1,32 @@
+---
+trigger: always_on
+description: Use this repository's Python virtual environment before installing, running, or testing Python.
+---
+
+# Python environment
+
+Use this virtual environment for Python commands. If this repository is only a Python application, use it for every command.
+
+## Activate
+
+Environment directory: `$env:USERPROFILE\.venvs\medml`
+
+Run activation from the repository root.
+
+PowerShell:
+
+    & "$env:USERPROFILE\.venvs\medml\Scripts\Activate.ps1"
+
+cmd:
+
+    call %USERPROFILE%\.venvs\medml\Scripts\activate.bat
+
+## Run
+
+From the repository root, with this environment active:
+
+1. If `uv` is on PATH, use `uv pip`. Otherwise use `pip`.
+2. Prefer an editable install of this package: `uv pip install -e ".[dev]" --python "$env:USERPROFILE\.venvs\medml\Scripts\python.exe"` or, after activation, `pip install -e ".[dev]"`. If the only manifest is `requirements.txt`, use `uv pip install -r requirements.txt --python "$env:USERPROFILE\.venvs\medml\Scripts\python.exe"` or `pip install -r requirements.txt`.
+3. If that editable install is already done, skip reinstall before later runs.
+4. Run the requested code with this environment.
+5. If install fails on version conflicts, update `pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt`, retry, and report those edits in the final reply.

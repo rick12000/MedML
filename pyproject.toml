@@ -9,6 +9,7 @@ description = "Modular observational causal inference pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "certifi>=2026.10.19",
     "pandas>=2.0",
     "numpy>=1.26",
     "pydantic>=2.0",
@@ -27,7 +28,12 @@ dependencies = [
 neural = ["catenets>=0.2", "jax>=0.4", "flax>=0.8"]
 r = ["rpy2>=3.5"]
 impute = ["miceforest>=6.0"]
-dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

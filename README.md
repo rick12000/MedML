@@ -21,17 +21,22 @@ tests/integration/   # End-to-end pipeline tests
 
 ## Quick start
 
+Dependencies are defined in `pyproject.toml` and locked in `uv.lock`. From the repository root:
+
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync
+uv run pytest
 ```
+
+Optional extras: `uv sync --extra neural`, `--extra r`, or `--extra impute`.
 
 `CausalPipeline` takes a `PipelineConfig` and a cohort dataframe. Unit tests check estimator recovery on simulated data with a known treatment effect. Integration tests run the full pipeline and write artifacts to a temporary directory.
 
 ## Optional dependencies
 
-- `pip install -e ".[neural]"` — TARNet, CFRNet (CATENets), DragonNet (JAX)
-- `pip install -e ".[r]"` — MOB via `partykit` through `rpy2` (requires R)
+- `uv sync --extra neural` — TARNet, CFRNet (CATENets), DragonNet (JAX)
+- `uv sync --extra r` — MOB via `partykit` through `rpy2` (requires R)
+- `uv sync --extra impute` — MICE imputation via `miceforest`
 
 ## Policy workflow
 

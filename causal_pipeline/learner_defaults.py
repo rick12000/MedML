@@ -99,6 +99,9 @@ def apply_defaults(estimator: BaseEstimator) -> BaseEstimator:
             model.set_params(alpha=DEFAULT_RIDGE_ALPHA)
         return model
     if name in {"XGBClassifier", "XGBRegressor"}:
+        # XGBoost uses every core when n_jobs is unset, which oversubscribes pool workers.
+        if model.get_params().get("n_jobs") is None:
+            model.set_params(n_jobs=DEFAULT_XGBOOST_N_JOBS)
         return model
     if name == "RandomForestClassifier":
         return default_propensity_classifier(

@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
 import pytest
+from xgboost import XGBRegressor
+
+from causal_pipeline.learner_defaults import DEFAULT_XGBOOST_N_JOBS, apply_defaults
+from causal_pipeline.parallel import (
+    SINGLE_CORE_N_JOBS,
+    WINDOWS_BELOW_NORMAL_PRIORITY,
+    _windows_kernel32,
+    background_priority,
+    WORKER_MARKER_ENV,
+    available_cores,
+    pool_workers,
+    worker_library_jobs,
+)
 
 from causal_pipeline.config import (
     ATEKind,
@@ -116,3 +131,45 @@ def test_parallel_sensitivity_refits_finish_sooner_than_serial_refits(
         )
         assert benchmarks["covariate"].tolist() == list(data_config.confounders)
     assert elapsed[False] > elapsed[True] * PARALLEL_SPEEDUP_MULTIPLE
+
+
+def test_available_cores_leaves_one_logical_core_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    assert available_cores() == 15
+    monkeypatch.setattr(os, "cpu_count", lambda: 1)
+    assert available_cores() == 1
+
+
+def test_pool_workers_never_exceed_the_core_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    assert pool_workers(parallel=True, n_tasks=100) == 15
+    assert pool_workers(parallel=True, n_tasks=4) == 4
+    assert pool_workers(parallel=False, n_tasks=100) == 1
+
+
+def test_library_threads_are_pinned_inside_pool_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    monkeypatch.delenv(WORKER_MARKER_ENV, raising=False)
+    # Parent with a single task may use the whole budget.
+    assert worker_library_jobs(parallel=False, n_tasks=1) == available_cores()
+    # Parent with a pool gives every task one thread.
+    assert worker_library_jobs(parallel=True, n_tasks=8) == SINGLE_CORE_N_JOBS
+    # Inside a worker (for example a draw running its fits serially) nothing fans out.
+    monkeypatch.setenv(WORKER_MARKER_ENV, "1")
+    assert worker_library_jobs(parallel=False, n_tasks=1) == SINGLE_CORE_N_JOBS
+    assert pool_workers(parallel=True, n_tasks=8) == 1
+
+
+def test_xgboost_learners_default_to_one_thread_unless_set() -> None:
+    assert apply_defaults(XGBRegressor()).get_params()["n_jobs"] == DEFAULT_XGBOOST_N_JOBS
+    assert apply_defaults(XGBRegressor(n_jobs=4)).get_params()["n_jobs"] == 4
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows priority classes")
+def test_background_priority_lowers_then_restores_the_process_class() -> None:
+    kernel32 = _windows_kernel32()
+    handle = kernel32.GetCurrentProcess()
+    before = kernel32.GetPriorityClass(handle)
+    with background_priority():
+        assert kernel32.GetPriorityClass(handle) == WINDOWS_BELOW_NORMAL_PRIORITY
+    assert kernel32.GetPriorityClass(handle) == before

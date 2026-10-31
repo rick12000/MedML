@@ -26,6 +26,7 @@ from causalml.inference.meta import (
 )
 from econml.dml import CausalForestDML
 from sklearn.base import BaseEstimator
+from causalml.propensity import compute_r_residuals
 from sklearn.model_selection import cross_val_predict
 
 from causal_pipeline.config import (
@@ -58,7 +59,7 @@ from causal_pipeline.learner_resolve import (
     materialize_causal_forest_learners,
     materialize_meta_cate_learners,
 )
-from causal_pipeline.parallel import ALL_CORES_N_JOBS, SINGLE_CORE_N_JOBS
+from causal_pipeline.parallel import SINGLE_CORE_N_JOBS, available_cores
 from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
 def create_cate_estimator(
     spec: CATEEstimatorSpec,
     data: CausalDataset,
-    forest_n_jobs: int = ALL_CORES_N_JOBS,
+    forest_n_jobs: int | None = None,
 ) -> BaseCATEEstimator:
     ensure_cate_spec_supported(spec=spec)
     if spec.kind == CATEKind.S_LEARNER:
@@ -319,6 +320,7 @@ class MetaLearnerAdapter(BaseCATEEstimator):
             log_r_learner_crossfit_outcome(
                 model=self.model,
                 features=features,
+                treatment=treatment,
                 outcome=outcome,
                 binary_outcome=binary,
             )
@@ -400,11 +402,11 @@ class CausalForestAdapter(BaseCATEEstimator):
         self,
         spec: CausalForestCATEEstimatorSpec,
         data: CausalDataset,
-        forest_n_jobs: int = ALL_CORES_N_JOBS,
+        forest_n_jobs: int | None = None,
     ) -> None:
         self.spec = spec
         self.data = data
-        self.forest_n_jobs = forest_n_jobs
+        self.forest_n_jobs = available_cores() if forest_n_jobs is None else forest_n_jobs
         self.model = None
         self.contrast_names = contrast_columns(
             data.control_value,
@@ -693,34 +695,62 @@ def fit_r_learner(
         causalml_rlearner.cross_val_predict = original
 
 
+def r_learner_oof_outcome_predictions(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+    outcome: pd.Series,
+) -> np.ndarray:
+    """Out-of-fold outcome predictions from the same splits causalml used to fit the R-learner.
+
+    causalml's XGBRRegressor stores its KFold as ``cv`` and cross-fits with it. The generic
+    BaseRLearner does not store a splitter: it calls compute_r_residuals, which is stratified
+    on treatment with the model's n_fold and random_state. Both are reproduced here.
+    The refit stays in this process, with one thread for the cross-fit.
+    """
+    y_values = outcome.to_numpy(dtype=float)
+    method = "predict_proba" if hasattr(model.model_mu, "predict_proba") else "predict"
+    cv = getattr(model, "cv", None)
+    if cv is not None:
+        predicted = cross_val_predict(
+            model.model_mu,
+            features,
+            outcome,
+            cv=cv,
+            method=method,
+            n_jobs=SINGLE_CORE_N_JOBS,
+        )
+        if method == "predict_proba":
+            predicted = predicted[:, 1]
+        return np.asarray(predicted, dtype=float)
+    y_residual, _ = compute_r_residuals(
+        X=np.asarray(features),
+        treatment=np.asarray(treatment),
+        y=y_values,
+        outcome_learner=model.model_mu,
+        n_folds=model.n_fold,
+        random_state=model.random_state,
+        n_jobs=SINGLE_CORE_N_JOBS,
+        compute_w_residual=False,
+        method=method,
+    )
+    return y_values - y_residual
+
+
 def log_r_learner_crossfit_outcome(
     model: BaseEstimator,
     features: pd.DataFrame,
+    treatment: pd.Series,
     outcome: pd.Series,
     binary_outcome: bool,
 ) -> None:
-    """Repeat causalml's discarded cross_val_predict so the R-learner outcome nuisance can be scored.
-
-    The refit stays in this process. A joblib process pool around XGBoost aborts
-    on Windows while building the training matrix.
-    """
-    if hasattr(model.model_mu, "predict_proba"):
-        predicted = cross_val_predict(
-            model.model_mu,
-            features,
-            outcome,
-            cv=model.cv,
-            method="predict_proba",
-            n_jobs=SINGLE_CORE_N_JOBS,
-        )[:, 1]
-    else:
-        predicted = cross_val_predict(
-            model.model_mu,
-            features,
-            outcome,
-            cv=model.cv,
-            n_jobs=SINGLE_CORE_N_JOBS,
-        )
+    """Score the R-learner outcome nuisance on causalml's own out-of-fold predictions."""
+    predicted = r_learner_oof_outcome_predictions(
+        model=model,
+        features=features,
+        treatment=treatment,
+        outcome=outcome,
+    )
     metric = outcome_metric_from_predictions(
         outcome=outcome.to_numpy(dtype=float),
         predicted=np.asarray(predicted, dtype=float),

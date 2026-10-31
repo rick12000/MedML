@@ -27,6 +27,7 @@ from causal_pipeline.subgroup_figures import (
     format_p,
     plot_subgroup_splits_table,
     split_text,
+    table_blocks,
 )
 
 CONFIDENCE_LEVEL = 0.95
@@ -104,6 +105,15 @@ def test_figure_model_puts_overall_row_first_and_shares_the_raw_difference() -> 
     assert set(rows[1].intervals) == {"ipw", "aipw", RAW_BLOCK_KEY}
     assert rows[1].patients == "4 / 2"
     assert rows[1].intervals[RAW_BLOCK_KEY].estimate == pytest.approx(5.0)
+
+
+def test_table_blocks_accepts_stacked_scenarios_with_repeated_splits() -> None:
+    table = _two_estimator_table()
+    stacked = pd.concat([table, table], ignore_index=True)
+    blocks = table_blocks(stacked)
+    assert [block.key for block in blocks] == ["ipw", "aipw", RAW_BLOCK_KEY]
+    with pytest.raises(ValueError, match="more than one row"):
+        build_table_model(table=stacked, split_order=[("age", 60.0)])
 
 
 def test_binary_split_is_flagged_only_when_every_value_is_zero_or_one() -> None:

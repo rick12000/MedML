@@ -10,6 +10,7 @@ from typing import Protocol
 import pandas as pd
 
 from causal_pipeline.config import DataConfig, PipelineConfig
+from causal_pipeline.parallel import available_cores
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +254,8 @@ def miceforest_impute(
         num_datasets=datasets,
         random_state=random_state,
     )
-    kernel.mice(iterations=iterations, verbose=False)
+    # Imputation runs in the parent. LightGBM would otherwise take every logical core.
+    kernel.mice(iterations=iterations, verbose=False, num_threads=available_cores())
     completed_frames = []
     for dataset_index in range(datasets):
         completed_model = kernel.complete_data(dataset=dataset_index)

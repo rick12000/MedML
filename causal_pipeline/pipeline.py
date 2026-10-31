@@ -85,7 +85,7 @@ from causal_pipeline.figures import (
 from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
 from causal_pipeline.nuisance_screen import run_nuisance_screen
 from causal_pipeline.parallel import (
-    ALL_CORES_N_JOBS,
+    background_priority,
     imputation_draws_are_parallel,
     pool_workers,
     run_map,
@@ -169,7 +169,7 @@ def predict_cate_fold(
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
     tune_estimators: bool = False,
-    forest_n_jobs: int = ALL_CORES_N_JOBS,
+    forest_n_jobs: int | None = None,
 ) -> pd.DataFrame:
     fold_spec = resolve_cate_spec_for_outer_train(
         train=train,
@@ -199,7 +199,7 @@ def cate_fold_predictor(
     spec: CATEEstimatorSpec,
     outcome_records: list[tuple[np.ndarray, np.ndarray, object]] | None = None,
     tune_estimators: bool = False,
-    forest_n_jobs: int = ALL_CORES_N_JOBS,
+    forest_n_jobs: int | None = None,
 ) -> Callable[[CausalDataset, CausalDataset], pd.DataFrame]:
     def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
         return predict_cate_fold(
@@ -796,7 +796,12 @@ class CausalPipeline:
         Imputation on writes each draw under results/imputation/<m> and the pooled
         estimates at the results root. Policy trees, omitted-variable sensitivity,
         and unit-level conditional effect intervals are omitted from that pooled output.
+        The run executes at lower CPU priority so the rest of the machine stays responsive.
         """
+        with background_priority():
+            self._run(df_input)
+
+    def _run(self, df_input: pd.DataFrame) -> None:
         configure_package_runtime()
         logger.info("Starting causal pipeline run...")
         logger.debug("Input cohort: %s rows, %s columns.", len(df_input), df_input.shape[1])

@@ -202,13 +202,21 @@ def plot_subgroup_splits_table(
 # Data model
 
 
-def build_table_model(table: pd.DataFrame, split_order: Sequence[tuple[str, float]]) -> TableModel:
+def table_blocks(table: pd.DataFrame) -> tuple[Block, ...]:
+    """Column blocks for every estimator in ``table``, plus the shared raw block.
+
+    Safe to call on a table that stacks several scenarios, because it never groups rows.
+    """
     estimators = unique_strings(table["estimator"])
-    contrasts = unique_strings(table["contrast"])
-    blocks = (
+    return (
         *(Block(key=estimator, title=display_estimator(estimator), kind=ATE_KIND) for estimator in estimators),
         Block(key=RAW_BLOCK_KEY, title=RAW_TITLE, kind=RAW_KIND),
     )
+
+
+def build_table_model(table: pd.DataFrame, split_order: Sequence[tuple[str, float]]) -> TableModel:
+    blocks = table_blocks(table)
+    contrasts = unique_strings(table["contrast"])
     multi_contrast = len(contrasts) > 1
     groups = tuple(
         contrast_group(

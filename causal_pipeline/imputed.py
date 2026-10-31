@@ -15,10 +15,10 @@ from causal_pipeline.diagnostics import plot_overlap
 from causal_pipeline.estimator_identity import assign_estimator_ids, attach_estimator_metadata
 from causal_pipeline.evaluation import (
     ContrastEvaluation,
-    save_joint_cate_figures,
+    save_comparison_figures,
     write_ranking_curve_data,
 )
-from causal_pipeline.figures import CalibrationSeries, RankingSeries, plot_calibration_curves, plot_ranking_curves
+from causal_pipeline.figures import CalibrationSeries, RankingSeries
 from causal_pipeline.pooling import (
     average_aligned_frames,
     pool_contrast_evaluation,
@@ -201,8 +201,8 @@ def write_pooled_curves(
     calibration_by_contrast: dict[str, list[CalibrationSeries]] = {}
     for estimator_id, contrasts in cate_evaluation.items():
         for item in contrasts:
-            df_toc = read_curve_tables(completed_runs, item.toc_path)
-            df_calibration = read_curve_tables(completed_runs, item.calibration_path)
+            df_toc = read_curve_tables(completed_runs, item.toc_data_path)
+            df_calibration = read_curve_tables(completed_runs, item.calibration_data_path)
             toc_aligned = all(len(df_one) == len(df_toc[0]) for df_one in df_toc)
             calibration_aligned = all(len(df_one) == len(df_calibration[0]) for df_one in df_calibration)
             if not toc_aligned:
@@ -228,9 +228,7 @@ def write_pooled_curves(
                     qini=item.rate_qini,
                     qini_p_value=item.rate_qini_pvalue,
                 )
-                toc_file = results.root / item.toc_path
-                plot_ranking_curves(series=[ranking], save_path=str(toc_file))
-                write_ranking_curve_data(toc_file, [ranking])
+                write_ranking_curve_data(results.root / item.toc_data_path, [ranking])
                 ranking_by_contrast.setdefault(item.contrast, []).append(ranking)
                 df_bins = []
                 for df_one in df_calibration:
@@ -250,12 +248,10 @@ def write_pooled_curves(
                     eceth_standard_error=item.eceth_standard_error,
                     eceth_p_value=item.eceth_pvalue,
                 )
-                calibration_file = results.root / item.calibration_path
-                plot_calibration_curves(series=[series], save_path=str(calibration_file))
-                write_dataframe(calibration_file.with_suffix(".csv"), df_calibration_mean)
+                write_dataframe(results.root / item.calibration_data_path, df_calibration_mean)
                 calibration_by_contrast.setdefault(item.contrast, []).append(series)
     if ranking_by_contrast and calibration_by_contrast:
-        save_joint_cate_figures(
+        save_comparison_figures(
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results.root,

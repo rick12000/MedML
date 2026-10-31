@@ -390,8 +390,8 @@ def pool_contrast_evaluation(
         rate_qini=float(np.mean([item.rate_qini for item in evaluations])),
         rate_qini_standard_error=float("nan"),
         rate_qini_pvalue=float("nan"),
-        calibration_path=first.calibration_path,
-        toc_path=first.toc_path,
+        calibration_data_path=first.calibration_data_path,
+        toc_data_path=first.toc_data_path,
     )
 
 

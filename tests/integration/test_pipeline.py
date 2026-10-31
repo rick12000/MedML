@@ -158,14 +158,12 @@ def test_pipeline_recovers_constant_effect(
     assert (test_output_dir / "data" / "estimation.parquet").is_file()
     assert (test_output_dir / "summary" / "ate_intervals.png").is_file()
     assert (test_output_dir / "summary" / "cate_mean_effects.png").is_file()
-    assert (contrast_dir / "toc.png").is_file()
+    assert (contrast_dir / "evaluation.png").is_file()
     assert (contrast_dir / "toc.csv").is_file()
-    assert (contrast_dir / "calibration.png").is_file()
     assert (contrast_dir / "calibration.csv").is_file()
     s_learner_id = cate_summary.loc[cate_summary["estimator_kind"] == "s_learner", "estimator"].iloc[0]
-    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "toc.png").is_file()
     assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "toc.csv").is_file()
-    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "calibration.png").is_file()
+    assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "calibration.csv").is_file()
     policy_summary = test_output_dir / "summary" / "policy_methods.csv"
     if hold_out_for_policy:
         policy_table = read_dataframe(policy_summary)
@@ -177,9 +175,8 @@ def test_pipeline_recovers_constant_effect(
         assert slice_dirs
         assert slice_dirs[0].joinpath("policy_tree.png").is_file()
         assert slice_dirs[0].joinpath("rule_performance.csv").is_file()
-        assert (contrast_dir / "test_toc.png").is_file()
+        assert (contrast_dir / "test_evaluation.png").is_file()
         assert (contrast_dir / "test_toc.csv").is_file()
-        assert (contrast_dir / "test_calibration.png").is_file()
         assert (contrast_dir / "test_calibration.csv").is_file()
     else:
         assert not policy_summary.exists()

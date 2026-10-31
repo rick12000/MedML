@@ -16,22 +16,26 @@ from causal_pipeline.config import (
     TreatmentMode,
 )
 from causal_pipeline.data import CausalDataset
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.evaluation import (
-    CATEEvaluator,
     RATE_WEIGHTING_AUTOC,
     RATE_WEIGHTING_QINI,
+    CATEEvaluator,
     absolute_eceth_tolerance,
     calibration_bin_rows,
     compute_eceth,
     eceth_hypothesis_test,
     integrate_toc,
-    resample_positions,
     ranking_curve,
     rate_hypothesis_test,
+    resample_positions,
     targeting_operator_curve,
 )
-from causal_pipeline.figures import CalibrationSeries, RankingSeries, plot_calibration_curves, plot_ranking_curves
+from causal_pipeline.figures import (
+    CalibrationSeries,
+    RankingSeries,
+    plot_evaluation_figure,
+)
+from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from tests.cache_paths import artifact_path
 
 CALIBRATION_BINS = 5
@@ -73,14 +77,13 @@ def test_correct_cate_is_calibrated_against_the_true_effect(
         eceth_standard_error=eceth_se,
         eceth_p_value=eceth_p,
     )
-    plot_calibration_curves(
-        series=[calibration],
+    fraction, value = ranking_curve(tau_hat=predicted, gamma=proxy)
+    ranking = ranking_from_curve("t_learner_heterogeneous_recovery", fraction, value)
+    plot_evaluation_figure(
+        calibration=[calibration],
+        ranking=[ranking],
         save_path=str(
-            artifact_path(
-                test_output_dir,
-                "heterogeneous_recovery",
-                "calibration_t_learner_bins.png",
-            )
+            artifact_path(test_output_dir, "heterogeneous_recovery", "evaluation_t_learner_bins.png")
         ),
     )
 
@@ -281,9 +284,32 @@ def test_evaluate_cate_models_writes_pipeline_style_artifacts(
             tolerance_fraction=evaluation.eceth_tolerance,
         )
     )
-    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "toc.png").is_file()
-    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "calibration.png").is_file()
-    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "toc.png").is_file()
+    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "toc.csv").is_file()
+    assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "calibration.csv").is_file()
+    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "evaluation.png").is_file()
+
+
+def calibration_from_rows(estimator_id: str, rows: list[dict[str, float]]) -> CalibrationSeries:
+    return CalibrationSeries(
+        estimator_id=estimator_id,
+        predicted=np.array([row["mean_predicted_cate"] for row in rows], dtype=float),
+        observed=np.array([row["mean_robust_proxy"] for row in rows], dtype=float),
+        eceth=float("nan"),
+        eceth_standard_error=float("nan"),
+        eceth_p_value=float("nan"),
+    )
+
+
+def ranking_from_curve(estimator_id: str, fraction: np.ndarray, value: np.ndarray) -> RankingSeries:
+    return RankingSeries(
+        estimator_id=estimator_id,
+        toc_fraction=fraction,
+        toc_value=value,
+        autoc=integrate_toc(fraction, value, RATE_WEIGHTING_AUTOC),
+        autoc_p_value=float("nan"),
+        qini=integrate_toc(fraction, value, RATE_WEIGHTING_QINI),
+        qini_p_value=float("nan"),
+    )
 
 
 def test_prioritization_matches_the_oracle_ranking(
@@ -301,54 +327,21 @@ def test_prioritization_matches_the_oracle_ranking(
         top = int(np.argmin(np.abs(estimated_fraction - TOP_FRACTION)))
         oracle_top = int(np.argmin(np.abs(oracle_fraction - TOP_FRACTION)))
         assert abs(float(estimated_toc[top]) - float(oracle_value[oracle_top])) < TOC_TOLERANCE
-        autoc = integrate_toc(estimated_fraction, estimated_toc, RATE_WEIGHTING_AUTOC)
-        qini = integrate_toc(estimated_fraction, estimated_toc, RATE_WEIGHTING_QINI)
         for weighting in RATE_WEIGHTINGS:
             estimated_rate = integrate_toc(estimated_fraction, estimated_toc, weighting)
             oracle_rate = integrate_toc(oracle_fraction, oracle_value, weighting)
             assert abs(estimated_rate - oracle_rate) < RATE_TOLERANCE
-        plot_ranking_curves(
-            series=[
-                RankingSeries(
-                    estimator_id=label,
-                    toc_fraction=estimated_fraction,
-                    toc_value=estimated_toc,
-                    autoc=autoc,
-                    autoc_p_value=float("nan"),
-                    qini=qini,
-                    qini_p_value=float("nan"),
-                )
-            ],
-            save_path=str(
-                artifact_path(
-                    test_output_dir,
-                    "heterogeneous_recovery",
-                    folder,
-                    "toc.png",
-                )
-            ),
-        )
-        plot_ranking_curves(
-            series=[
-                RankingSeries(
-                    estimator_id=f"{label}_oracle",
-                    toc_fraction=oracle_fraction,
-                    toc_value=oracle_value,
-                    autoc=autoc,
-                    autoc_p_value=float("nan"),
-                    qini=qini,
-                    qini_p_value=float("nan"),
-                )
-            ],
-            save_path=str(
-                artifact_path(
-                    test_output_dir,
-                    "heterogeneous_recovery",
-                    folder,
-                    "toc_oracle.png",
-                )
-            ),
-        )
+        fitted_rows = calibration_bin_rows(tau_hat=score, gamma=proxy, n_bins=CALIBRATION_BINS)
+        oracle_rows = calibration_bin_rows(tau_hat=oracle_score, gamma=truth, n_bins=CALIBRATION_BINS)
+        for name, file_name, fraction_values, toc_values, rows in (
+            (label, "evaluation.png", estimated_fraction, estimated_toc, fitted_rows),
+            (f"{label}_oracle", "evaluation_oracle.png", oracle_fraction, oracle_value, oracle_rows),
+        ):
+            plot_evaluation_figure(
+                calibration=[calibration_from_rows(name, rows)],
+                ranking=[ranking_from_curve(name, fraction_values, toc_values)],
+                save_path=str(artifact_path(test_output_dir, "heterogeneous_recovery", folder, file_name)),
+            )
 
 
 def test_estimation_full_fit_scores_test_outcomes_from_estimation_nuisances() -> None:

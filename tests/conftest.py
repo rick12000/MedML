@@ -410,8 +410,8 @@ def contrast_evaluation() -> Callable[[float, float], ContrastEvaluation]:
             rate_qini=0.0,
             rate_qini_standard_error=1.0,
             rate_qini_pvalue=0.5,
-            calibration_path="cate/model/1_vs_0/calibration.png",
-            toc_path="cate/model/1_vs_0/toc.png",
+            calibration_data_path="cate/model/1_vs_0/calibration.csv",
+            toc_data_path="cate/model/1_vs_0/toc.csv",
         )
 
     return build

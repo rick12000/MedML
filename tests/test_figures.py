@@ -7,23 +7,21 @@ import numpy as np
 import pandas as pd
 import pytest
 from matplotlib.container import BarContainer, ErrorbarContainer
-from matplotlib.table import Table
+from matplotlib.text import Text
 
 from causal_pipeline.figures import (
-    drop_nonfinite_effect_estimates,
     CalibrationSeries,
     RankingSeries,
-    compose_calibration_curves,
+    compose_evaluation_figure,
     compose_interval_estimates,
     compose_point_estimates,
-    compose_ranking_curves,
+    drop_nonfinite_effect_estimates,
+    estimator_style,
     format_p_value,
-    plot_calibration_curves,
+    plot_evaluation_figure,
     plot_interval_estimates,
     plot_point_estimates,
-    plot_ranking_curves,
 )
-
 from tests.cache_paths import artifact_path
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -167,9 +165,7 @@ def test_drop_nonfinite_effect_estimates_keeps_plottable_rows() -> None:
     )
 
 
-def test_ranking_and_calibration_figures_report_metrics_under_each_panel(
-    test_output_dir: Path,
-) -> None:
+def test_evaluation_figure_puts_calibration_and_ranking_side_by_side(test_output_dir: Path) -> None:
     fraction = np.linspace(0.0, 1.0, 6)
     ranking = [
         RankingSeries(
@@ -191,33 +187,6 @@ def test_ranking_and_calibration_figures_report_metrics_under_each_panel(
             qini_p_value=0.67,
         ),
     ]
-    ranking_figure = compose_ranking_curves(ranking)
-    assert len(ranking_figure.axes) == 2
-    zero_lines = [
-        line
-        for line in ranking_figure.axes[0].lines
-        if np.allclose(np.asarray(line.get_ydata(), dtype=float), 0.0)
-    ]
-    assert len(zero_lines) == 1
-    legend_labels = ranking_figure.axes[0].get_legend().get_texts()
-    assert [text.get_text() for text in legend_labels] == ["S-learner", "T-learner"]
-    ranking_cells = table_cells(ranking_figure)
-    assert ranking_cells[0] == ["", "AUTOC", "p", "Qini", "p"]
-    assert ranking_cells[1] == ["S-learner", "0.042", "0.031", "0.018", "< 0.001"]
-    assert ranking_cells[2] == ["T-learner", "0.011", "0.420", "-0.004", "0.670"]
-    single_ranking = compose_ranking_curves([ranking[0]])
-    assert single_ranking.axes[0].get_title() == "S-learner"
-    assert table_cells(single_ranking)[1] == ["AUTOC", "0.042", "0.031"]
-    assert table_cells(single_ranking)[2] == ["Qini", "0.018", "< 0.001"]
-    plot_ranking_curves(
-        series=ranking,
-        save_path=str(
-            artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "toc.png")
-        ),
-    )
-    plt.close(ranking_figure)
-    plt.close(single_ranking)
-
     calibration = [
         CalibrationSeries(
             estimator_id="s_learner",
@@ -235,41 +204,95 @@ def test_ranking_and_calibration_figures_report_metrics_under_each_panel(
             eceth_standard_error=0.01,
             eceth_p_value=0.2,
         ),
-    ]
-    calibration_figure = compose_calibration_curves(calibration)
-    assert len(calibration_figure.axes) == 2
-    ideal = [
-        line
-        for line in calibration_figure.axes[0].lines
-        if line.get_label() == "Ideal"
-    ]
-    assert len(ideal) == 1
-    calibration_cells = table_cells(calibration_figure)
-    assert calibration_cells[0] == ["", "ECETH", "SE", "p"]
-    assert calibration_cells[1] == ["S-learner", "0.004", "0.002", "0.040"]
-    assert calibration_cells[2] == ["Causal forest", "0.021", "0.010", "0.200"]
-    single_calibration = compose_calibration_curves([calibration[0]])
-    assert single_calibration.axes[0].get_title() == "S-learner"
-    assert table_cells(single_calibration)[1] == ["ECETH", "0.004", "0.002", "0.040"]
-    plot_calibration_curves(
-        series=calibration,
-        save_path=str(
-            artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "calibration.png")
+        CalibrationSeries(
+            estimator_id="t_learner",
+            predicted=np.array([-0.15, 0.05, 0.25]),
+            observed=np.array([-0.08, 0.04, 0.22]),
+            eceth=0.009,
+            eceth_standard_error=0.004,
+            eceth_p_value=0.3,
         ),
-    )
-    plt.close(calibration_figure)
-    plt.close(single_calibration)
-
-
-def table_cells(figure: plt.Figure) -> list[list[str]]:
-    tables = [child for child in figure.axes[1].get_children() if isinstance(child, Table)]
-    cells = tables[0].get_celld()
-    row_count = 0
-    column_count = 0
-    for row, column in cells:
-        row_count = max(row_count, row + 1)
-        column_count = max(column_count, column + 1)
-    return [
-        [cells[(row, column)].get_text().get_text() for column in range(column_count)]
-        for row in range(row_count)
     ]
+    ranking.append(
+        RankingSeries(
+            estimator_id="causal_forest",
+            toc_fraction=fraction,
+            toc_value=0.1 * fraction * (1.0 - fraction),
+            autoc=0.030,
+            autoc_p_value=0.08,
+            qini=0.012,
+            qini_p_value=0.2,
+        )
+    )
+    figure = compose_evaluation_figure(calibration=calibration, ranking=ranking)
+    assert len(figure.axes) == 3
+    assert all(axis.get_legend() is None for axis in figure.axes)
+    zero_lines = [
+        line
+        for line in figure.axes[1].lines
+        if np.allclose(np.asarray(line.get_ydata(), dtype=float), 0.0)
+    ]
+    assert len(zero_lines) == 1
+    texts = [text.get_text() for text in figure.findobj(Text)]
+    for expected in [
+        "S-learner",
+        "T-learner",
+        "Causal forest",
+        "Estimator",
+        "ECETH",
+        "AUTOC",
+        "Qini",
+        "Calibration",
+        "Ranking",
+        "Targeting Operator Curve (TOC)",
+        "Mean Predicted CATE",
+        "Mean Robust Proxy",
+        "Top Fraction Ranked by Benefit",
+        "Excess Benefit",
+    ]:
+        assert expected in texts
+    assert "NA" not in texts
+    assert "SE" not in texts
+    assert not any("estimation sample" in text or "held-out" in text for text in texts)
+    assert not any(text.startswith(("Left:", "Right:")) for text in texts)
+    plt.close(figure)
+    plot_evaluation_figure(
+        calibration=calibration,
+        ranking=ranking,
+        save_path=str(artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "evaluation.png")),
+    )
+
+
+def test_evaluation_figure_marks_missing_estimator_as_na() -> None:
+    fraction = np.linspace(0.0, 1.0, 6)
+    ranking = [
+        RankingSeries(
+            estimator_id="s_learner",
+            toc_fraction=fraction,
+            toc_value=0.2 * fraction * (1.0 - fraction),
+            autoc=0.042,
+            autoc_p_value=0.031,
+            qini=0.018,
+            qini_p_value=0.0002,
+        )
+    ]
+    calibration = [
+        CalibrationSeries(
+            estimator_id="t_learner",
+            predicted=np.array([-0.2, 0.0, 0.3]),
+            observed=np.array([-0.1, 0.05, 0.25]),
+            eceth=0.004,
+            eceth_standard_error=0.002,
+            eceth_p_value=0.04,
+        )
+    ]
+    figure = compose_evaluation_figure(calibration=calibration, ranking=ranking)
+    texts = [text.get_text() for text in figure.findobj(Text)]
+    assert "NA" in texts
+    plt.close(figure)
+
+
+def test_estimator_style_is_fixed_per_estimator() -> None:
+    assert estimator_style("causal_forest") == estimator_style("causal_forest")
+    assert estimator_style("s_learner") != estimator_style("t_learner")
+    assert estimator_style("custom_estimator") == estimator_style("custom_estimator")

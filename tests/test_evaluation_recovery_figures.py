@@ -34,9 +34,11 @@ def test_recovery_cohorts_write_cate_evaluation_figures(
         results_root=results_root,
     )
     comparison = results_root / "cate" / "comparison" / "1_vs_0"
-    assert (comparison / "toc.png").is_file()
-    assert (comparison / "calibration.png").is_file()
+    assert (comparison / "evaluation.png").is_file()
+    assert (comparison / "toc.csv").is_file()
+    assert (comparison / "calibration.csv").is_file()
     for learner in ("s_learner", "t_learner"):
         learner_dir = results_root / "cate" / learner / "1_vs_0"
-        assert (learner_dir / "toc.png").is_file()
-        assert (learner_dir / "calibration.png").is_file()
+        assert (learner_dir / "toc.csv").is_file()
+        assert (learner_dir / "calibration.csv").is_file()
+        assert not (learner_dir / "toc.png").exists()

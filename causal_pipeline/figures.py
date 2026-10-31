@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -56,10 +57,6 @@ AXIS_LABEL_SIZE = 8.0
 TICK_LABEL_SIZE = 7.5
 CAPTION_FONT_SIZE = 7.5
 PANEL_LABEL_SIZE = 9.0
-TITLE_SIZE = 9.5
-TABLE_ROW_INCHES = 0.30
-TABLE_HEADER_INCHES = 0.32
-LEGEND_BAND_INCHES = 0.42
 LEGEND_FONT_SIZE = 7.5
 P_VALUE_FLOOR = 0.001
 STATISTIC_SCIENTIFIC_FLOOR = 0.001
@@ -67,9 +64,6 @@ STATISTIC_SCIENTIFIC_CEILING = 1000.0
 PANEL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 INTERVAL_CAPTION = "Horizontal lines are confidence intervals. The vertical line marks no effect."
 POINT_CAPTION = "Bars are means of conditional treatment effects. The vertical line marks no effect."
-IDEAL_CALIBRATION_LABEL = "Ideal"
-TOC_FIGURE_WIDTH = 5.80
-CALIBRATION_FIGURE_WIDTH = 5.20
 PUBLICATION_RC = {
     "font.family": "sans-serif",
     "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
@@ -81,6 +75,7 @@ PUBLICATION_RC = {
     "axes.labelcolor": INK,
     "axes.titlecolor": INK,
     "axes.unicode_minus": False,
+    "axes.grid": False,
     "xtick.labelsize": TICK_LABEL_SIZE,
     "ytick.labelsize": TICK_LABEL_SIZE,
     "xtick.color": INK,
@@ -215,12 +210,13 @@ def style_axis(axis: Axes) -> None:
     axis.title.set_size(AXIS_LABEL_SIZE)
     axis.title.set_color(INK)
     axis.title.set_fontweight("regular")
+    axis.grid(False)
     axis.set_axisbelow(True)
 
 
-def mark_panel(axis: Axes, letter: str) -> None:
+def mark_panel(axis: Axes, letter: str, x: float = -0.02) -> None:
     axis.text(
-        -0.02,
+        x,
         1.03,
         letter,
         transform=axis.transAxes,
@@ -307,20 +303,6 @@ def plot_point_estimates(
         plt.close(figure)
 
 
-def plot_ranking_curves(series: Sequence[RankingSeries], save_path: str) -> None:
-    with publication_style():
-        figure = compose_ranking_curves(series)
-        save_figure(save_path, figure)
-        plt.close(figure)
-
-
-def plot_calibration_curves(series: Sequence[CalibrationSeries], save_path: str) -> None:
-    with publication_style():
-        figure = compose_calibration_curves(series)
-        save_figure(save_path, figure)
-        plt.close(figure)
-
-
 def compose_interval_estimates(
     estimates: pd.DataFrame,
     estimator_column: str,
@@ -388,100 +370,6 @@ def compose_point_estimates(
             mark_panel(axis, panel_letter(panel_index))
     finish_figure(figure, bottom)
     attach_figure_caption(figure, axes[-1], POINT_CAPTION, bottom)
-    return figure
-
-
-def compose_ranking_curves(series: Sequence[RankingSeries]) -> Figure:
-    if len(series) == 0:
-        raise ValueError("A ranking figure needs at least one estimator.")
-    column_labels, rows, name_colors = ranking_table(series)
-    figure, axis, table_axis = annotated_curve_axes(
-        width=max(TOC_FIGURE_WIDTH, 1.45 * len(series)),
-        panel_height=PANEL_HEIGHT,
-        table_rows=len(rows),
-        top_legend=len(series) > 1,
-    )
-    for item in series:
-        style = series_style(estimator_index(item.estimator_id, series))
-        draw_curve(
-            axis=axis,
-            x_values=item.toc_fraction,
-            y_values=item.toc_value,
-            style=style,
-            label=display_estimator(item.estimator_id) if len(series) > 1 else "",
-            marker="none",
-        )
-    add_horizontal_reference(axis, 0.0)
-    style_axis(axis)
-    axis.set_xlim(0.0, 1.0)
-    axis.set_xlabel("Top fraction ranked by benefit")
-    axis.set_ylabel("Excess benefit")
-    y_values = np.concatenate([item.toc_value for item in series])
-    lower, upper = padded_limits(y_values, include_zero=True)
-    axis.set_ylim(lower, upper)
-    name_curve(axis=axis, series_count=len(series), title=display_estimator(series[0].estimator_id))
-    draw_metric_table(
-        axis=table_axis,
-        column_labels=column_labels,
-        rows=rows,
-        name_colors=name_colors,
-    )
-    return figure
-
-
-def compose_calibration_curves(series: Sequence[CalibrationSeries]) -> Figure:
-    if len(series) == 0:
-        raise ValueError("A calibration figure needs at least one estimator.")
-    column_labels, rows, name_colors = calibration_table(series)
-    figure, axis, table_axis = annotated_curve_axes(
-        width=max(CALIBRATION_FIGURE_WIDTH, 1.55 * len(series)),
-        panel_height=PANEL_HEIGHT + 0.15,
-        table_rows=len(rows),
-        top_legend=len(series) > 1,
-    )
-    coordinates: list[np.ndarray] = []
-    for item in series:
-        if item.predicted.size == 0 or item.observed.size == 0:
-            raise ValueError("Calibration series has no bins.")
-        style = series_style(estimator_index(item.estimator_id, series))
-        order = np.argsort(item.predicted, kind="mergesort")
-        draw_curve(
-            axis=axis,
-            x_values=item.predicted[order],
-            y_values=item.observed[order],
-            style=style,
-            label=display_estimator(item.estimator_id) if len(series) > 1 else "",
-            marker=style.marker,
-        )
-        coordinates.append(item.predicted)
-        coordinates.append(item.observed)
-    lower, upper = padded_limits(np.concatenate(coordinates), include_zero=False)
-    axis.plot(
-        [lower, upper],
-        [lower, upper],
-        color=REFERENCE_COLOR,
-        linestyle=REFERENCE_LINESTYLE,
-        linewidth=REFERENCE_LINEWIDTH,
-        label=IDEAL_CALIBRATION_LABEL if len(series) > 1 else "",
-        zorder=1,
-    )
-    axis.set_xlim(lower, upper)
-    axis.set_ylim(lower, upper)
-    axis.set_box_aspect(1)
-    axis.set_xlabel("Mean predicted CATE")
-    axis.set_ylabel("Mean robust proxy")
-    style_axis(axis)
-    name_curve(
-        axis=axis,
-        series_count=len(series),
-        title=display_estimator(series[0].estimator_id),
-    )
-    draw_metric_table(
-        axis=table_axis,
-        column_labels=column_labels,
-        rows=rows,
-        name_colors=name_colors,
-    )
     return figure
 
 
@@ -688,13 +576,6 @@ def row_positions(row_count: int) -> np.ndarray:
     return np.arange(row_count, dtype=float)[::-1]
 
 
-def estimator_index(estimator_id: str, series: Sequence[RankingSeries] | Sequence[CalibrationSeries]) -> int:
-    for index, item in enumerate(series):
-        if item.estimator_id == estimator_id:
-            return index
-    raise ValueError(f"Estimator {estimator_id} is not in the figure series.")
-
-
 def draw_curve(
     axis: Axes,
     x_values: np.ndarray,
@@ -719,141 +600,278 @@ def draw_curve(
     )
 
 
-def annotated_curve_axes(
-    width: float,
-    panel_height: float,
-    table_rows: int,
-    top_legend: bool,
-) -> tuple[Figure, Axes, Axes]:
-    table_height = TABLE_HEADER_INCHES + TABLE_ROW_INCHES * table_rows
-    top_band = LEGEND_BAND_INCHES if top_legend else 0.12
-    figure_height = panel_height + table_height + top_band + 0.28
-    figure = plt.figure(figsize=(width, figure_height), layout="constrained")
-    grid = figure.add_gridspec(
-        nrows=2,
-        ncols=1,
-        height_ratios=[panel_height, table_height],
-        hspace=0.08,
+EVALUATION_NAME_WIDTH_INCHES = 1.25
+EVALUATION_PANEL_WIDTH_INCHES = 2.15
+EVALUATION_PANEL_GAP_INCHES = 0.45
+EVALUATION_WIDTH_INCHES = EVALUATION_NAME_WIDTH_INCHES + 2 * EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
+EVALUATION_PANEL_TOP_INCHES = 0.08
+EVALUATION_PANEL_TITLE_INCHES = 0.26
+EVALUATION_PLOT_HEIGHT_INCHES = 1.60
+EVALUATION_TICK_BAND_INCHES = 0.50
+EVALUATION_TABLE_GAP_INCHES = 0.12
+EVALUATION_AXIS_PAD_INCHES = 0.50
+EVALUATION_AXIS_RIGHT_PAD_INCHES = 0.06
+EVALUATION_LETTER_INSET_INCHES = 0.42
+EVALUATION_LEFT_PANEL_X_INCHES = EVALUATION_NAME_WIDTH_INCHES
+EVALUATION_RIGHT_PANEL_X_INCHES = (
+    EVALUATION_LEFT_PANEL_X_INCHES + EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
+)
+EVALUATION_GROUP_TITLE_Y_INCHES = 0.11
+EVALUATION_GROUP_RULE_Y_INCHES = 0.22
+EVALUATION_SUBHEADER_Y_INCHES = 0.36
+EVALUATION_HEADER_RULE_Y_INCHES = 0.48
+EVALUATION_TABLE_ROW_INCHES = 0.22
+EVALUATION_BOTTOM_PAD_INCHES = 0.08
+MUTED_TABLE_INK = "#4A4A4A"
+# Okabe-Ito without black and yellow, so every line stays visible on white.
+EVALUATION_COLORS = ("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+CALIBRATION_GROUP = "Calibration"
+RANKING_GROUP = "Ranking"
+CALIBRATION_TITLE = "Calibration"
+RANKING_TITLE = "Targeting Operator Curve (TOC)"
+CALIBRATION_X_LABEL = "Mean Predicted CATE"
+CALIBRATION_Y_LABEL = "Mean Robust Proxy"
+RANKING_X_LABEL = "Top Fraction Ranked by Benefit"
+RANKING_Y_LABEL = "Excess Benefit"
+CALIBRATION_COLUMNS = ("ECETH", "p")
+RANKING_COLUMNS = ("AUTOC", "p", "Qini", "p")
+ESTIMATOR_ORDER = tuple(ESTIMATOR_LABELS)
+
+
+@dataclass(frozen=True)
+class EvaluationRow:
+    label: str
+    calibration: tuple[str, ...]
+    ranking: tuple[str, ...]
+
+
+def estimator_style(estimator_id: str) -> SeriesStyle:
+    """A fixed style per estimator, so one estimator keeps its colour in every figure.
+
+    Known estimators take their position in ``ESTIMATOR_LABELS``. Unknown ones hash to a
+    slot after that, so the mapping never depends on the order of the series passed in.
+    Lines stay solid so they never read as the dashed reference lines. Colour identifies the
+    estimator; the marker changes only once the palette wraps.
+    """
+    if estimator_id in ESTIMATOR_ORDER:
+        index = ESTIMATOR_ORDER.index(estimator_id)
+    else:
+        index = len(ESTIMATOR_ORDER) + zlib.crc32(estimator_id.encode("utf-8")) % 64
+    cycle, slot = divmod(index, len(EVALUATION_COLORS))
+    return SeriesStyle(
+        color=EVALUATION_COLORS[slot],
+        marker=MARKERS[cycle % len(MARKERS)],
+        linestyle="solid",
     )
-    plot_axis = figure.add_subplot(grid[0, 0])
-    table_axis = figure.add_subplot(grid[1, 0])
-    table_axis.set_axis_off()
-    return figure, plot_axis, table_axis
 
 
-def name_curve(axis: Axes, series_count: int, title: str) -> None:
-    if series_count == 1:
-        axis.set_title(title, loc="center", pad=8, fontsize=TITLE_SIZE, color=INK, fontweight="regular")
-        return
-    add_legend(axis, loc="lower center", anchor=(0.5, 1.02))
-
-
-def ranking_table(
-    series: Sequence[RankingSeries],
-) -> tuple[list[str], list[list[str]], list[str]]:
-    if len(series) == 1:
-        item = series[0]
-        return (
-            ["", "Estimate", "p"],
-            [
-                ["AUTOC", format_statistic(item.autoc), format_p_value(item.autoc_p_value)],
-                ["Qini", format_statistic(item.qini), format_p_value(item.qini_p_value)],
-            ],
-            [INK, INK],
-        )
-    rows: list[list[str]] = []
-    colors: list[str] = []
-    for index, item in enumerate(series):
-        rows.append(
-            [
-                display_estimator(item.estimator_id),
-                format_statistic(item.autoc),
-                format_p_value(item.autoc_p_value),
-                format_statistic(item.qini),
-                format_p_value(item.qini_p_value),
-            ]
-        )
-        colors.append(text_color(series_style(index).color))
-    return ["", "AUTOC", "p", "Qini", "p"], rows, colors
-
-
-def calibration_table(
-    series: Sequence[CalibrationSeries],
-) -> tuple[list[str], list[list[str]], list[str]]:
-    if len(series) == 1:
-        item = series[0]
-        return (
-            ["", "Estimate", "SE", "p"],
-            [[
-                "ECETH",
-                format_statistic(item.eceth),
-                format_statistic(item.eceth_standard_error),
-                format_p_value(item.eceth_p_value),
-            ]],
-            [INK],
-        )
-    rows: list[list[str]] = []
-    colors: list[str] = []
-    for index, item in enumerate(series):
-        rows.append(
-            [
-                display_estimator(item.estimator_id),
-                format_statistic(item.eceth),
-                format_statistic(item.eceth_standard_error),
-                format_p_value(item.eceth_p_value),
-            ]
-        )
-        colors.append(text_color(series_style(index).color))
-    return ["", "ECETH", "SE", "p"], rows, colors
-
-
-def text_color(color: str) -> str:
-    if color.upper() == "#F0E442":
-        return INK
-    return color
-
-
-def draw_metric_table(
-    axis: Axes,
-    column_labels: Sequence[str],
-    rows: Sequence[Sequence[str]],
-    name_colors: Sequence[str],
+def plot_evaluation_figure(
+    calibration: Sequence[CalibrationSeries],
+    ranking: Sequence[RankingSeries],
+    save_path: str,
 ) -> None:
-    column_count = len(column_labels)
-    name_width = 0.36 if column_count <= 4 else 0.28
-    value_width = (1.0 - name_width) / (column_count - 1)
-    table = axis.table(
-        cellText=[list(row) for row in rows],
-        colLabels=list(column_labels),
-        loc="upper center",
-        cellLoc="center",
-        colWidths=[name_width, *([value_width] * (column_count - 1))],
-        bbox=[0.04, 0.02, 0.92, 0.96],
+    with publication_style():
+        figure = compose_evaluation_figure(calibration=calibration, ranking=ranking)
+        save_figure(save_path, figure)
+        plt.close(figure)
+
+
+def compose_evaluation_figure(
+    calibration: Sequence[CalibrationSeries],
+    ranking: Sequence[RankingSeries],
+) -> Figure:
+    """Calibration and targeting curves side by side, with one table that serves both panels."""
+    if not calibration or not ranking:
+        raise ValueError("An evaluation figure needs calibration and ranking series.")
+    rows = evaluation_rows(calibration=calibration, ranking=ranking)
+    plot_top = EVALUATION_PANEL_TOP_INCHES + EVALUATION_PANEL_TITLE_INCHES
+    panel_bottom = plot_top + EVALUATION_PLOT_HEIGHT_INCHES + EVALUATION_TICK_BAND_INCHES
+    table_top = panel_bottom + EVALUATION_TABLE_GAP_INCHES
+    table_height = evaluation_table_height(len(rows))
+    height = table_top + table_height + EVALUATION_BOTTOM_PAD_INCHES
+    figure = plt.figure(figsize=(EVALUATION_WIDTH_INCHES, height))
+
+    plot_width = EVALUATION_PANEL_WIDTH_INCHES - EVALUATION_AXIS_PAD_INCHES - EVALUATION_AXIS_RIGHT_PAD_INCHES
+    calibration_axis = add_inch_axes(
+        figure,
+        EVALUATION_LEFT_PANEL_X_INCHES + EVALUATION_AXIS_PAD_INCHES,
+        plot_top,
+        plot_width,
+        EVALUATION_PLOT_HEIGHT_INCHES,
     )
-    table.auto_set_font_size(False)
-    table.set_fontsize(CAPTION_FONT_SIZE)
-    last_row = len(rows)
-    for (row_index, column_index), cell in table.get_celld().items():
-        cell.set_facecolor("white")
-        cell.set_linewidth(0.6)
-        cell.set_edgecolor(INK)
-        if row_index == 0:
-            cell.visible_edges = "TB"
-        elif row_index == last_row:
-            cell.visible_edges = "B"
-        else:
-            cell.visible_edges = ""
-        text = cell.get_text()
-        text.set_fontsize(CAPTION_FONT_SIZE)
-        text.set_color(INK)
-        if column_index == 0:
-            text.set_ha("left")
-        else:
-            text.set_ha("center")
-        if row_index == 0:
-            text.set_fontweight("regular")
-        elif column_index == 0:
-            text.set_color(name_colors[row_index - 1])
+    ranking_axis = add_inch_axes(
+        figure,
+        EVALUATION_RIGHT_PANEL_X_INCHES + EVALUATION_AXIS_PAD_INCHES,
+        plot_top,
+        plot_width,
+        EVALUATION_PLOT_HEIGHT_INCHES,
+    )
+    draw_calibration_axis(calibration_axis, calibration)
+    draw_ranking_axis(ranking_axis, ranking)
+    letter_x = -EVALUATION_LETTER_INSET_INCHES / plot_width
+    mark_panel(calibration_axis, PANEL_LETTERS[0], x=letter_x)
+    mark_panel(ranking_axis, PANEL_LETTERS[1], x=letter_x)
+
+    table_axis = add_inch_axes(figure, 0.0, table_top, EVALUATION_WIDTH_INCHES, table_height)
+    draw_evaluation_table(table_axis, rows)
+    return figure
+
+
+def inch_position(figure: Figure, x: float, y_from_top: float) -> tuple[float, float]:
+    width, height = figure.get_size_inches()
+    return x / width, 1.0 - y_from_top / height
+
+
+def add_inch_axes(figure: Figure, left: float, top: float, width: float, height: float) -> Axes:
+    figure_width, figure_height = figure.get_size_inches()
+    return figure.add_axes(
+        (left / figure_width, 1.0 - (top + height) / figure_height, width / figure_width, height / figure_height)
+    )
+
+
+def evaluation_table_height(row_count: int) -> float:
+    return EVALUATION_HEADER_RULE_Y_INCHES + EVALUATION_TABLE_ROW_INCHES * row_count + 0.02
+
+
+def evaluation_rows(
+    calibration: Sequence[CalibrationSeries],
+    ranking: Sequence[RankingSeries],
+) -> list[EvaluationRow]:
+    by_calibration = {item.estimator_id: item for item in calibration}
+    by_ranking = {item.estimator_id: item for item in ranking}
+    estimator_ids = list(dict.fromkeys([*by_ranking, *by_calibration]))
+    rows = []
+    for estimator_id in estimator_ids:
+        item_calibration = by_calibration.get(estimator_id)
+        item_ranking = by_ranking.get(estimator_id)
+        rows.append(
+            EvaluationRow(
+                label=display_estimator(estimator_id),
+                calibration=(
+                    (
+                        format_statistic(item_calibration.eceth),
+                        format_p_value(item_calibration.eceth_p_value),
+                    )
+                    if item_calibration is not None
+                    else ("NA",) * len(CALIBRATION_COLUMNS)
+                ),
+                ranking=(
+                    (
+                        format_statistic(item_ranking.autoc),
+                        format_p_value(item_ranking.autoc_p_value),
+                        format_statistic(item_ranking.qini),
+                        format_p_value(item_ranking.qini_p_value),
+                    )
+                    if item_ranking is not None
+                    else ("NA",) * len(RANKING_COLUMNS)
+                ),
+            )
+        )
+    return rows
+
+
+def draw_calibration_axis(axis: Axes, series: Sequence[CalibrationSeries]) -> None:
+    coordinates: list[np.ndarray] = []
+    for item in series:
+        if item.predicted.size == 0 or item.observed.size == 0:
+            raise ValueError("Calibration series has no bins.")
+        style = estimator_style(item.estimator_id)
+        order = np.argsort(item.predicted, kind="mergesort")
+        draw_curve(
+            axis=axis,
+            x_values=item.predicted[order],
+            y_values=item.observed[order],
+            style=style,
+            label="",
+            marker=style.marker,
+        )
+        coordinates.extend([item.predicted, item.observed])
+    lower, upper = padded_limits(np.concatenate(coordinates), include_zero=False)
+    axis.plot(
+        [lower, upper],
+        [lower, upper],
+        color=REFERENCE_COLOR,
+        linestyle=REFERENCE_LINESTYLE,
+        linewidth=REFERENCE_LINEWIDTH,
+        zorder=1,
+    )
+    axis.set_xlim(lower, upper)
+    axis.set_ylim(lower, upper)
+    axis.set_xlabel(CALIBRATION_X_LABEL)
+    axis.set_ylabel(CALIBRATION_Y_LABEL)
+    axis.set_title(CALIBRATION_TITLE, loc="left", pad=6, fontsize=AXIS_LABEL_SIZE, color=INK)
+    style_axis(axis)
+
+
+def draw_ranking_axis(axis: Axes, series: Sequence[RankingSeries]) -> None:
+    values: list[np.ndarray] = []
+    for item in series:
+        draw_curve(
+            axis=axis,
+            x_values=item.toc_fraction,
+            y_values=item.toc_value,
+            style=estimator_style(item.estimator_id),
+            label="",
+            marker="none",
+        )
+        values.append(item.toc_value)
+    add_horizontal_reference(axis, 0.0)
+    lower, upper = padded_limits(np.concatenate(values), include_zero=True)
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(lower, upper)
+    ticks = np.linspace(0.0, 1.0, 6)
+    axis.set_xticks(ticks)
+    axis.set_xticklabels([f"{round(tick * 100)}%" for tick in ticks])
+    axis.set_xlabel(RANKING_X_LABEL)
+    axis.set_ylabel(RANKING_Y_LABEL)
+    axis.set_title(RANKING_TITLE, loc="left", pad=6, fontsize=AXIS_LABEL_SIZE, color=INK)
+    style_axis(axis)
+
+
+def column_centers(left: float, width: float, count: int) -> list[float]:
+    return [left + width * (index + 0.5) / count for index in range(count)]
+
+
+def draw_evaluation_table(axis: Axes, rows: Sequence[EvaluationRow]) -> None:
+    """One table under both panels. Each column group sits under its own panel."""
+    axis.set_xlim(0.0, EVALUATION_WIDTH_INCHES)
+    axis.set_ylim(evaluation_table_height(len(rows)), 0.0)
+    axis.axis("off")
+    calibration_centers = column_centers(
+        EVALUATION_LEFT_PANEL_X_INCHES, EVALUATION_PANEL_WIDTH_INCHES, len(CALIBRATION_COLUMNS)
+    )
+    ranking_centers = column_centers(
+        EVALUATION_RIGHT_PANEL_X_INCHES, EVALUATION_PANEL_WIDTH_INCHES, len(RANKING_COLUMNS)
+    )
+    for left, text in (
+        (EVALUATION_LEFT_PANEL_X_INCHES, CALIBRATION_GROUP),
+        (EVALUATION_RIGHT_PANEL_X_INCHES, RANKING_GROUP),
+    ):
+        center = left + EVALUATION_PANEL_WIDTH_INCHES / 2
+        axis.text(center, EVALUATION_GROUP_TITLE_Y_INCHES, text, ha="center", va="center",
+                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+        axis.plot([left, left + EVALUATION_PANEL_WIDTH_INCHES], [EVALUATION_GROUP_RULE_Y_INCHES] * 2,
+                  color=INK, linewidth=0.5, solid_capstyle="butt")
+    axis.text(0.0, EVALUATION_SUBHEADER_Y_INCHES, "Estimator", ha="left", va="center",
+              fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+    for center, header in zip(calibration_centers, CALIBRATION_COLUMNS, strict=True):
+        axis.text(center, EVALUATION_SUBHEADER_Y_INCHES, header, ha="center", va="center",
+                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+    for center, header in zip(ranking_centers, RANKING_COLUMNS, strict=True):
+        axis.text(center, EVALUATION_SUBHEADER_Y_INCHES, header, ha="center", va="center",
+                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+    rule_width = EVALUATION_WIDTH_INCHES
+    axis.plot([0.0, rule_width], [EVALUATION_HEADER_RULE_Y_INCHES] * 2, color=INK, linewidth=0.7,
+              solid_capstyle="butt")
+    for index, row in enumerate(rows):
+        middle = EVALUATION_HEADER_RULE_Y_INCHES + EVALUATION_TABLE_ROW_INCHES * (index + 0.5)
+        axis.text(0.0, middle, row.label, ha="left", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
+        for center, value in zip(calibration_centers, row.calibration, strict=True):
+            axis.text(center, middle, value, ha="center", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
+        for center, value in zip(ranking_centers, row.ranking, strict=True):
+            axis.text(center, middle, value, ha="center", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
+    bottom = evaluation_table_height(len(rows)) - 0.01
+    axis.plot([0.0, rule_width], [bottom, bottom], color=INK, linewidth=0.7, solid_capstyle="butt")
 
 
 def padded_limits(values: np.ndarray, include_zero: bool) -> tuple[float, float]:
@@ -877,30 +895,6 @@ def panel_letter(index: int) -> str:
     if index < len(PANEL_LETTERS):
         return PANEL_LETTERS[index]
     return str(index + 1)
-
-
-def add_legend(axis: Axes, loc: str, anchor: tuple[float, float]) -> None:
-    handles, labels = axis.get_legend_handles_labels()
-    kept_handles = []
-    kept_labels = []
-    for handle, label in zip(handles, labels, strict=True):
-        if label:
-            kept_handles.append(handle)
-            kept_labels.append(label)
-    if not kept_labels:
-        return
-    axis.legend(
-        kept_handles,
-        kept_labels,
-        frameon=False,
-        fontsize=LEGEND_FONT_SIZE,
-        handlelength=1.8,
-        borderaxespad=0.0,
-        loc=loc,
-        bbox_to_anchor=anchor,
-        ncol=len(kept_labels),
-        columnspacing=1.4,
-    )
 
 
 def finish_figure(figure: Figure, bottom: float) -> None:

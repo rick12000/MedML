@@ -20,19 +20,18 @@ from causal_pipeline.config import (
     TestValidationSignal,
     predict_outcome_mean,
 )
-from causal_pipeline.policy import reward_direction
-from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
-from causal_pipeline.learner_resolve import materialize_evaluation_learners
-from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.crossfit import cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.diagnostics import probability_of_arm
 from causal_pipeline.figures import (
     CalibrationSeries,
     RankingSeries,
-    plot_calibration_curves,
-    plot_ranking_curves,
+    plot_evaluation_figure,
 )
+from causal_pipeline.learner_resolve import materialize_evaluation_learners
+from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
+from causal_pipeline.policy import reward_direction
+from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -211,25 +210,25 @@ def write_calibration_curve_data(save_path: str | Path, series: Sequence[Calibra
     return destination
 
 
-def save_joint_cate_figures(
+def save_comparison_figures(
     ranking_by_contrast: dict[str, list[RankingSeries]],
     calibration_by_contrast: dict[str, list[CalibrationSeries]],
     results_root: Path,
     held_out: bool,
 ) -> None:
+    """One figure per contrast, with every estimator in it, plus the CSVs behind it."""
     marker = "test_" if held_out else ""
     for contrast, ranking in ranking_by_contrast.items():
         comparison = results_root / "cate" / "comparison" / contrast
-        toc_path = comparison / f"{marker}toc.png"
-        calibration_path = comparison / f"{marker}calibration.png"
-        plot_ranking_curves(series=ranking, save_path=str(toc_path))
-        write_ranking_curve_data(toc_path, ranking)
-        plot_calibration_curves(
-            series=calibration_by_contrast[contrast],
-            save_path=str(calibration_path),
+        calibration = calibration_by_contrast[contrast]
+        plot_evaluation_figure(
+            calibration=calibration,
+            ranking=ranking,
+            save_path=str(comparison / f"{marker}evaluation.png"),
         )
-        write_calibration_curve_data(calibration_path, calibration_by_contrast[contrast])
-        logger.info("Saved joint CATE figures for %s", contrast)
+        write_ranking_curve_data(comparison / f"{marker}toc.csv", ranking)
+        write_calibration_curve_data(comparison / f"{marker}calibration.csv", calibration)
+        logger.info("Saved comparison CATE figure for %s", contrast)
 
 
 class ContrastEvaluation(BaseModel):
@@ -246,8 +245,8 @@ class ContrastEvaluation(BaseModel):
     rate_qini: float
     rate_qini_standard_error: float
     rate_qini_pvalue: float
-    calibration_path: str = Field(min_length=1)
-    toc_path: str = Field(min_length=1)
+    calibration_data_path: str = Field(min_length=1)
+    toc_data_path: str = Field(min_length=1)
 
 
 class CATEEvaluator:
@@ -440,8 +439,9 @@ class CATEEvaluator:
                     gamma=gamma,
                     n_bins=self.evaluation.calibration_bins,
                 )
-                calibration_path = f"cate/{estimator_id}/{contrast}/{marker}calibration.png"
-                calibration_file = results_root / calibration_path
+                data_dir = f"cate/{estimator_id}/{contrast}"
+                calibration_data_path = f"{data_dir}/{marker}calibration.csv"
+                toc_data_path = f"{data_dir}/{marker}toc.csv"
                 toc_fraction, toc_value = ranking_curve(
                     tau_hat=tau_hat,
                     gamma=gamma,
@@ -480,15 +480,8 @@ class CATEEvaluator:
                     eceth_standard_error=eceth_se,
                     eceth_p_value=eceth_pvalue,
                 )
-                toc_path = f"cate/{estimator_id}/{contrast}/{marker}toc.png"
-                toc_file = results_root / toc_path
-                plot_ranking_curves(series=[ranking], save_path=str(toc_file))
-                write_ranking_curve_data(toc_file, [ranking])
-                plot_calibration_curves(
-                    series=[calibration],
-                    save_path=str(calibration_file),
-                )
-                write_dataframe(calibration_file.with_suffix(".csv"), pd.DataFrame(rows))
+                write_ranking_curve_data(results_root / toc_data_path, [ranking])
+                write_dataframe(results_root / calibration_data_path, pd.DataFrame(rows))
                 ranking_by_contrast.setdefault(contrast, []).append(ranking)
                 calibration_by_contrast.setdefault(contrast, []).append(calibration)
                 contrast_results.append(
@@ -504,12 +497,12 @@ class CATEEvaluator:
                         rate_qini=rate_qini,
                         rate_qini_standard_error=rate_qini_se,
                         rate_qini_pvalue=rate_qini_p,
-                        calibration_path=calibration_path,
-                        toc_path=toc_path,
+                        calibration_data_path=calibration_data_path,
+                        toc_data_path=toc_data_path,
                     )
                 )
             results[estimator_id] = contrast_results
-        save_joint_cate_figures(
+        save_comparison_figures(
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results_root,

@@ -29,7 +29,7 @@ from causal_pipeline.pooling import (
     reference_sample_size,
 )
 from causal_pipeline.results import ResultStore
-from causal_pipeline.subgroup_figures import SUBGROUP_SPLITS_FIGURE_NAME, plot_subgroup_splits_table
+from causal_pipeline.subgroup_figures import write_subgroup_figures
 from causal_pipeline.utils import read_dataframe, write_dataframe
 
 logger = logging.getLogger(__name__)
@@ -109,10 +109,10 @@ def write_pooled_subgroups(
         )
         results.write_dataframe("ate/subgroup_splits.csv", df_pooled)
         splits = config.subgroup_splits or []
-        plot_subgroup_splits_table(
+        write_subgroup_figures(
             table=df_pooled,
             split_order=[(split.column, split.cutoff) for split in splits],
-            save_path=str(results.root / "ate" / SUBGROUP_SPLITS_FIGURE_NAME),
+            output_dir=results.root / "ate",
         )
 
 

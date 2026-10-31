@@ -1,12 +1,19 @@
 """Forest-style table for pre-specified subgroup split results.
 
-Rows are subgroup splits. When several treatment contrasts were estimated, rows are
-grouped by contrast. The overall row (``All``) leads each group and is highlighted.
+Two images are written per subgroup table.
+
+The estimate figure has one row per subgroup split. When several treatment contrasts
+were estimated, rows are grouped by contrast. The overall row (``All``) leads each group
+and is highlighted. Each estimator gets an ATE block.
+
+The difference figure has one row per subgroup split, grouped by contrast. It has two
+unadjusted blocks. The split difference is the treated-minus-untreated outcome gap on
+each side of the cutoff, differenced between the two sides. The group difference is the
+mean outcome above the cutoff minus the mean outcome below it.
 
 Columns are a shared descriptive part followed by blocks. The descriptive part is the
-group (split variable), the splits (cutoff sides, or ``1 / 0`` for binary variables),
-and the patient counts. Each estimator gets an ATE block. The raw difference is
-unadjusted, so it is the same for every estimator and gets one shared block. Each block
+variable (split column), the splits (cutoff sides, or ``1 / 0`` for binary variables),
+and the patient counts. Each block
 holds a delta column, a confidence-interval column, a p column, and a forest column.
 
 The figure is drawn on one canvas measured in inches. Column widths come from the text
@@ -15,8 +22,9 @@ each column holds, so spacing stays tight whatever the labels are.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib
 
@@ -39,14 +47,22 @@ from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE, OVERALL_LABEL
 from causal_pipeline.utils import save_figure
 
 SUBGROUP_SPLITS_FIGURE_NAME = "subgroup_splits.png"
+SUBGROUP_DIFFERENCES_FIGURE_NAME = "subgroup_differences.png"
 
 DELTA = "Δ"
-RAW_BLOCK_KEY = "raw_outcome"
 ATE_KIND = "ate"
-RAW_KIND = "raw"
-RAW_TITLE = "Raw Difference"
-AXIS_LABELS = {ATE_KIND: f"ATE {DELTA}", RAW_KIND: f"Raw {DELTA}"}
-GROUP_HEADER = "Group"
+SPLIT_KIND = "split"
+GROUP_KIND = "group"
+SPLIT_BLOCK_KEY = "split_difference"
+GROUP_BLOCK_KEY = "group_difference"
+SPLIT_DIFFERENCE_TITLE = "Split Difference"
+GROUP_DIFFERENCE_TITLE = "Group Difference"
+AXIS_LABELS = {
+    ATE_KIND: f"ATE {DELTA}",
+    SPLIT_KIND: f"Split {DELTA}",
+    GROUP_KIND: f"Group {DELTA}",
+}
+GROUP_HEADER = "Variable"
 SPLITS_HEADER = "Splits"
 PATIENTS_HEADER = "Patients"
 P_HEADER = "p"
@@ -65,6 +81,7 @@ TOP_PAD_INCHES = 0.06
 GROUP_TITLE_INCHES = 0.26
 ROW_INCHES = 0.27
 AXIS_INCHES = 0.50
+AXIS_TICKS_INCHES = 0.30
 
 COLUMN_GAP_INCHES = 0.14
 INNER_GAP_INCHES = 0.14
@@ -188,11 +205,41 @@ def plot_subgroup_splits_table(
     split_order: Sequence[tuple[str, float]],
     save_path: str,
 ) -> None:
+    """Write the estimate figure: one ATE block per estimator."""
     if table.empty:
         return
     model = build_table_model(table=table, split_order=split_order)
     if not any(group.rows for group in model.groups):
         return
+    _save_model(model, save_path)
+
+
+def plot_subgroup_differences_table(
+    table: pd.DataFrame,
+    split_order: Sequence[tuple[str, float]],
+    save_path: str,
+) -> None:
+    """Write the difference figure: split difference first, then group difference."""
+    if table.empty:
+        return
+    model = build_difference_model(table=table, split_order=split_order)
+    if not any(group.rows for group in model.groups):
+        return
+    _save_model(model, save_path)
+
+
+def write_subgroup_figures(
+    table: pd.DataFrame,
+    split_order: Sequence[tuple[str, float]],
+    output_dir: str | Path,
+) -> None:
+    """Write both subgroup images into ``output_dir``."""
+    output = Path(output_dir)
+    plot_subgroup_splits_table(table, split_order, str(output / SUBGROUP_SPLITS_FIGURE_NAME))
+    plot_subgroup_differences_table(table, split_order, str(output / SUBGROUP_DIFFERENCES_FIGURE_NAME))
+
+
+def _save_model(model: TableModel, save_path: str) -> None:
     with publication_style():
         figure = compose_subgroup_table(model)
         save_figure(save_path, figure)
@@ -202,27 +249,56 @@ def plot_subgroup_splits_table(
 # Data model
 
 
-def table_blocks(table: pd.DataFrame) -> tuple[Block, ...]:
-    """Column blocks for every estimator in ``table``, plus the shared raw block.
+def estimate_blocks(table: pd.DataFrame) -> tuple[Block, ...]:
+    """One ATE block per estimator in ``table``.
 
     Safe to call on a table that stacks several scenarios, because it never groups rows.
     """
     estimators = unique_strings(table["estimator"])
+    return tuple(
+        Block(key=estimator, title=display_estimator(estimator), kind=ATE_KIND) for estimator in estimators
+    )
+
+
+def difference_blocks() -> tuple[Block, ...]:
+    """Split difference first, then group difference. Both are estimator-free."""
     return (
-        *(Block(key=estimator, title=display_estimator(estimator), kind=ATE_KIND) for estimator in estimators),
-        Block(key=RAW_BLOCK_KEY, title=RAW_TITLE, kind=RAW_KIND),
+        Block(key=SPLIT_BLOCK_KEY, title=SPLIT_DIFFERENCE_TITLE, kind=SPLIT_KIND),
+        Block(key=GROUP_BLOCK_KEY, title=GROUP_DIFFERENCE_TITLE, kind=GROUP_KIND),
     )
 
 
 def build_table_model(table: pd.DataFrame, split_order: Sequence[tuple[str, float]]) -> TableModel:
-    blocks = table_blocks(table)
+    return build_model(
+        table=table,
+        blocks=estimate_blocks(table),
+        split_order=split_order,
+        make_group=contrast_group,
+    )
+
+
+def build_difference_model(table: pd.DataFrame, split_order: Sequence[tuple[str, float]]) -> TableModel:
+    return build_model(
+        table=table,
+        blocks=difference_blocks(),
+        split_order=split_order,
+        make_group=difference_group,
+    )
+
+
+def build_model(
+    table: pd.DataFrame,
+    blocks: tuple[Block, ...],
+    split_order: Sequence[tuple[str, float]],
+    make_group: Callable[[pd.DataFrame, Sequence[tuple[str, float]], str], ContrastGroup],
+) -> TableModel:
     contrasts = unique_strings(table["contrast"])
     multi_contrast = len(contrasts) > 1
     groups = tuple(
-        contrast_group(
-            frame=table.loc[table["contrast"].astype(str) == contrast],
-            split_order=split_order,
-            title=display_contrast(contrast) if multi_contrast else "",
+        make_group(
+            table.loc[table["contrast"].astype(str) == contrast],
+            split_order,
+            display_contrast(contrast) if multi_contrast else "",
         )
         for contrast in contrasts
     )
@@ -238,6 +314,16 @@ def contrast_group(frame: pd.DataFrame, split_order: Sequence[tuple[str, float]]
     ]
     overall = overall_row(frame, overall_patients(frame, split_order))
     rows = [overall, *split_rows] if overall is not None else split_rows
+    return ContrastGroup(title=title, rows=tuple(rows))
+
+
+def difference_group(frame: pd.DataFrame, split_order: Sequence[tuple[str, float]], title: str) -> ContrastGroup:
+    """Split rows only. The difference blocks have no overall row."""
+    rows = [
+        row
+        for column, cutoff in split_order
+        if (row := difference_row(frame, column, cutoff)) is not None
+    ]
     return ContrastGroup(title=title, rows=tuple(rows))
 
 
@@ -275,10 +361,6 @@ def split_row(frame: pd.DataFrame, column: str, cutoff: float) -> SubgroupRow | 
         return None
     records = one_record_per_estimator(matches)
     first = next(iter(records.values()))
-    intervals: dict[str, Interval | None] = {
-        key: interval_from(record, "effect") for key, record in records.items()
-    }
-    intervals[RAW_BLOCK_KEY] = shared_raw_interval(list(records.values()))
     return SubgroupRow(
         group=column,
         splits=split_text(
@@ -288,7 +370,33 @@ def split_row(frame: pd.DataFrame, column: str, cutoff: float) -> SubgroupRow | 
         ),
         patients=f"{int(first['n_above'])} / {int(first['n_below'])}",
         is_overall=False,
-        intervals=present(intervals),
+        intervals=present({key: interval_from(record, "effect") for key, record in records.items()}),
+    )
+
+
+def difference_row(frame: pd.DataFrame, column: str, cutoff: float) -> SubgroupRow | None:
+    """Split and group differences do not depend on the estimator, so one shared row per split."""
+    matches = matching_split_records(frame, column, cutoff)
+    if matches.empty:
+        return None
+    records = list(one_record_per_estimator(matches).values())
+    check_shared_differences(records)
+    first = records[0]
+    return SubgroupRow(
+        group=column,
+        splits=split_text(
+            cutoff=cutoff,
+            above_rule=str(first["above_rule"]),
+            is_binary=as_bool(first["split_is_binary"]),
+        ),
+        patients=f"{int(first['n_above'])} / {int(first['n_below'])}",
+        is_overall=False,
+        intervals=present(
+            {
+                SPLIT_BLOCK_KEY: interval_from(first, "treatment"),
+                GROUP_BLOCK_KEY: interval_from(first, "outcome"),
+            }
+        ),
     )
 
 
@@ -302,27 +410,27 @@ def one_record_per_estimator(frame: pd.DataFrame) -> dict[str, pd.Series]:
     return records
 
 
-def shared_raw_interval(records: Sequence[pd.Series]) -> Interval | None:
-    """Raw differences and counts do not depend on the estimator, so they must agree across it."""
-    reference = shared_values(records[0])
+DIFFERENCE_CHECK_COLUMNS = (
+    "n_above",
+    "n_below",
+    "treatment_difference",
+    "treatment_ci_lower",
+    "treatment_ci_upper",
+    "treatment_pvalue",
+    "outcome_difference",
+    "outcome_ci_lower",
+    "outcome_ci_upper",
+    "outcome_pvalue",
+)
+
+
+def check_shared_differences(records: Sequence[pd.Series]) -> None:
+    """Differences and counts do not depend on the estimator, so they must agree across it."""
+    reference = np.array([float(records[0][column]) for column in DIFFERENCE_CHECK_COLUMNS])
     for record in records[1:]:
-        if not np.allclose(reference, shared_values(record), equal_nan=True):
-            raise ValueError("Raw outcome differences and counts must match across estimators for each split.")
-    return interval_from(records[0], "outcome")
-
-
-def shared_values(record: pd.Series) -> np.ndarray:
-    return np.array(
-        [
-            record["n_above"],
-            record["n_below"],
-            record["outcome_difference"],
-            record["outcome_ci_lower"],
-            record["outcome_ci_upper"],
-            record["outcome_pvalue"],
-        ],
-        dtype=float,
-    )
+        values = np.array([float(record[column]) for column in DIFFERENCE_CHECK_COLUMNS])
+        if not np.allclose(reference, values, equal_nan=True):
+            raise ValueError("Split and group differences and counts must match across estimators for each split.")
 
 
 def interval_from(record: pd.Series, prefix: str) -> Interval | None:
@@ -481,8 +589,13 @@ def build_vertical_layout(model: TableModel) -> VerticalLayout:
     body_top = header_top + HEADER_PARENT_INCHES + HEADER_SUB_INCHES + TOP_PAD_INCHES
     body_height = sum(group_height(group) for group in model.groups)
     axis_y = body_top + body_height
-    height = axis_y + AXIS_INCHES + MARGIN_INCHES
+    height = axis_y + axis_block_inches(with_label=True) + MARGIN_INCHES
     return VerticalLayout(header_top=header_top, body_top=body_top, axis_y=axis_y, height=height)
+
+
+def axis_block_inches(*, with_label: bool) -> float:
+    """Vertical space taken by one forest axis: ticks only, or ticks plus the axis title."""
+    return AXIS_INCHES if with_label else AXIS_TICKS_INCHES
 
 
 def group_height(group: ContrastGroup) -> float:
@@ -594,9 +707,36 @@ def draw_body(
         for row in group.rows:
             draw_row(canvas, model.blocks, layout, row, top, scales)
             top += ROW_INCHES
-    draw_rule(canvas, layout, vertical.axis_y, INK, 0.7)
+    draw_forest_axes(
+        canvas,
+        layout,
+        scales,
+        top=vertical.body_top,
+        axis_y=vertical.axis_y,
+        show_label=True,
+    )
+
+
+def draw_forest_axes(
+    canvas,
+    layout: TableLayout,
+    scales: Mapping[str, tuple[float, float]],
+    *,
+    top: float,
+    axis_y: float,
+    show_label: bool,
+) -> None:
+    """One x-axis under every forest column. ``top`` is where the zero reference line starts."""
+    draw_rule(canvas, layout, axis_y, INK, 0.7)
     for columns in layout.blocks:
-        draw_forest_axis(canvas, columns, scales[columns.block.kind], vertical)
+        draw_forest_axis(
+            canvas,
+            columns,
+            scales[columns.block.kind],
+            top=top,
+            axis_y=axis_y,
+            show_label=show_label,
+        )
 
 
 def draw_row(
@@ -661,18 +801,27 @@ def draw_interval(
                 color=color, zorder=5)
 
 
-def draw_forest_axis(canvas, columns: BlockColumns, scale: tuple[float, float], vertical: VerticalLayout) -> None:
+def draw_forest_axis(
+    canvas,
+    columns: BlockColumns,
+    scale: tuple[float, float],
+    *,
+    top: float,
+    axis_y: float,
+    show_label: bool,
+) -> None:
     span = columns.forest
     zero_x = to_canvas_x(span, scale, 0.0)
-    canvas.plot([zero_x, zero_x], [vertical.body_top, vertical.axis_y], color=REFERENCE_COLOR,
+    canvas.plot([zero_x, zero_x], [top, axis_y], color=REFERENCE_COLOR,
                 linestyle=(0, (2, 2)), linewidth=0.5, zorder=1)
     for tick in nice_ticks(scale):
         x = to_canvas_x(span, scale, tick)
-        canvas.plot([x, x], [vertical.axis_y, vertical.axis_y + TICK_LENGTH_INCHES], color=INK, linewidth=0.6)
-        canvas.text(x, vertical.axis_y + TICK_LABEL_OFFSET_INCHES, format_tick(tick), fontsize=TICK_FONT,
+        canvas.plot([x, x], [axis_y, axis_y + TICK_LENGTH_INCHES], color=INK, linewidth=0.6)
+        canvas.text(x, axis_y + TICK_LABEL_OFFSET_INCHES, format_tick(tick), fontsize=TICK_FONT,
                     color=INK, ha="center", va="top")
-    canvas.text(span.center, vertical.axis_y + AXIS_LABEL_OFFSET_INCHES, AXIS_LABELS[columns.block.kind],
-                fontsize=TICK_FONT, color=MUTED_INK, ha="center", va="top")
+    if show_label:
+        canvas.text(span.center, axis_y + AXIS_LABEL_OFFSET_INCHES, AXIS_LABELS[columns.block.kind],
+                    fontsize=TICK_FONT, color=MUTED_INK, ha="center", va="top")
 
 
 def draw_rule(canvas, layout: TableLayout, y: float, color: str, linewidth: float) -> None:

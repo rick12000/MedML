@@ -254,7 +254,7 @@ def pool_subgroup_table(
     level_column: str,
     sample_size: int,
 ) -> pd.DataFrame:
-    """Pool effect and outcome differences. Counts stay at their cross-imputation mean.
+    """Pool effect, split-treatment, and group-outcome differences. Counts stay at their cross-imputation mean.
 
     ``effect_se`` and ``outcome_se`` become the square root of Rubin's total
     variance. The intervals and p-values use the Barnard–Rubin t reference.
@@ -265,7 +265,7 @@ def pool_subgroup_table(
         (
             [frame.loc[frame["cutoff"].notna()] for frame in frames],
             ["estimator", "contrast", "column", "cutoff"],
-            ("effect", "outcome"),
+            ("effect", "treatment", "outcome"),
         ),
         (
             [frame.loc[frame["cutoff"].isna()] for frame in frames],

@@ -19,15 +19,21 @@ from causal_pipeline.subgroup import (
     subgroup_split_table,
 )
 from causal_pipeline.subgroup_figures import (
-    RAW_BLOCK_KEY,
+    GROUP_BLOCK_KEY,
+    SPLIT_BLOCK_KEY,
+    SUBGROUP_DIFFERENCES_FIGURE_NAME,
+    SUBGROUP_SPLITS_FIGURE_NAME,
     EstimateCell,
     Interval,
+    build_difference_model,
     build_table_model,
+    estimate_blocks,
     estimate_cell,
     format_p,
+    plot_subgroup_differences_table,
     plot_subgroup_splits_table,
     split_text,
-    table_blocks,
+    write_subgroup_figures,
 )
 
 CONFIDENCE_LEVEL = 0.95
@@ -91,10 +97,10 @@ def _two_estimator_table() -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True)
 
 
-def test_figure_model_puts_overall_row_first_and_shares_the_raw_difference() -> None:
+def test_estimate_figure_model_puts_overall_row_first_with_only_estimator_blocks() -> None:
     table = _two_estimator_table()
     model = build_table_model(table=table, split_order=[("age", 60.0), ("x1", 0.5)])
-    assert [block.key for block in model.blocks] == ["ipw", "aipw", RAW_BLOCK_KEY]
+    assert [block.key for block in model.blocks] == ["ipw", "aipw"]
     assert len(model.groups) == 1
     rows = model.groups[0].rows
     assert [row.group for row in rows] == [OVERALL_LABEL, "age", "x1"]
@@ -102,18 +108,120 @@ def test_figure_model_puts_overall_row_first_and_shares_the_raw_difference() -> 
     assert rows[0].is_overall
     assert rows[0].patients == "6"
     assert set(rows[0].intervals) == {"ipw", "aipw"}
-    assert set(rows[1].intervals) == {"ipw", "aipw", RAW_BLOCK_KEY}
+    assert set(rows[1].intervals) == {"ipw", "aipw"}
     assert rows[1].patients == "4 / 2"
-    assert rows[1].intervals[RAW_BLOCK_KEY].estimate == pytest.approx(5.0)
 
 
-def test_table_blocks_accepts_stacked_scenarios_with_repeated_splits() -> None:
+def test_difference_model_has_split_then_group_blocks_and_no_overall_row() -> None:
+    table = _two_estimator_table()
+    model = build_difference_model(table=table, split_order=[("age", 60.0), ("x1", 0.5)])
+    assert [block.key for block in model.blocks] == [SPLIT_BLOCK_KEY, GROUP_BLOCK_KEY]
+    assert len(model.groups) == 1
+    rows = model.groups[0].rows
+    assert [row.group for row in rows] == ["age", "x1"]
+    assert not any(row.is_overall for row in rows)
+    # Below the age cutoff this fixture has one treated and one untreated row, so the
+    # split difference is undefined and the block is left empty.
+    assert set(rows[0].intervals) == {GROUP_BLOCK_KEY}
+    assert rows[0].patients == "4 / 2"
+    assert rows[0].intervals[GROUP_BLOCK_KEY].estimate == pytest.approx(5.0)
+
+
+def test_estimate_blocks_accepts_stacked_scenarios_with_repeated_splits() -> None:
     table = _two_estimator_table()
     stacked = pd.concat([table, table], ignore_index=True)
-    blocks = table_blocks(stacked)
-    assert [block.key for block in blocks] == ["ipw", "aipw", RAW_BLOCK_KEY]
+    blocks = estimate_blocks(stacked)
+    assert [block.key for block in blocks] == ["ipw", "aipw"]
     with pytest.raises(ValueError, match="more than one row"):
         build_table_model(table=stacked, split_order=[("age", 60.0)])
+
+
+def _split_difference_dataset() -> tuple[CausalDataset, TreatmentContrastScores]:
+    """Above the cutoff: treated mean 4, untreated mean 1. Below: treated 2, untreated 1."""
+    dataset = CausalDataset(
+        data=DataConfig(
+            outcome="y",
+            treatment="t",
+            confounders=["x1"],
+            effect_modifiers=["x1"],
+            outcome_type=OutcomeType.CONTINUOUS,
+            treatment_mode=TreatmentMode.BINARY,
+            control_value=0,
+            treatment_values=[0, 1],
+        ),
+        df=pd.DataFrame(
+            {
+                "y": [3.0, 5.0, 1.0, 1.0, 2.0, 2.0, 0.0, 2.0],
+                "t": [1, 1, 0, 0, 1, 1, 0, 0],
+                "x1": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            }
+        ),
+    )
+    scores = TreatmentContrastScores(
+        values=pd.DataFrame({"1_vs_0": np.ones(8)}),
+        positions=np.arange(8),
+        groups=None,
+        confidence_level=CONFIDENCE_LEVEL,
+    )
+    return dataset, scores
+
+
+def test_split_difference_is_treated_minus_untreated_within_each_side_then_differenced() -> None:
+    dataset, scores = _split_difference_dataset()
+    table = subgroup_split_table(
+        dataset=dataset,
+        splits=[SubgroupSplit(column="x1", cutoff=0.5)],
+        scores=scores,
+        estimator_id="ipw",
+    )
+    row = table.iloc[0]
+    assert row["treatment_above"] == pytest.approx(3.0)
+    assert row["treatment_below"] == pytest.approx(1.0)
+    assert row["treatment_difference"] == pytest.approx(2.0)
+    # Each side adds 0.5 to the squared standard error, from its treated arm (above) and untreated arm (below).
+    assert row["treatment_se"] == pytest.approx(1.0)
+    # Group difference is the unadjusted outcome gap: 2.5 above minus 1.5 below.
+    assert row["outcome_difference"] == pytest.approx(1.0)
+
+
+def test_split_difference_is_missing_when_a_side_lacks_one_arm() -> None:
+    dataset, scores = _split_difference_dataset()
+    dataset.df.loc[dataset.df.index[:2], "t"] = 0
+    table = subgroup_split_table(
+        dataset=dataset,
+        splits=[SubgroupSplit(column="x1", cutoff=0.5)],
+        scores=scores,
+        estimator_id="ipw",
+    )
+    assert pd.isna(table.iloc[0]["treatment_difference"])
+    assert not pd.isna(table.iloc[0]["outcome_difference"])
+
+
+def test_difference_figure_renders(test_output_dir) -> None:
+    dataset, scores = _split_difference_dataset()
+    table = subgroup_split_table(
+        dataset=dataset,
+        splits=[SubgroupSplit(column="x1", cutoff=0.5)],
+        scores=scores,
+        estimator_id="ipw",
+    )
+    output = test_output_dir / "subgroup" / SUBGROUP_DIFFERENCES_FIGURE_NAME
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plot_subgroup_differences_table(table=table, split_order=[("x1", 0.5)], save_path=str(output))
+    assert output.is_file()
+    assert output.stat().st_size > 0
+
+
+def test_write_subgroup_figures_writes_both_images(test_output_dir) -> None:
+    output_dir = test_output_dir / "subgroup_both"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_subgroup_figures(
+        table=_two_estimator_table(),
+        split_order=[("age", 60.0), ("x1", 0.5)],
+        output_dir=output_dir,
+    )
+    assert (output_dir / SUBGROUP_SPLITS_FIGURE_NAME).is_file()
+    assert (output_dir / SUBGROUP_DIFFERENCES_FIGURE_NAME).is_file()
 
 
 def test_binary_split_is_flagged_only_when_every_value_is_zero_or_one() -> None:
@@ -127,16 +235,22 @@ def test_binary_split_text_is_one_slash_zero() -> None:
     assert split_text(cutoff=60.0, above_rule=ABOVE_CUTOFF_RULE, is_binary=False) == "≥ 60 / < 60"
 
 
-def test_figure_model_rejects_raw_differences_that_disagree_across_estimators() -> None:
+def test_difference_model_rejects_differences_that_disagree_across_estimators() -> None:
     table = _two_estimator_table()
     aipw_rows = table["estimator"] == "aipw"
     table.loc[aipw_rows & (table["cutoff"] == 60.0), "outcome_difference"] += 1.0
     with pytest.raises(ValueError, match="must match across estimators"):
-        build_table_model(table=table, split_order=[("age", 60.0)])
+        build_difference_model(table=table, split_order=[("age", 60.0)])
 
 
 def test_figure_model_groups_each_contrast_with_its_own_overall_row() -> None:
-    dataset = _two_group_dataset()
+    base = _two_group_dataset()
+    dataset = CausalDataset(
+        data=base.data.model_copy(
+            update={"treatment_values": [0, 1, 2], "treatment_mode": TreatmentMode.MULTI}
+        ),
+        df=base.df,
+    )
     scores = TreatmentContrastScores(
         values=pd.DataFrame(
             {"1_vs_0": [1.0, 1.0, 2.0, 2.0, 2.0, 2.0], "2_vs_0": [0.5, 0.5, 1.0, 1.0, 1.0, 1.0]}

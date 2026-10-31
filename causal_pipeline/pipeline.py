@@ -109,7 +109,7 @@ from causal_pipeline.selection import (
     unseen_population_bound,
 )
 from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
-from causal_pipeline.subgroup_figures import SUBGROUP_SPLITS_FIGURE_NAME, plot_subgroup_splits_table
+from causal_pipeline.subgroup_figures import write_subgroup_figures
 from causal_pipeline.logging_config import configure_package_runtime
 from causal_pipeline.utils import read_dataframe, write_dataframe
 
@@ -1292,10 +1292,10 @@ class CausalPipeline:
             ]
             df_subgroups = pd.concat(df_tables, ignore_index=True)
             results.write_dataframe("ate/subgroup_splits.csv", df_subgroups)
-            plot_subgroup_splits_table(
+            write_subgroup_figures(
                 table=df_subgroups,
                 split_order=[(split.column, split.cutoff) for split in splits],
-                save_path=str(results.root / "ate" / SUBGROUP_SPLITS_FIGURE_NAME),
+                output_dir=results.root / "ate",
             )
             logger.info("...Finished estimating pre-specified subgroup splits")
         return df_subgroups

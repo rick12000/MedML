@@ -23,6 +23,7 @@ SUBGROUP_SPLIT_COLUMNS = [
     "column",
     "cutoff",
     "above_rule",
+    "split_is_binary",
     "confidence_level",
     "n_above",
     "n_below",
@@ -42,7 +43,7 @@ SUBGROUP_SPLIT_COLUMNS = [
     "outcome_pvalue",
 ]
 
-POPULATION_TOTAL_LABEL = "Overall (all patients)"
+OVERALL_LABEL = "All"
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,8 @@ def subgroup_split_table(
     contrast_values = scores.values.to_numpy(dtype=float)
     rows = []
     for split in splits:
-        above = split_column_values(scored_rows, split.column) >= split.cutoff
+        values = split_column_values(scored_rows, split.column)
+        above = values >= split.cutoff
         below = ~above
         if int(above.sum()) < MINIMUM_SIDE_COUNT or int(below.sum()) < MINIMUM_SIDE_COUNT:
             raise ValueError(
@@ -105,6 +107,7 @@ def subgroup_split_table(
                     "column": split.column,
                     "cutoff": split.cutoff,
                     "above_rule": ABOVE_CUTOFF_RULE,
+                    "split_is_binary": is_binary_values(values),
                     "confidence_level": scores.confidence_level,
                     "n_above": int(above.sum()),
                     "n_below": int(below.sum()),
@@ -167,6 +170,11 @@ def available_subgroup_splits(
     if splits and not available:
         logger.warning("Skipping subgroup splits because none of the columns are in the data.")
     return available
+
+
+def is_binary_values(values: np.ndarray) -> bool:
+    """Strict check: every value is exactly 0 or 1."""
+    return bool(np.isin(values, (0.0, 1.0)).all())
 
 
 def split_column_values(frame: pd.DataFrame, column: str) -> np.ndarray:

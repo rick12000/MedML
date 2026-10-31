@@ -568,11 +568,9 @@ class DragonNetAdapter(BaseCATEEstimator):
 
         self.model = DragonNet()
         self.scaler, features = fit_transform_covariates(data.X_adjustment)
-        self.model.fit(
-            features,
-            binary_library_treatment(data),
-            data.outcome_series.to_numpy(),
-        )
+        treatment = binary_library_treatment(data)
+        outcome = data.outcome_series.to_numpy()
+        self.model.fit(features, y=outcome, treatment=treatment)
         return self
 
     def predict_effects(self, data: CausalDataset) -> pd.DataFrame:

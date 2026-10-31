@@ -165,6 +165,7 @@ def test_pipeline_recovers_constant_effect(
     assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "toc.csv").is_file()
     assert (test_output_dir / "cate" / s_learner_id / "1_vs_0" / "calibration.csv").is_file()
     policy_summary = test_output_dir / "summary" / "policy_methods.csv"
+    assert "test_eceth" not in cate_summary.columns
     if hold_out_for_policy:
         policy_table = read_dataframe(policy_summary)
         assert policy_table.shape[0] >= 1
@@ -175,9 +176,14 @@ def test_pipeline_recovers_constant_effect(
         assert slice_dirs
         assert slice_dirs[0].joinpath("policy_tree.png").is_file()
         assert slice_dirs[0].joinpath("rule_performance.csv").is_file()
-        assert (contrast_dir / "test_evaluation.png").is_file()
-        assert (contrast_dir / "test_toc.csv").is_file()
-        assert (contrast_dir / "test_calibration.csv").is_file()
+        assert not (contrast_dir / "test_evaluation.png").exists()
+        assert not (contrast_dir / "test_toc.csv").exists()
+        assert not (contrast_dir / "test_calibration.csv").exists()
+        assert not (contrast_dir / "test_evaluation.csv").exists()
+        for estimator_id in cate_summary["estimator"].unique():
+            contrast_path = test_output_dir / "cate" / estimator_id / "1_vs_0"
+            assert (contrast_path / "evaluation.csv").is_file()
+            assert not (contrast_path / "test_evaluation.csv").exists()
     else:
         assert not policy_summary.exists()
 

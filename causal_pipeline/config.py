@@ -76,7 +76,7 @@ class PolicySearchMode(StrEnum):
 
 
 class TestValidationSignal(StrEnum):
-    """Doubly robust scores used only to score a held-out test set."""
+    """Doubly robust scores on the held-out test set for policy evaluation only."""
 
     ESTIMATION_FULL_FIT = "estimation_full_fit"
     TEST_FIT = "test_fit"
@@ -388,6 +388,8 @@ class SensitivityConfig(ArbitraryTypesModel):
 
 
 class CATEEvaluationConfig(ArbitraryTypesModel):
+    """Cross-fitted doubly robust scores and CATE metrics on the estimation sample."""
+
     propensity_learner: BaseEstimator | None = None
     outcome_learner: BaseEstimator | None = None
     dr_crossfit_folds: PositiveInt = DEFAULT_CATE_EVAL_CROSSFIT_FOLDS
@@ -483,7 +485,13 @@ class PipelineConfig(BaseModel):
     cate_estimators: list[CATEEstimatorSpec] | None = None
     sensitivity: SensitivityConfig | None = None
     cate_evaluation: CATEEvaluationConfig | None = None
-    test_validation_signal: TestValidationSignal = TestValidationSignal.ESTIMATION_FULL_FIT
+    test_validation_signal: TestValidationSignal = Field(
+        default=TestValidationSignal.ESTIMATION_FULL_FIT,
+        description=(
+            "How doubly robust rewards on the held-out test set are built for policy scoring. "
+            "Does not affect CATE calibration or ranking metrics."
+        ),
+    )
     policy: list[PolicyMethodSpec] | None = None
     cate_crossfit_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     policy_bootstrap_samples: PositiveInt = DEFAULT_POLICY_BOOTSTRAP_SAMPLES

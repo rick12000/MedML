@@ -255,7 +255,6 @@ def write_pooled_curves(
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results.root,
-            held_out=False,
         )
 
 

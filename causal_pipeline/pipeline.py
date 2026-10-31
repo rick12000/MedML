@@ -268,17 +268,6 @@ class IndependentFitResult(ArbitraryTypesModel):
     outcome_learner_name: str | None = None
 
 
-class HeldOutCATEJob(ArbitraryTypesModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-
-    estimator_id: str
-    spec: CATEEstimatorSpec
-    estimation: CausalDataset
-    test: CausalDataset
-    tune: bool
-    forest_n_jobs: int
-
-
 def fit_imputed_draw(draw: ImputedDraw) -> CompletedAnalysis:
     """Fit one completed imputation on its own results directory."""
     logger.info("Fitting imputation draw under %s...", draw.results_root)
@@ -356,27 +345,6 @@ def cross_fit_one_cate(
     )
     logger.info("...Finished cross-fitting CATE estimator %s", estimator_id)
     return df_effects
-
-
-def fit_held_out_cate(job: HeldOutCATEJob) -> tuple[str, pd.DataFrame]:
-    logger.info("Fitting held-out CATE predictions for %s...", job.estimator_id)
-    outcome_records: list[tuple[np.ndarray, np.ndarray, object]] = []
-    predictions = predict_cate_fold(
-        train=job.estimation,
-        held_out=job.test,
-        spec=job.spec,
-        outcome_records=outcome_records,
-        tune_estimators=job.tune,
-        forest_n_jobs=job.forest_n_jobs,
-    )
-    log_pooled_factual_outcome(
-        records=outcome_records,
-        role=f"CATE/{job.estimator_id} outcome",
-        binary_outcome=job.test.outcome_type == OutcomeType.BINARY,
-        metric_prefix="test",
-    )
-    logger.info("...Finished held-out CATE predictions for %s", job.estimator_id)
-    return job.estimator_id, predictions
 
 
 def cate_map_width(spec: CATEEstimatorSpec, parallel: bool, n_folds: int) -> int:
@@ -970,7 +938,6 @@ class CausalPipeline:
         df_cate_summary = self.build_cate_summary(
             mean_cate_by_estimator,
             cate_evaluation,
-            {},
             dict(assign_estimator_ids(self.config.cate_estimators or [])),
         )
         self.results.write_summaries(
@@ -1100,7 +1067,6 @@ class CausalPipeline:
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation, results=results)
 
         df_policy = None
-        held_out_evaluation: dict[str, list[ContrastEvaluation]] = {}
         if fit_policy:
             if self.evaluator is None or partitions.test is None:
                 raise ValueError(
@@ -1117,14 +1083,6 @@ class CausalPipeline:
                 estimation=estimation,
                 test=partitions.test,
                 signal=self.config.test_validation_signal,
-            )
-            held_out_evaluation = self.evaluate_held_out_cate(
-                estimation=estimation,
-                test=partitions.test,
-                df_test_scores=df_test_scores,
-                cate_runs=cate_runs,
-                results=results,
-                parallel=parallel,
             )
             df_policy = self.policy_service.evaluate_policies(
                 policies=policies,
@@ -1149,7 +1107,6 @@ class CausalPipeline:
         df_cate_summary = self.build_cate_summary(
             mean_cate_by_estimator,
             cate_evaluation,
-            held_out_evaluation,
             cate_spec_by_id,
         )
         results.write_summaries(
@@ -1392,83 +1349,10 @@ class CausalPipeline:
         if sensitivity_dir.exists():
             shutil.rmtree(sensitivity_dir)
 
-    def cross_fit_cate_predictions(
-        self,
-        estimation: CausalDataset,
-        cate_runs: list[tuple[str, CATEEstimatorSpec]],
-        results: ResultStore,
-        parallel: bool,
-    ) -> dict[str, pd.DataFrame]:
-        jobs = independent_fit_jobs(
-            estimation=estimation,
-            results_root=results.root,
-            screen=None,
-            ate_runs=[],
-            cate_runs=cate_runs,
-            tune_estimators=self.config.tune_estimators,
-            cate_folds=self.config.cate_crossfit_folds,
-            split_random_state=self.config.split.random_state,
-            evaluator=None,
-            parallel=parallel,
-        )
-        pieces = run_map(execute_independent_fit, jobs, parallel=parallel)
-        _, _, predictions, _ = collect_independent_fits(
-            pieces=pieces,
-            row_count=len(estimation.df),
-            results_root=results.root,
-            binary_outcome=estimation.outcome_type == OutcomeType.BINARY,
-        )
-        return predictions
-
-    def evaluate_held_out_cate(
-        self,
-        estimation: CausalDataset,
-        test: CausalDataset,
-        df_test_scores: pd.DataFrame,
-        cate_runs: list[tuple[str, CATEEstimatorSpec]],
-        results: ResultStore,
-        parallel: bool,
-    ) -> dict[str, list[ContrastEvaluation]]:
-        """Score CATE models fit on the estimation sample against test-set robust scores."""
-        evaluation: dict[str, list[ContrastEvaluation]] = {}
-        if self.evaluator is not None and cate_runs:
-            library_jobs = worker_library_jobs(parallel=parallel, n_tasks=len(cate_runs))
-            fitted = run_map(
-                fit_held_out_cate,
-                [
-                    HeldOutCATEJob(
-                        estimator_id=estimator_id,
-                        spec=spec,
-                        estimation=estimation,
-                        test=test,
-                        tune=self.config.tune_estimators,
-                        forest_n_jobs=library_jobs,
-                    )
-                    for estimator_id, spec in cate_runs
-                ],
-                parallel=parallel,
-            )
-            predictions = dict(fitted)
-            evaluation = self.evaluator.evaluate_cate_models(
-                predictions=predictions,
-                robust_scores=df_test_scores,
-                results_root=results.root,
-                held_out=True,
-                outcome_favorability=test.data.outcome_favorability,
-                groups=dataset_groups(test),
-            )
-            self.persist_cate_evaluation(
-                cate_evaluation=evaluation,
-                results=results,
-                table_name="test_evaluation.csv",
-            )
-        return evaluation
-
     def persist_cate_evaluation(
         self,
         cate_evaluation: dict[str, list[ContrastEvaluation]],
         results: ResultStore,
-        table_name: str = "evaluation.csv",
     ) -> None:
         for estimator_id, contrasts in cate_evaluation.items():
             for contrast_result in contrasts:
@@ -1487,7 +1371,7 @@ class CausalPipeline:
                         "rate_qini_pvalue": [contrast_result.rate_qini_pvalue],
                     }
                 )
-                write_dataframe(contrast_dir / table_name, df_cate_evaluation)
+                write_dataframe(contrast_dir / "evaluation.csv", df_cate_evaluation)
 
     def persist_policy_artifacts(
         self,
@@ -1606,7 +1490,6 @@ class CausalPipeline:
         self,
         cate_ate_results: dict[str, pd.DataFrame],
         cate_evaluation: dict[str, list[ContrastEvaluation]],
-        test_cate_evaluation: dict[str, list[ContrastEvaluation]] | None,
         spec_by_id: dict[str, CATEEstimatorSpec],
     ) -> pd.DataFrame:
         rows = []
@@ -1620,10 +1503,6 @@ class CausalPipeline:
             evaluation_by_contrast = {
                 item.contrast: item for item in contrast_evaluations
             }
-            held_out_by_contrast = {
-                item.contrast: item
-                for item in (test_cate_evaluation or {}).get(estimator_id, [])
-            }
             for _, ate_row in ate_table.iterrows():
                 contrast = ate_row["contrast"]
                 evaluation = (
@@ -1631,7 +1510,6 @@ class CausalPipeline:
                     if contrast in evaluation_by_contrast
                     else None
                 )
-                held_out = held_out_by_contrast[contrast] if contrast in held_out_by_contrast else None
                 rows.append(
                     {
                         "estimator": estimator_id,
@@ -1659,9 +1537,6 @@ class CausalPipeline:
                         "rate_qini_pvalue": evaluation.rate_qini_pvalue
                         if evaluation
                         else None,
-                        "test_eceth": held_out.eceth if held_out else None,
-                        "test_rate_autoc": held_out.rate_autoc if held_out else None,
-                        "test_rate_qini": held_out.rate_qini if held_out else None,
                     }
                 )
         return pd.DataFrame(rows)

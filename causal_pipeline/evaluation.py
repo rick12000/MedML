@@ -214,20 +214,18 @@ def save_comparison_figures(
     ranking_by_contrast: dict[str, list[RankingSeries]],
     calibration_by_contrast: dict[str, list[CalibrationSeries]],
     results_root: Path,
-    held_out: bool,
 ) -> None:
     """One figure per contrast, with every estimator in it, plus the CSVs behind it."""
-    marker = "test_" if held_out else ""
     for contrast, ranking in ranking_by_contrast.items():
         comparison = results_root / "cate" / "comparison" / contrast
         calibration = calibration_by_contrast[contrast]
         plot_evaluation_figure(
             calibration=calibration,
             ranking=ranking,
-            save_path=str(comparison / f"{marker}evaluation.png"),
+            save_path=str(comparison / "evaluation.png"),
         )
-        write_ranking_curve_data(comparison / f"{marker}toc.csv", ranking)
-        write_calibration_curve_data(comparison / f"{marker}calibration.csv", calibration)
+        write_ranking_curve_data(comparison / "toc.csv", ranking)
+        write_calibration_curve_data(comparison / "calibration.csv", calibration)
         logger.info("Saved comparison CATE figure for %s", contrast)
 
 
@@ -264,11 +262,11 @@ class CATEEvaluator:
         test: CausalDataset,
         signal: TestValidationSignal,
     ) -> pd.DataFrame:
-        """Scores for held-out policy value and CATE calibration.
+        """Doubly robust contrast scores on the test set for policy evaluation.
 
-        Cross-fit training scores are left untouched. Estimation-full-fit learns the
-        nuisances on every estimation row, then inserts the test treatment and outcome.
-        Test-fit cross-fits those nuisances inside the test set.
+        Cross-fit estimation scores are left untouched. Estimation-full-fit learns the
+        nuisances on every estimation row, then scores test covariates with test treatment
+        and outcome. Test-fit cross-fits those nuisances inside the test set.
         """
         if signal == TestValidationSignal.TEST_FIT:
             return self.build_robust_scores(dataset=test)
@@ -283,7 +281,7 @@ class CATEEvaluator:
             outcome_template=outcome_template,
         )
         log_crossfit_nuisances(
-            scope="CATE/test validation DR",
+            scope="policy/test DR",
             treatment=test.treatment_series,
             outcome=test.outcome_series,
             propensity=propensity,
@@ -398,14 +396,11 @@ class CATEEvaluator:
         predictions: dict[str, pd.DataFrame],
         robust_scores: pd.DataFrame,
         results_root: Path,
-        held_out: bool = False,
         outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER,
         groups: np.ndarray | pd.Series | None = None,
     ) -> dict[str, list[ContrastEvaluation]]:
-        label = "held-out" if held_out else "estimation"
         logger.info(
-            "Evaluating CATE models on the %s sample (%s estimators)...",
-            label,
+            "Evaluating CATE models on the estimation sample (%s estimators)...",
             len(predictions),
         )
         direction = reward_direction(outcome_favorability)
@@ -433,15 +428,14 @@ class CATEEvaluator:
                     random_state=self.evaluation.random_state,
                     groups=groups,
                 )
-                marker = "test_" if held_out else ""
                 rows = calibration_bin_rows(
                     tau_hat=tau_hat,
                     gamma=gamma,
                     n_bins=self.evaluation.calibration_bins,
                 )
                 data_dir = f"cate/{estimator_id}/{contrast}"
-                calibration_data_path = f"{data_dir}/{marker}calibration.csv"
-                toc_data_path = f"{data_dir}/{marker}toc.csv"
+                calibration_data_path = f"{data_dir}/calibration.csv"
+                toc_data_path = f"{data_dir}/toc.csv"
                 toc_fraction, toc_value = ranking_curve(
                     tau_hat=tau_hat,
                     gamma=gamma,
@@ -506,9 +500,8 @@ class CATEEvaluator:
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results_root,
-            held_out=held_out,
         )
-        logger.info("...Finished evaluating CATE models on the %s sample", label)
+        logger.info("...Finished evaluating CATE models on the estimation sample")
         return results
 
 

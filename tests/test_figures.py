@@ -28,9 +28,9 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def test_p_values_use_journal_thresholds() -> None:
-    assert format_p_value(0.0004) == "< 0.001"
-    assert format_p_value(0.0312) == "0.031"
-    assert format_p_value(0.5) == "0.500"
+    assert format_p_value(0.0004) == "< 0.01"
+    assert format_p_value(0.0312) == "0.03"
+    assert format_p_value(0.5) == "0.50"
 
 
 def test_interval_figure_shows_confidence_intervals_and_no_effect_line(test_output_dir: Path) -> None:
@@ -225,8 +225,9 @@ def test_evaluation_figure_puts_calibration_and_ranking_side_by_side(test_output
         )
     )
     figure = compose_evaluation_figure(calibration=calibration, ranking=ranking)
-    assert len(figure.axes) == 3
+    assert len(figure.axes) == 4
     assert all(axis.get_legend() is None for axis in figure.axes)
+    assert figure.legends
     zero_lines = [
         line
         for line in figure.axes[1].lines
@@ -241,9 +242,9 @@ def test_evaluation_figure_puts_calibration_and_ranking_side_by_side(test_output
         "Estimator",
         "ECETH",
         "AUTOC",
-        "Qini",
+        "(a)",
+        "(b)",
         "Calibration",
-        "Ranking",
         "Targeting Operator Curve (TOC)",
         "Mean Predicted CATE",
         "Mean Robust Proxy",

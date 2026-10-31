@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from causal_pipeline.utils import save_figure
 
@@ -59,6 +60,7 @@ CAPTION_FONT_SIZE = 7.5
 PANEL_LABEL_SIZE = 9.0
 LEGEND_FONT_SIZE = 7.5
 P_VALUE_FLOOR = 0.001
+P_VALUE_TABLE_FLOOR = 0.01
 STATISTIC_SCIENTIFIC_FLOOR = 0.001
 STATISTIC_SCIENTIFIC_CEILING = 1000.0
 PANEL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -170,9 +172,9 @@ def series_style(index: int) -> SeriesStyle:
 def format_p_value(p_value: float) -> str:
     if not np.isfinite(p_value):
         return "NA"
-    if p_value < P_VALUE_FLOOR:
-        return "< 0.001"
-    return f"{p_value:.3f}"
+    if p_value < P_VALUE_TABLE_FLOOR:
+        return f"< {P_VALUE_TABLE_FLOOR:.2f}"
+    return f"{p_value:.2f}"
 
 
 def format_statistic(value: float) -> str:
@@ -583,6 +585,7 @@ def draw_curve(
     style: SeriesStyle,
     label: str,
     marker: str,
+    marker_size: float = MARKER_SIZE,
 ) -> None:
     axis.plot(
         x_values,
@@ -591,7 +594,7 @@ def draw_curve(
         linestyle=style.linestyle,
         linewidth=LINE_WIDTH,
         marker=marker,
-        markersize=MARKER_SIZE,
+        markersize=marker_size,
         markerfacecolor=style.color,
         markeredgecolor=style.color,
         markeredgewidth=0.4,
@@ -600,33 +603,29 @@ def draw_curve(
     )
 
 
-EVALUATION_NAME_WIDTH_INCHES = 1.25
-EVALUATION_PANEL_WIDTH_INCHES = 2.15
-EVALUATION_PANEL_GAP_INCHES = 0.45
-EVALUATION_WIDTH_INCHES = EVALUATION_NAME_WIDTH_INCHES + 2 * EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
-EVALUATION_PANEL_TOP_INCHES = 0.08
-EVALUATION_PANEL_TITLE_INCHES = 0.26
-EVALUATION_PLOT_HEIGHT_INCHES = 1.60
-EVALUATION_TICK_BAND_INCHES = 0.50
-EVALUATION_TABLE_GAP_INCHES = 0.12
-EVALUATION_AXIS_PAD_INCHES = 0.50
-EVALUATION_AXIS_RIGHT_PAD_INCHES = 0.06
-EVALUATION_LETTER_INSET_INCHES = 0.42
-EVALUATION_LEFT_PANEL_X_INCHES = EVALUATION_NAME_WIDTH_INCHES
-EVALUATION_RIGHT_PANEL_X_INCHES = (
-    EVALUATION_LEFT_PANEL_X_INCHES + EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
-)
-EVALUATION_GROUP_TITLE_Y_INCHES = 0.11
-EVALUATION_GROUP_RULE_Y_INCHES = 0.22
-EVALUATION_SUBHEADER_Y_INCHES = 0.36
-EVALUATION_HEADER_RULE_Y_INCHES = 0.48
-EVALUATION_TABLE_ROW_INCHES = 0.22
-EVALUATION_BOTTOM_PAD_INCHES = 0.08
+EVALUATION_PANEL_WIDTH_INCHES = 2.7
+EVALUATION_PLOT_WIDTH_INCHES = 1.6
+EVALUATION_PLOT_LEFT_INCHES = 0.95
+EVALUATION_PANEL_GAP_INCHES = 0.2
+EVALUATION_WIDTH_INCHES = 2 * EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
+EVALUATION_RIGHT_PANEL_X_INCHES = EVALUATION_PANEL_WIDTH_INCHES + EVALUATION_PANEL_GAP_INCHES
+EVALUATION_LABEL_X_INCHES = 0.5
+EVALUATION_LETTER_X_INCHES = 0.7
+EVALUATION_TITLE_INCHES = 0.24
+EVALUATION_PLOT_HEIGHT_INCHES = 1.5
+EVALUATION_TICK_BAND_INCHES = 0.46
+EVALUATION_TABLE_GAP_INCHES = 0.04
+EVALUATION_ROW_INCHES = 0.2
+EVALUATION_VALUE_CENTERS_INCHES = (1.08, 1.45)
+EVALUATION_LEGEND_COLUMNS = 4
+EVALUATION_LEGEND_TOP_INCHES = 0.04
+EVALUATION_LEGEND_ROW_INCHES = 0.19
+EVALUATION_LEGEND_GAP_INCHES = 0.08
+EVALUATION_MARKER_SIZE = 2.4
+EVALUATION_BOTTOM_PAD_INCHES = 0.06
 MUTED_TABLE_INK = "#4A4A4A"
 # Okabe-Ito without black and yellow, so every line stays visible on white.
 EVALUATION_COLORS = ("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
-CALIBRATION_GROUP = "Calibration"
-RANKING_GROUP = "Ranking"
 CALIBRATION_TITLE = "Calibration"
 RANKING_TITLE = "Targeting Operator Curve (TOC)"
 CALIBRATION_X_LABEL = "Mean Predicted CATE"
@@ -634,15 +633,14 @@ CALIBRATION_Y_LABEL = "Mean Robust Proxy"
 RANKING_X_LABEL = "Top Fraction Ranked by Benefit"
 RANKING_Y_LABEL = "Excess Benefit"
 CALIBRATION_COLUMNS = ("ECETH", "p")
-RANKING_COLUMNS = ("AUTOC", "p", "Qini", "p")
+RANKING_COLUMNS = ("AUTOC", "p")
 ESTIMATOR_ORDER = tuple(ESTIMATOR_LABELS)
 
 
 @dataclass(frozen=True)
 class EvaluationRow:
     label: str
-    calibration: tuple[str, ...]
-    ranking: tuple[str, ...]
+    values: tuple[str, ...]
 
 
 def estimator_style(estimator_id: str) -> SeriesStyle:
@@ -680,46 +678,64 @@ def compose_evaluation_figure(
     calibration: Sequence[CalibrationSeries],
     ranking: Sequence[RankingSeries],
 ) -> Figure:
-    """Calibration and targeting curves side by side, with one table that serves both panels."""
+    """Calibration and targeting curves side by side, each with its own compact table."""
     if not calibration or not ranking:
         raise ValueError("An evaluation figure needs calibration and ranking series.")
-    rows = evaluation_rows(calibration=calibration, ranking=ranking)
-    plot_top = EVALUATION_PANEL_TOP_INCHES + EVALUATION_PANEL_TITLE_INCHES
-    panel_bottom = plot_top + EVALUATION_PLOT_HEIGHT_INCHES + EVALUATION_TICK_BAND_INCHES
-    table_top = panel_bottom + EVALUATION_TABLE_GAP_INCHES
-    table_height = evaluation_table_height(len(rows))
+    estimator_ids = evaluation_estimator_ids(calibration=calibration, ranking=ranking)
+    columns_per_legend_row = min(len(estimator_ids), EVALUATION_LEGEND_COLUMNS)
+    legend_rows = -(-len(estimator_ids) // columns_per_legend_row)
+    legend_height = (
+        EVALUATION_LEGEND_TOP_INCHES + EVALUATION_LEGEND_ROW_INCHES * legend_rows + EVALUATION_LEGEND_GAP_INCHES
+    )
+    plot_top = legend_height + EVALUATION_TITLE_INCHES
+    plot_bottom = plot_top + EVALUATION_PLOT_HEIGHT_INCHES
+    table_top = plot_bottom + EVALUATION_TICK_BAND_INCHES + EVALUATION_TABLE_GAP_INCHES
+    table_height = evaluation_table_height(len(estimator_ids))
     height = table_top + table_height + EVALUATION_BOTTOM_PAD_INCHES
     figure = plt.figure(figsize=(EVALUATION_WIDTH_INCHES, height))
 
-    plot_width = EVALUATION_PANEL_WIDTH_INCHES - EVALUATION_AXIS_PAD_INCHES - EVALUATION_AXIS_RIGHT_PAD_INCHES
+    add_evaluation_legend(figure, estimator_ids, height=height, columns=columns_per_legend_row)
+
     calibration_axis = add_inch_axes(
         figure,
-        EVALUATION_LEFT_PANEL_X_INCHES + EVALUATION_AXIS_PAD_INCHES,
+        EVALUATION_PLOT_LEFT_INCHES,
         plot_top,
-        plot_width,
+        EVALUATION_PLOT_WIDTH_INCHES,
         EVALUATION_PLOT_HEIGHT_INCHES,
     )
     ranking_axis = add_inch_axes(
         figure,
-        EVALUATION_RIGHT_PANEL_X_INCHES + EVALUATION_AXIS_PAD_INCHES,
+        EVALUATION_RIGHT_PANEL_X_INCHES + EVALUATION_PLOT_LEFT_INCHES,
         plot_top,
-        plot_width,
+        EVALUATION_PLOT_WIDTH_INCHES,
         EVALUATION_PLOT_HEIGHT_INCHES,
     )
     draw_calibration_axis(calibration_axis, calibration)
     draw_ranking_axis(ranking_axis, ranking)
-    letter_x = -EVALUATION_LETTER_INSET_INCHES / plot_width
-    mark_panel(calibration_axis, PANEL_LETTERS[0], x=letter_x)
-    mark_panel(ranking_axis, PANEL_LETTERS[1], x=letter_x)
+    place_panel_letter(calibration_axis, PANEL_LETTERS[0])
+    place_panel_letter(ranking_axis, PANEL_LETTERS[1])
 
-    table_axis = add_inch_axes(figure, 0.0, table_top, EVALUATION_WIDTH_INCHES, table_height)
-    draw_evaluation_table(table_axis, rows)
+    calibration_table = add_inch_axes(
+        figure,
+        EVALUATION_PLOT_LEFT_INCHES,
+        table_top,
+        EVALUATION_PLOT_WIDTH_INCHES,
+        table_height,
+    )
+    draw_metric_table(
+        calibration_table,
+        CALIBRATION_COLUMNS,
+        calibration_table_rows(estimator_ids, calibration),
+    )
+    ranking_table = add_inch_axes(
+        figure,
+        EVALUATION_RIGHT_PANEL_X_INCHES + EVALUATION_PLOT_LEFT_INCHES,
+        table_top,
+        EVALUATION_PLOT_WIDTH_INCHES,
+        table_height,
+    )
+    draw_metric_table(ranking_table, RANKING_COLUMNS, ranking_table_rows(estimator_ids, ranking))
     return figure
-
-
-def inch_position(figure: Figure, x: float, y_from_top: float) -> tuple[float, float]:
-    width, height = figure.get_size_inches()
-    return x / width, 1.0 - y_from_top / height
 
 
 def add_inch_axes(figure: Figure, left: float, top: float, width: float, height: float) -> Axes:
@@ -729,45 +745,129 @@ def add_inch_axes(figure: Figure, left: float, top: float, width: float, height:
     )
 
 
-def evaluation_table_height(row_count: int) -> float:
-    return EVALUATION_HEADER_RULE_Y_INCHES + EVALUATION_TABLE_ROW_INCHES * row_count + 0.02
-
-
-def evaluation_rows(
+def evaluation_estimator_ids(
     calibration: Sequence[CalibrationSeries],
     ranking: Sequence[RankingSeries],
-) -> list[EvaluationRow]:
-    by_calibration = {item.estimator_id: item for item in calibration}
-    by_ranking = {item.estimator_id: item for item in ranking}
-    estimator_ids = list(dict.fromkeys([*by_ranking, *by_calibration]))
-    rows = []
+) -> list[str]:
+    """Alphabetical by display name, so every table and legend lists estimators in the same order."""
+    ids = {item.estimator_id for item in [*calibration, *ranking]}
+    return sorted(ids, key=lambda estimator_id: (display_estimator(estimator_id), estimator_id))
+
+
+def add_evaluation_legend(figure: Figure, estimator_ids: Sequence[str], height: float, columns: int) -> None:
+    handles = []
     for estimator_id in estimator_ids:
-        item_calibration = by_calibration.get(estimator_id)
-        item_ranking = by_ranking.get(estimator_id)
-        rows.append(
-            EvaluationRow(
-                label=display_estimator(estimator_id),
-                calibration=(
-                    (
-                        format_statistic(item_calibration.eceth),
-                        format_p_value(item_calibration.eceth_p_value),
-                    )
-                    if item_calibration is not None
-                    else ("NA",) * len(CALIBRATION_COLUMNS)
-                ),
-                ranking=(
-                    (
-                        format_statistic(item_ranking.autoc),
-                        format_p_value(item_ranking.autoc_p_value),
-                        format_statistic(item_ranking.qini),
-                        format_p_value(item_ranking.qini_p_value),
-                    )
-                    if item_ranking is not None
-                    else ("NA",) * len(RANKING_COLUMNS)
-                ),
+        style = estimator_style(estimator_id)
+        handles.append(
+            Line2D(
+                [0.0],
+                [0.0],
+                color=style.color,
+                linestyle=style.linestyle,
+                linewidth=LINE_WIDTH,
+                marker=style.marker,
+                markersize=EVALUATION_MARKER_SIZE,
+                markerfacecolor=style.color,
+                markeredgecolor=style.color,
+                markeredgewidth=0.4,
             )
         )
+    figure.legend(
+        handles,
+        [display_estimator(estimator_id) for estimator_id in estimator_ids],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0 - EVALUATION_LEGEND_TOP_INCHES / height),
+        bbox_transform=figure.transFigure,
+        ncol=columns,
+        frameon=False,
+        fontsize=LEGEND_FONT_SIZE,
+        handlelength=2.0,
+        columnspacing=1.2,
+        handletextpad=0.5,
+        labelspacing=0.3,
+        borderaxespad=0.0,
+    )
+
+
+def evaluation_table_height(row_count: int) -> float:
+    return EVALUATION_ROW_INCHES * (row_count + 1) + 0.02
+
+
+def calibration_table_rows(
+    estimator_ids: Sequence[str],
+    calibration: Sequence[CalibrationSeries],
+) -> list[EvaluationRow]:
+    by_estimator = {item.estimator_id: item for item in calibration}
+    rows = []
+    for estimator_id in estimator_ids:
+        item = by_estimator.get(estimator_id)
+        values = (
+            (format_statistic(item.eceth), format_p_value(item.eceth_p_value))
+            if item is not None
+            else ("NA",) * len(CALIBRATION_COLUMNS)
+        )
+        rows.append(EvaluationRow(label=display_estimator(estimator_id), values=values))
     return rows
+
+
+def ranking_table_rows(
+    estimator_ids: Sequence[str],
+    ranking: Sequence[RankingSeries],
+) -> list[EvaluationRow]:
+    by_estimator = {item.estimator_id: item for item in ranking}
+    rows = []
+    for estimator_id in estimator_ids:
+        item = by_estimator.get(estimator_id)
+        values = (
+            (format_statistic(item.autoc), format_p_value(item.autoc_p_value))
+            if item is not None
+            else ("NA",) * len(RANKING_COLUMNS)
+        )
+        rows.append(EvaluationRow(label=display_estimator(estimator_id), values=values))
+    return rows
+
+
+def draw_metric_table(axis: Axes, headers: Sequence[str], rows: Sequence[EvaluationRow]) -> None:
+    """A compact table: estimator names on the left, one value column per header."""
+    height = evaluation_table_height(len(rows))
+    width = EVALUATION_PLOT_WIDTH_INCHES
+    axis.set_xlim(0.0, width)
+    axis.set_ylim(height, 0.0)
+    axis.axis("off")
+    header_y = EVALUATION_ROW_INCHES / 2
+    axis.text(0.0, header_y, "Estimator", ha="left", va="center",
+              fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+    for center, header in zip(EVALUATION_VALUE_CENTERS_INCHES, headers, strict=True):
+        axis.text(center, header_y, header, ha="center", va="center",
+                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
+    axis.plot([0.0, width], [EVALUATION_ROW_INCHES] * 2,
+              color=INK, linewidth=0.6, solid_capstyle="butt")
+    for index, row in enumerate(rows):
+        middle = EVALUATION_ROW_INCHES * (index + 1.5)
+        axis.text(0.0, middle, row.label, ha="left", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
+        for center, value in zip(EVALUATION_VALUE_CENTERS_INCHES, row.values, strict=True):
+            axis.text(center, middle, value, ha="center", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
+    bottom = height - 0.01
+    axis.plot([0.0, width], [bottom, bottom],
+              color=INK, linewidth=0.6, solid_capstyle="butt")
+
+
+def place_panel_letter(axis: Axes, letter: str) -> None:
+    """Panel letter and y-axis label both sit in the left margin, the letter outside the label."""
+    width = EVALUATION_PLOT_WIDTH_INCHES
+    axis.yaxis.set_label_coords(-EVALUATION_LABEL_X_INCHES / width, 0.5)
+    axis.text(
+        -EVALUATION_LETTER_X_INCHES / width,
+        0.5,
+        f"({letter})",
+        transform=axis.transAxes,
+        ha="right",
+        va="center",
+        fontsize=PANEL_LABEL_SIZE,
+        fontweight="bold",
+        color=INK,
+        clip_on=False,
+    )
 
 
 def draw_calibration_axis(axis: Axes, series: Sequence[CalibrationSeries]) -> None:
@@ -784,6 +884,7 @@ def draw_calibration_axis(axis: Axes, series: Sequence[CalibrationSeries]) -> No
             style=style,
             label="",
             marker=style.marker,
+            marker_size=EVALUATION_MARKER_SIZE,
         )
         coordinates.extend([item.predicted, item.observed])
     lower, upper = padded_limits(np.concatenate(coordinates), include_zero=False)
@@ -799,8 +900,8 @@ def draw_calibration_axis(axis: Axes, series: Sequence[CalibrationSeries]) -> No
     axis.set_ylim(lower, upper)
     axis.set_xlabel(CALIBRATION_X_LABEL)
     axis.set_ylabel(CALIBRATION_Y_LABEL)
-    axis.set_title(CALIBRATION_TITLE, loc="left", pad=6, fontsize=AXIS_LABEL_SIZE, color=INK)
     style_axis(axis)
+    axis.set_title(CALIBRATION_TITLE, pad=5, fontsize=AXIS_LABEL_SIZE, fontweight="bold", color=INK)
 
 
 def draw_ranking_axis(axis: Axes, series: Sequence[RankingSeries]) -> None:
@@ -824,54 +925,8 @@ def draw_ranking_axis(axis: Axes, series: Sequence[RankingSeries]) -> None:
     axis.set_xticklabels([f"{round(tick * 100)}%" for tick in ticks])
     axis.set_xlabel(RANKING_X_LABEL)
     axis.set_ylabel(RANKING_Y_LABEL)
-    axis.set_title(RANKING_TITLE, loc="left", pad=6, fontsize=AXIS_LABEL_SIZE, color=INK)
     style_axis(axis)
-
-
-def column_centers(left: float, width: float, count: int) -> list[float]:
-    return [left + width * (index + 0.5) / count for index in range(count)]
-
-
-def draw_evaluation_table(axis: Axes, rows: Sequence[EvaluationRow]) -> None:
-    """One table under both panels. Each column group sits under its own panel."""
-    axis.set_xlim(0.0, EVALUATION_WIDTH_INCHES)
-    axis.set_ylim(evaluation_table_height(len(rows)), 0.0)
-    axis.axis("off")
-    calibration_centers = column_centers(
-        EVALUATION_LEFT_PANEL_X_INCHES, EVALUATION_PANEL_WIDTH_INCHES, len(CALIBRATION_COLUMNS)
-    )
-    ranking_centers = column_centers(
-        EVALUATION_RIGHT_PANEL_X_INCHES, EVALUATION_PANEL_WIDTH_INCHES, len(RANKING_COLUMNS)
-    )
-    for left, text in (
-        (EVALUATION_LEFT_PANEL_X_INCHES, CALIBRATION_GROUP),
-        (EVALUATION_RIGHT_PANEL_X_INCHES, RANKING_GROUP),
-    ):
-        center = left + EVALUATION_PANEL_WIDTH_INCHES / 2
-        axis.text(center, EVALUATION_GROUP_TITLE_Y_INCHES, text, ha="center", va="center",
-                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
-        axis.plot([left, left + EVALUATION_PANEL_WIDTH_INCHES], [EVALUATION_GROUP_RULE_Y_INCHES] * 2,
-                  color=INK, linewidth=0.5, solid_capstyle="butt")
-    axis.text(0.0, EVALUATION_SUBHEADER_Y_INCHES, "Estimator", ha="left", va="center",
-              fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
-    for center, header in zip(calibration_centers, CALIBRATION_COLUMNS, strict=True):
-        axis.text(center, EVALUATION_SUBHEADER_Y_INCHES, header, ha="center", va="center",
-                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
-    for center, header in zip(ranking_centers, RANKING_COLUMNS, strict=True):
-        axis.text(center, EVALUATION_SUBHEADER_Y_INCHES, header, ha="center", va="center",
-                  fontsize=CAPTION_FONT_SIZE, fontweight="bold", color=MUTED_TABLE_INK)
-    rule_width = EVALUATION_WIDTH_INCHES
-    axis.plot([0.0, rule_width], [EVALUATION_HEADER_RULE_Y_INCHES] * 2, color=INK, linewidth=0.7,
-              solid_capstyle="butt")
-    for index, row in enumerate(rows):
-        middle = EVALUATION_HEADER_RULE_Y_INCHES + EVALUATION_TABLE_ROW_INCHES * (index + 0.5)
-        axis.text(0.0, middle, row.label, ha="left", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
-        for center, value in zip(calibration_centers, row.calibration, strict=True):
-            axis.text(center, middle, value, ha="center", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
-        for center, value in zip(ranking_centers, row.ranking, strict=True):
-            axis.text(center, middle, value, ha="center", va="center", fontsize=CAPTION_FONT_SIZE, color=INK)
-    bottom = evaluation_table_height(len(rows)) - 0.01
-    axis.plot([0.0, rule_width], [bottom, bottom], color=INK, linewidth=0.7, solid_capstyle="butt")
+    axis.set_title(RANKING_TITLE, pad=5, fontsize=AXIS_LABEL_SIZE, fontweight="bold", color=INK)
 
 
 def padded_limits(values: np.ndarray, include_zero: bool) -> tuple[float, float]:

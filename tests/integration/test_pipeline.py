@@ -176,6 +176,13 @@ def test_pipeline_recovers_constant_effect(
         assert slice_dirs
         assert slice_dirs[0].joinpath("policy_tree.png").is_file()
         assert slice_dirs[0].joinpath("rule_performance.csv").is_file()
+        assert slice_dirs[0].joinpath("value.csv").is_file()
+        assert slice_dirs[0].joinpath("patient_assignments.csv").is_file()
+        value_table = read_dataframe(test_output_dir / "policy" / "value_comparison.csv")
+        assert {"never_treat", "always_treat_1", "observed"}.issubset(set(value_table["policy"]))
+        never_row = value_table.loc[value_table["policy"] == "never_treat"].iloc[0]
+        assert never_row["vs_never_treat"] == 0.0
+        assert np.isfinite(value_table["vs_never_treat"]).all()
         assert not (contrast_dir / "test_evaluation.png").exists()
         assert not (contrast_dir / "test_toc.csv").exists()
         assert not (contrast_dir / "test_calibration.csv").exists()
@@ -186,6 +193,7 @@ def test_pipeline_recovers_constant_effect(
             assert not (contrast_path / "test_evaluation.csv").exists()
     else:
         assert not policy_summary.exists()
+        assert not (test_output_dir / "policy").exists()
 
 
 @pytest.mark.integration

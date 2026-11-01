@@ -22,7 +22,7 @@ each column holds, so spacing stays tight whatever the labels are.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +32,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
@@ -41,7 +40,11 @@ from causal_pipeline.figures import (
     REFERENCE_COLOR,
     display_contrast,
     display_estimator,
+    draw_line,
     publication_style,
+    text_width,
+    widest,
+    write_text,
 )
 from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE, OVERALL_LABEL
 from causal_pipeline.utils import save_figure
@@ -502,19 +505,6 @@ def format_tick(value: float) -> str:
 # Layout
 
 
-def text_width(text: str, fontsize: float, fontweight: str = "normal") -> float:
-    """Rendered width in inches under the active rc settings."""
-    scratch = Figure()
-    FigureCanvasAgg(scratch)
-    artist = scratch.text(0.0, 0.0, text, fontsize=fontsize, fontweight=fontweight)
-    extent = artist.get_window_extent(renderer=scratch.canvas.get_renderer())
-    return float(extent.width / scratch.dpi)
-
-
-def widest(texts: Iterable[str], fontsize: float, fontweight: str = "normal") -> float:
-    return max((text_width(text, fontsize, fontweight) for text in texts), default=0.0)
-
-
 def cell_for_row(row: SubgroupRow, key: str) -> EstimateCell | None:
     interval = row.intervals.get(key)
     return estimate_cell(interval) if interval is not None else None
@@ -827,20 +817,3 @@ def draw_forest_axis(
 def draw_rule(canvas, layout: TableLayout, y: float, color: str, linewidth: float) -> None:
     draw_line(canvas, layout.left, layout.right, y, color, linewidth)
 
-
-def draw_line(canvas, x_start: float, x_end: float, y: float, color: str, linewidth: float) -> None:
-    canvas.plot([x_start, x_end], [y, y], color=color, linewidth=linewidth, solid_capstyle="butt")
-
-
-def write_text(
-    canvas,
-    x: float,
-    y: float,
-    text: str,
-    *,
-    ha: str = "center",
-    size: float = TEXT_FONT_SIZE,
-    color: str = INK,
-    weight: str = "normal",
-) -> None:
-    canvas.text(x, y, text, fontsize=size, color=color, ha=ha, va="center", fontweight=weight)

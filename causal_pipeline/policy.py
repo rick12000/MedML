@@ -582,23 +582,6 @@ class PolicyService:
             )
         return rules
 
-    def subgroup_leaf_ids(
-        self,
-        policy: FittedPolicy,
-        X_mod: pd.DataFrame,
-    ) -> np.ndarray | None:
-        if policy.method == "policy_tree":
-            return np.asarray(policy.model.apply(X_mod))
-        if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
-            return np.asarray(policy.model.apply(X_mod))
-        if policy.method == "dr_policy_tree":
-            return np.asarray(policy.model.policy_model_.apply(X_mod))
-        if policy.method == "virtual_twins":
-            return np.asarray(policy.model.apply(X_mod))
-        if policy.method == "mob":
-            return mob_leaf_ids(policy=policy, X_mod=X_mod)
-        return None
-
     def evaluate_policies(
         self,
         policies: list[FittedPolicy],
@@ -639,7 +622,7 @@ class PolicyService:
         rows: list[dict[str, object]] = []
         cohort_n = len(dataset.df)
         direction = reward_direction(dataset.data.outcome_favorability)
-        leaf_ids = self.subgroup_leaf_ids(policy=policy, X_mod=X_mod)
+        leaf_ids = subgroup_leaf_ids(policy=policy, X_mod=X_mod)
         for rule in policy.rules:
             if leaf_ids is None:
                 mask = np.ones(len(scores), dtype=bool)
@@ -758,6 +741,42 @@ def subgroup_benefit(
         )
     raw = float(means[contrast_column_name(arm, dataset.control_value, columns)])
     return SubgroupBenefit(arm=arm, raw_effect=raw, benefit=direction * raw)
+
+
+def subgroup_leaf_ids(policy: FittedPolicy, X_mod: pd.DataFrame) -> np.ndarray | None:
+    """Terminal node each row falls in, for every method that partitions covariate space."""
+    if policy.method == "policy_tree":
+        return np.asarray(policy.model.apply(X_mod))
+    if policy.method in {"exact_policy_welfare", "exact_policy_capital"}:
+        return np.asarray(policy.model.apply(X_mod))
+    if policy.method == "dr_policy_tree":
+        return np.asarray(policy.model.policy_model_.apply(X_mod))
+    if policy.method == "virtual_twins":
+        return np.asarray(policy.model.apply(X_mod))
+    if policy.method == "mob":
+        return mob_leaf_ids(policy=policy, X_mod=X_mod)
+    return None
+
+
+def assigned_treatments(policy: FittedPolicy, dataset: CausalDataset) -> np.ndarray:
+    """Treatment each row of dataset receives under a fitted policy.
+
+    A row takes the recommendation of its terminal node. A terminal node with no rule is
+    one the method does not treat, such as a Virtual Twins leaf that fails the minimum-effect
+    screen, so its rows get the control value.
+    """
+    leaf_ids = subgroup_leaf_ids(policy=policy, X_mod=dataset.X_effect_modifiers)
+    if leaf_ids is None:
+        raise ValueError(f"Policy method {policy.method} has no terminal-node assignment.")
+    recommendation = {
+        rule.subgroup_leaf: rule.recommended_treatment
+        for rule in policy.rules
+        if rule.subgroup_leaf is not None
+    }
+    return np.array(
+        [recommendation.get(int(leaf), dataset.control_value) for leaf in leaf_ids],
+        dtype=object,
+    )
 
 
 def reward_direction(favorability: OutcomeFavorability) -> float:

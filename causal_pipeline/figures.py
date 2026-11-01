@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
@@ -159,6 +160,38 @@ def display_estimator(estimator_id: str) -> str:
 
 def display_contrast(contrast: str) -> str:
     return contrast.replace("_", " ")
+
+
+def text_width(text: str, fontsize: float, fontweight: str = "normal") -> float:
+    """Rendered width in inches under the active rc settings."""
+    scratch = Figure()
+    FigureCanvasAgg(scratch)
+    artist = scratch.text(0.0, 0.0, text, fontsize=fontsize, fontweight=fontweight)
+    extent = artist.get_window_extent(renderer=scratch.canvas.get_renderer())
+    return float(extent.width / scratch.dpi)
+
+
+def widest(texts: Iterable[str], fontsize: float, fontweight: str = "normal") -> float:
+    return max((text_width(text, fontsize, fontweight) for text in texts), default=0.0)
+
+
+def write_text(
+    canvas,
+    x: float,
+    y: float,
+    text: str,
+    *,
+    ha: str = "center",
+    size: float = 7.6,
+    color: str = INK,
+    weight: str = "normal",
+) -> None:
+    """Text on an inch-measured canvas whose y-axis points down, vertically centred on y."""
+    canvas.text(x, y, text, fontsize=size, color=color, ha=ha, va="center", fontweight=weight)
+
+
+def draw_line(canvas, x_start: float, x_end: float, y: float, color: str, linewidth: float) -> None:
+    canvas.plot([x_start, x_end], [y, y], color=color, linewidth=linewidth, solid_capstyle="butt")
 
 
 def series_style(index: int) -> SeriesStyle:

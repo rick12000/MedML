@@ -101,6 +101,12 @@ from causal_pipeline.policy_figures import (
     policy_slice_slug,
     save_policy_slice_figure,
 )
+from causal_pipeline.policy_value import (
+    PolicyValueReport,
+    evaluate_policy_values,
+    patient_assignment_table,
+)
+from causal_pipeline.policy_value_figures import POLICY_VALUE_FIGURE_NAME, plot_policy_value_table
 from causal_pipeline.results import ResultStore
 from causal_pipeline.selection import (
     plot_tipping_point,
@@ -1094,9 +1100,22 @@ class CausalPipeline:
                 splits=[(partitions.test, df_test_scores, POLICY_DATA_SPLIT_TEST)],
             )
             results.write_dataframe("policy/summary.csv", df_policy)
+            policy_values = evaluate_policy_values(
+                policies=policies,
+                test=partitions.test,
+                test_scores=df_test_scores,
+                bootstrap_samples=self.policy_service.bootstrap_samples,
+                random_state=self.policy_service.random_state,
+            )
+            results.write_dataframe("policy/value_comparison.csv", policy_values.table)
+            plot_policy_value_table(
+                table=policy_values.table,
+                save_path=str(results.root / "policy" / POLICY_VALUE_FIGURE_NAME),
+            )
             self.persist_policy_artifacts(
                 policies=policies,
                 df_policy=df_policy,
+                policy_values=policy_values,
                 estimation=estimation,
                 df_estimation_scores=estimation_scores,
                 test=partitions.test,
@@ -1382,12 +1401,14 @@ class CausalPipeline:
         self,
         policies: list[FittedPolicy],
         df_policy: pd.DataFrame,
+        policy_values: PolicyValueReport,
         estimation: CausalDataset,
         df_estimation_scores: pd.DataFrame,
         test: CausalDataset,
         df_test_scores: pd.DataFrame,
         results: ResultStore,
     ) -> None:
+        observed = test.treatment_series.to_numpy(dtype=object)
         for policy in policies:
             slice_slug = policy_slice_slug(policy)
             slice_dir = results.policy_slice_dir(slice_slug)
@@ -1397,6 +1418,17 @@ class CausalPipeline:
             ]
             if not df_slice.empty:
                 write_dataframe(slice_dir / "rule_performance.csv", df_slice)
+            write_dataframe(
+                slice_dir / "value.csv",
+                policy_values.table.loc[policy_values.table["policy"] == slice_slug],
+            )
+            write_dataframe(
+                slice_dir / "patient_assignments.csv",
+                patient_assignment_table(
+                    assignment=policy_values.assignments[slice_slug],
+                    observed=observed,
+                ),
+            )
             save_policy_slice_figure(
                 policy=policy,
                 estimation=estimation,

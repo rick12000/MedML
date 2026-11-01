@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
 
 from causal_pipeline.ate import (
     IPWAdapter,
@@ -26,12 +25,11 @@ from causal_pipeline.pipeline import CausalPipeline
 
 def test_ipw_does_not_publish_a_hand_rolled_sensitivity_bound(
     binary_data_config: DataConfig,
-    logistic_learner: BaseEstimator,
     df_synthetic_binary: pd.DataFrame,
 ) -> None:
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     estimator = IPWAdapter(
-        spec=IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+        spec=IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="linear"),
         data=dataset,
     )
     assert estimator_supports_sensitivity(estimator) is False
@@ -40,16 +38,15 @@ def test_ipw_does_not_publish_a_hand_rolled_sensitivity_bound(
 def test_skipped_sensitivity_removes_a_previous_bound(
     test_output_dir: Path,
     binary_data_config: DataConfig,
-    logistic_learner: BaseEstimator,
     df_synthetic_binary: pd.DataFrame,
 ) -> None:
     config = PipelineConfig(
         data=binary_data_config,
         split=SplitConfig(test_fraction=0.0, random_state=DEFAULT_SPLIT_RANDOM_STATE),
         ate_estimators=[
-            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="linear"),
         ],
-        sensitivity=SensitivityConfig(outcome_learner=logistic_learner),
+        sensitivity=SensitivityConfig(outcome_learner="linear"),
         results_dir=str(test_output_dir),
     )
     pipeline = CausalPipeline(config=config)
@@ -58,7 +55,7 @@ def test_skipped_sensitivity_removes_a_previous_bound(
     (stale / "summary.csv").write_text("old\n", encoding="utf-8")
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     estimator = IPWAdapter(
-        spec=IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+        spec=IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="linear"),
         data=dataset,
     )
     pipeline.run_ate_sensitivity(

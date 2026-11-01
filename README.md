@@ -9,6 +9,7 @@ causal_pipeline/
   config.py        # Pydantic configuration models and estimator cloning
   data.py          # CausalDataset, splitting, contrast utilities
   diagnostics.py   # Propensity overlap and covariate balance (SMD)
+  balance_figures.py # Love plot of unadjusted vs weighted SMDs
   ate.py           # ATE adapters and omitted-variable sensitivity
   cate.py          # CATE adapters (meta-learners, forest, neural optional)
   evaluation.py    # Robust proxy scores, calibration, ECETH, TOC, RATE
@@ -40,6 +41,6 @@ Optional extras: `uv sync --extra neural`, `--extra r`, or `--extra impute`.
 
 ## Policy workflow
 
-Pass instantiated sklearn estimators (for example `RandomForestRegressor(...)`) on estimator specs. The pipeline clones them before fitting so shared config objects stay unfitted.
+Learner fields on estimator specs take an approved architecture name: `"linear"`, `"random_forest"`, or `"xgboost"` (default). Pass a name, not an estimator object. The pipeline builds the estimator from the name, picks classifier or regressor from the outcome type, and keeps it single-threaded so parallelism stays at the process-pool level.
 
 ATE and CATE estimator lists are optional, but at least one must be non-empty. Diagnostics, sensitivity, CATE evaluation, and policy are optional. CATE calibration and ranking metrics use cross-fitted predictions on the estimation sample only. With policy off, every estimator is cross-fit on the full sample. Pass `policy=[PolicyTreeMethodSpec(...), ...]` with `test_fraction` strictly between 0 and 1 to hold out a test set: rules are trained on out-of-fold learning-sample rewards and scored only on that test set. Omit `policy` or pass an empty list to skip policy fitting.

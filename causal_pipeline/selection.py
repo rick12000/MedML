@@ -33,7 +33,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 from sklearn.base import BaseEstimator
 
-from causal_pipeline.config import JsonValue, predict_outcome_mean, require_classifier
+from causal_pipeline.config import JsonValue, predict_outcome_mean
 from causal_pipeline.nuisance_metrics import log_in_sample_outcome, log_in_sample_propensity
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import contrast_columns
@@ -147,8 +147,6 @@ def transport_included_effects(
     )
     if len(excluded_covariates) == 0:
         raise ValueError("Transport needs at least one excluded patient with covariates.")
-    require_classifier(sampling_learner, "sampling_learner")
-    require_classifier(propensity_learner, "propensity_learner")
     included = included_covariates.reset_index(drop=True)
     excluded = excluded_covariates.reset_index(drop=True).loc[:, list(included.columns)]
     treatment = included_treatment.reset_index(drop=True)

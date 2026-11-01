@@ -8,21 +8,18 @@ policytree package; deeper trees are a different, hybrid search.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 from sklearn.tree import _tree
 
-from causal_pipeline.config import JsonValue, PolicySearchMode
+from causal_pipeline.config import ArbitraryTypesModel, JsonValue, PolicySearchMode
 
 POLICY_VALUE_TOLERANCE = 1e-8
 EXACT_POLICY_WELFARE_METHOD = "exact_policy_welfare"
 EXACT_POLICY_CAPITAL_METHOD = "exact_policy_capital"
 
 
-@dataclass(frozen=True)
-class PolicySplitNode:
+class PolicySplitNode(ArbitraryTypesModel):
     feature_index: int | None
     threshold: float | None
     action: int | None
@@ -32,8 +29,7 @@ class PolicySplitNode:
     leaf_id: int | None
 
 
-@dataclass(frozen=True)
-class RewardSearch:
+class RewardSearch(ArbitraryTypesModel):
     features: np.ndarray
     rewards: np.ndarray
     min_node_size: int
@@ -241,7 +237,6 @@ def fit_depth_one(problem: RewardSearch, indices: np.ndarray) -> PolicySplitNode
         chosen_value = float(split_values[choice])
         if chosen_value <= best.value + POLICY_VALUE_TOLERANCE:
             continue
-        cut = int(cut_positions[choice])
         best = PolicySplitNode(
             feature_index=feature_index,
             threshold=float(left_edge[choice]),

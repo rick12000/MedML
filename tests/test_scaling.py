@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+from causal_pipeline.learners import DEFAULT_LOGISTIC_MAX_ITER
 
 from causal_pipeline.scaling import CovariateScaler, clone_scaled_estimator
 

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from causal_pipeline.balance_figures import COVARIATE_BALANCE_FIGURE_NAME, plot_covariate_balance
 from causal_pipeline.cate import mean_cate_table
-from causal_pipeline.config import DEFAULT_ATE_CONFIDENCE_LEVEL, PipelineConfig
+from causal_pipeline.config import DEFAULT_ATE_CONFIDENCE_LEVEL, ArbitraryTypesModel, PipelineConfig
 from causal_pipeline.diagnostics import plot_overlap
 from causal_pipeline.estimator_identity import assign_estimator_ids, attach_estimator_metadata
 from causal_pipeline.evaluation import (
@@ -41,8 +41,7 @@ RATE_NOT_POOLED = (
 )
 
 
-@dataclass(frozen=True)
-class CompletedAnalysis:
+class CompletedAnalysis(ArbitraryTypesModel):
     """Estimates from one completed covariate draw, before pooling."""
 
     ate_by_estimator: dict[str, pd.DataFrame]
@@ -275,9 +274,11 @@ def write_pooled_balance(
     if len(balance_tables) == len(completed_runs) and balance_tables:
         keys = [column for column in ("covariate", "arm_a", "arm_b") if column in balance_tables[0].columns]
         values = [column for column in balance_tables[0].columns if column not in keys]
-        results.write_dataframe(
-            "diagnostics/covariate_balance.csv",
-            pool_point_columns(frames=balance_tables, keys=keys, values=values),
+        pooled_balance = pool_point_columns(frames=balance_tables, keys=keys, values=values)
+        results.write_dataframe("diagnostics/covariate_balance.csv", pooled_balance)
+        plot_covariate_balance(
+            balance=pooled_balance,
+            save_path=str(results.root / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
         )
     overlap_paths = [run.results_root / "diagnostics" / "propensity_overlap.csv" for run in completed_runs]
     if all(path.exists() for path in overlap_paths):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -15,11 +14,12 @@ import numpy as np
 import pandas as pd
 import shap
 from sklearn.base import BaseEstimator, clone
-from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from xgboost import XGBClassifier, XGBRegressor
 
 from causal_pipeline.config import (
+    ArbitraryTypesModel,
     NuisanceScreenConfig,
     OutcomeType,
     predict_outcome_mean,
@@ -58,8 +58,7 @@ COLUMN_DROP_CI_MULTIPLIER = 1.96
 LOWEST_SELECTION_SCORE = -1.0
 
 
-@dataclass(frozen=True)
-class ScreenSplit:
+class ScreenSplit(ArbitraryTypesModel):
     train: pd.DataFrame
     validation: pd.DataFrame
     test: pd.DataFrame
@@ -624,7 +623,6 @@ def write_column_drop_importance(
     )
     metric_name = performance_drop_metric_name(classification=classification)
     mean_column = f"mean_{metric_name}_drop"
-    sem_column = f"sem_{metric_name}_drop"
     ranked = table.sort_values(mean_column, ascending=False)
     write_dataframe(destination / "column_drop_importance.csv", ranked)
     plot_column_drop_importance(
@@ -690,7 +688,7 @@ def shap_matrix(model: BaseEstimator, sample: pd.DataFrame) -> np.ndarray:
     if isinstance(model, (XGBClassifier, XGBRegressor)) or hasattr(model, "estimators_"):
         explanation = shap.TreeExplainer(model).shap_values(sample)
         return first_shap_matrix(explanation)
-    if isinstance(model, (LogisticRegression, LinearRegression, Ridge)):
+    if isinstance(model, (LogisticRegression, Ridge)):
         explanation = shap.LinearExplainer(model, np.asarray(sample, dtype=float)).shap_values(
             np.asarray(sample, dtype=float)
         )

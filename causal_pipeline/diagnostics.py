@@ -15,9 +15,10 @@ import pandas as pd
 from causallib.utils.stat_utils import calc_weighted_standardized_mean_differences
 from pydantic import BaseModel, ConfigDict
 
+from causal_pipeline.balance_figures import COVARIATE_BALANCE_FIGURE_NAME, plot_covariate_balance
 from causal_pipeline.config import JsonValue, OverlapConfig, TreatmentMode
 from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
-from causal_pipeline.learner_resolve import materialize_overlap_propensity
+from causal_pipeline.learners import build_learner
 from causal_pipeline.data import CausalDataset, DataPartitions, ipw_weights_multi
 from causal_pipeline.figures import (
     PANEL_HEIGHT,
@@ -94,7 +95,11 @@ class OverlapPreprocessor:
     ) -> OverlapRun:
         logger.info("Running overlap preprocessing on the pooled analysis sample...")
         pooled = stack_partitions(partitions)
-        propensity_learner = materialize_overlap_propensity(self.overlap)
+        propensity_learner = build_learner(
+            self.overlap.propensity_learner,
+            "classification",
+            self.overlap.random_state,
+        )
         _, propensity = cross_fit_nuisances(
             covariates=pooled.X_adjustment.copy(),
             treatment=pooled.treatment_series,
@@ -141,6 +146,11 @@ class OverlapPreprocessor:
                 stabilized=self.overlap.stabilized_weights,
             ),
         )
+        if results_root is not None:
+            plot_covariate_balance(
+                balance=balance,
+                save_path=str(Path(results_root) / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
+            )
         trimmed_balance = None
         reduced = partitions
         if self.overlap.trim_bounds is not None:

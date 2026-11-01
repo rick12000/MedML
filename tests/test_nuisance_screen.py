@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
 from causal_pipeline.config import NuisanceScreenConfig
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+from causal_pipeline.learners import DEFAULT_LOGISTIC_MAX_ITER, build_learner
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.nuisance_screen import (
     column_drop_importance_table,
@@ -36,15 +36,15 @@ def test_nuisance_screen_writes_test_metrics(
         validation_fraction=0.25,
         random_state=0,
         column_drop_repeats=2,
-        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-        outcome_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+        propensity_learner="linear",
+        outcome_learner="linear",
     )
     run_nuisance_screen(
         dataset=dataset,
         screen=screen,
         results_root=test_output_dir,
-        propensity_learner=screen.propensity_learner,
-        outcome_learners=[screen.outcome_learner],
+        propensity_learner=build_learner("linear", "classification", random_state=0),
+        outcome_learners=[build_learner("linear", "classification", random_state=0)],
     )
     propensity = test_output_dir / "nuisance_screen" / "propensity" / "LogisticRegression" / "metrics.csv"
     outcome = test_output_dir / "nuisance_screen" / "outcome" / "LogisticRegression" / "metrics.csv"

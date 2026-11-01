@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 
-from causal_pipeline.config import JsonValue
+from causal_pipeline.config import ArbitraryTypesModel, JsonValue
 from causal_pipeline.crossfit import dataset_groups
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.estimator_identity import normalize_estimator_alias
@@ -37,8 +35,7 @@ ALWAYS_TREAT = "always_treat"
 OBSERVED = "observed"
 
 
-@dataclass(frozen=True, eq=False)
-class PolicyAssignment:
+class PolicyAssignment(ArbitraryTypesModel):
     """One candidate treatment rule and the gain each held-out patient realizes under it."""
 
     name: str
@@ -49,8 +46,7 @@ class PolicyAssignment:
     share_treated: float
 
 
-@dataclass(frozen=True, eq=False)
-class PolicyValueReport:
+class PolicyValueReport(ArbitraryTypesModel):
     """Value table with one row per candidate, plus each candidate's patient-level assignment."""
 
     table: pd.DataFrame

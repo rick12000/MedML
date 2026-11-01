@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
@@ -11,15 +10,14 @@ import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.metrics import r2_score, roc_auc_score
 
-from causal_pipeline.config import JsonValue, predict_outcome_mean
+from causal_pipeline.config import ArbitraryTypesModel, JsonValue, predict_outcome_mean
 
 logger = logging.getLogger(__name__)
 
 MINIMUM_CLASSES_FOR_AUC = 2
 
 
-@dataclass(frozen=True)
-class OutcomeMetric:
+class OutcomeMetric(ArbitraryTypesModel):
     name: str
     value: float
 
@@ -85,8 +83,8 @@ def outcome_metric_from_predictions(
     if outcome_values.size == 0 or not has_multiple_classes(outcome_values):
         return None
     if binary_outcome:
-        return OutcomeMetric("AUC", float(roc_auc_score(outcome_values, prediction_values)))
-    return OutcomeMetric("R2", float(r2_score(outcome_values, prediction_values)))
+        return OutcomeMetric(name="AUC", value=float(roc_auc_score(outcome_values, prediction_values)))
+    return OutcomeMetric(name="R2", value=float(r2_score(outcome_values, prediction_values)))
 
 
 def binary_column_auc(

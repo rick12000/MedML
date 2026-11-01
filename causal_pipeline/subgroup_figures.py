@@ -23,7 +23,6 @@ each column holds, so spacing stays tight whatever the labels are.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -46,6 +45,7 @@ from causal_pipeline.figures import (
     widest,
     write_text,
 )
+from causal_pipeline.config import ArbitraryTypesModel
 from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE, OVERALL_LABEL
 from causal_pipeline.utils import save_figure
 
@@ -108,16 +108,14 @@ CAP_CLIP_FACTOR = 2.5
 P_FLOOR = 0.01
 
 
-@dataclass(frozen=True)
-class Interval:
+class Interval(ArbitraryTypesModel):
     estimate: float
     lower: float
     upper: float
     pvalue: float
 
 
-@dataclass(frozen=True)
-class Block:
+class Block(ArbitraryTypesModel):
     """One column block. ``kind`` picks the forest axis label and the shared forest scale."""
 
     key: str
@@ -125,8 +123,7 @@ class Block:
     kind: str
 
 
-@dataclass(frozen=True)
-class SubgroupRow:
+class SubgroupRow(ArbitraryTypesModel):
     group: str
     splits: str
     patients: str
@@ -134,28 +131,24 @@ class SubgroupRow:
     intervals: Mapping[str, Interval]
 
 
-@dataclass(frozen=True)
-class ContrastGroup:
+class ContrastGroup(ArbitraryTypesModel):
     title: str
     rows: tuple[SubgroupRow, ...]
 
 
-@dataclass(frozen=True)
-class TableModel:
+class TableModel(ArbitraryTypesModel):
     blocks: tuple[Block, ...]
     groups: tuple[ContrastGroup, ...]
     ci_percent: int
 
 
-@dataclass(frozen=True)
-class EstimateCell:
+class EstimateCell(ArbitraryTypesModel):
     estimate: str
     pvalue: str
     bounds: str
 
 
-@dataclass(frozen=True)
-class Span:
+class Span(ArbitraryTypesModel):
     left: float
     right: float
 
@@ -168,8 +161,7 @@ class Span:
         return self.right - self.left
 
 
-@dataclass(frozen=True)
-class BlockColumns:
+class BlockColumns(ArbitraryTypesModel):
     block: Block
     delta: Span
     bounds: Span
@@ -178,11 +170,10 @@ class BlockColumns:
 
     @property
     def span(self) -> Span:
-        return Span(self.delta.left, self.forest.right)
+        return Span(left=self.delta.left, right=self.forest.right)
 
 
-@dataclass(frozen=True)
-class TableLayout:
+class TableLayout(ArbitraryTypesModel):
     left: float
     right: float
     group: Span
@@ -195,8 +186,7 @@ class TableLayout:
         return self.right + MARGIN_INCHES
 
 
-@dataclass(frozen=True)
-class VerticalLayout:
+class VerticalLayout(ArbitraryTypesModel):
     header_top: float
     body_top: float
     axis_y: float
@@ -526,11 +516,11 @@ def build_layout(model: TableModel) -> TableLayout:
         widest((row.patients for row in rows), TEXT_FONT_SIZE),
     )
     cursor = MARGIN_INCHES
-    group = Span(cursor, cursor + group_width)
+    group = Span(left=cursor, right=cursor + group_width)
     cursor = group.right + COLUMN_GAP_INCHES
-    splits = Span(cursor, cursor + splits_width)
+    splits = Span(left=cursor, right=cursor + splits_width)
     cursor = splits.right + COLUMN_GAP_INCHES
-    patients = Span(cursor, cursor + patients_width)
+    patients = Span(left=cursor, right=cursor + patients_width)
     cursor = patients.right + BLOCK_GAP_INCHES
 
     ci_header = f"{model.ci_percent}% CI"
@@ -549,17 +539,17 @@ def build_layout(model: TableModel) -> TableLayout:
             [text_width(P_HEADER, HEADER_FONT_SIZE, "bold")]
             + [text_width(cell.pvalue, TEXT_FONT_SIZE, "bold") for cell in cells]
         )
-        delta = Span(cursor, cursor + delta_width)
+        delta = Span(left=cursor, right=cursor + delta_width)
         cursor = delta.right + INNER_GAP_INCHES
-        bounds = Span(cursor, cursor + bounds_width)
+        bounds = Span(left=cursor, right=cursor + bounds_width)
         cursor = bounds.right + INNER_GAP_INCHES
-        pvalue = Span(cursor, cursor + pvalue_width)
+        pvalue = Span(left=cursor, right=cursor + pvalue_width)
         cursor = pvalue.right + TEXT_GAP_INCHES
         # The estimator title is centred over the whole block, so the forest widens to fit it.
         title_width = text_width(block.title, PARENT_FONT_SIZE, "bold")
         filled = pvalue.right - delta.left + TEXT_GAP_INCHES
         forest_width = max(FOREST_WIDTH_INCHES, title_width - filled)
-        forest = Span(cursor, cursor + forest_width)
+        forest = Span(left=cursor, right=cursor + forest_width)
         cursor = forest.right + BLOCK_GAP_INCHES
         block_columns.append(
             BlockColumns(block=block, delta=delta, bounds=bounds, pvalue=pvalue, forest=forest)

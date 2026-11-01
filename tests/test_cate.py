@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import BaseEstimator
 
 from causal_pipeline.cate import create_cate_estimator, mean_cate_table, warn_rowwise_internal_split
 from causal_pipeline.config import (
@@ -63,15 +62,13 @@ def test_grouped_neural_split_warns_and_continues(
 def test_binary_dr_outcome_model_predicts_probabilities(
     binary_data_config: DataConfig,
     df_synthetic_binary: pd.DataFrame,
-    logistic_learner: BaseEstimator,
-    linear_learner: BaseEstimator,
 ) -> None:
     dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
     spec = MetaCATEEstimatorSpec(
         kind=CATEKind.DR_LEARNER,
-        outcome_learner=logistic_learner,
-        effect_learner=linear_learner,
-        propensity_learner=logistic_learner,
+        outcome_learner="linear",
+        effect_learner="linear",
+        propensity_learner="linear",
         n_folds=2,
     )
     estimator = create_cate_estimator(spec=spec, data=dataset)
@@ -82,47 +79,28 @@ def test_binary_dr_outcome_model_predicts_probabilities(
     assert not np.all(np.isin(predicted, (0.0, 1.0)))
 
 
-def test_binary_s_learner_rejects_regressor_outcome_model(
-    binary_data_config: DataConfig,
-    forest_learner: BaseEstimator,
-    df_synthetic_binary: pd.DataFrame,
-) -> None:
-    spec = MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, outcome_learner=forest_learner)
-    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
-    estimator = create_cate_estimator(spec=spec, data=dataset)
-    with pytest.raises(TypeError):
-        estimator.fit(data=dataset)
-
-
-@pytest.mark.parametrize("architecture", ["linear", "forest"])
+@pytest.mark.parametrize("architecture", ["linear", "random_forest"])
 @pytest.mark.parametrize("kind", FAST_CATE_KINDS)
 def test_cate_recovers_a_known_linear_effect(
     kind: CATEKind,
     architecture: str,
     recovery_data_config: DataConfig,
     heterogeneous_effect_cohort: tuple[pd.DataFrame, np.ndarray],
-    linear_learner: BaseEstimator,
-    logistic_learner: BaseEstimator,
-    recovery_regressor: BaseEstimator,
-    recovery_classifier: BaseEstimator,
 ) -> None:
     frame, truth = heterogeneous_effect_cohort
     dataset = CausalDataset(data=recovery_data_config, df=frame)
-    outcome_learner = linear_learner if architecture == "linear" else recovery_regressor
-    propensity_learner = logistic_learner if architecture == "linear" else recovery_classifier
-    effect_learner = linear_learner if architecture == "linear" else recovery_regressor
     if kind == CATEKind.CAUSAL_FOREST:
         spec = CausalForestCATEEstimatorSpec(
             kind=kind,
-            outcome_learner=outcome_learner,
-            propensity_learner=propensity_learner,
+            outcome_learner=architecture,
+            propensity_learner=architecture,
         )
     else:
         spec = MetaCATEEstimatorSpec(
             kind=kind,
-            outcome_learner=outcome_learner,
-            effect_learner=effect_learner if kind in TWO_STAGE_META_LEARNERS else None,
-            propensity_learner=propensity_learner if kind in TWO_STAGE_META_LEARNERS else None,
+            outcome_learner=architecture,
+            effect_learner=architecture,
+            propensity_learner=architecture,
             n_folds=RECOVERY_FOLDS,
         )
     estimator = create_cate_estimator(spec=spec, data=dataset)

@@ -5,9 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 
 from causal_pipeline.cate import create_cate_estimator
 from causal_pipeline.config import (
@@ -15,7 +13,6 @@ from causal_pipeline.config import (
     CATEKind,
     DataConfig,
     MetaCATEEstimatorSpec,
-    OutcomeFavorability,
 )
 from causal_pipeline.crossfit import dataset_groups
 from causal_pipeline.data import CausalDataset
@@ -35,8 +32,8 @@ def write_linear_meta_learner_evaluation_figures(
     """Cross-fit DR scores, fit S/T learners, write TOC and calibration like the pipeline."""
     dataset = CausalDataset(data=data_config, df=frame)
     evaluation = CATEEvaluationConfig(
-        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-        outcome_learner=LinearRegression(),
+        propensity_learner="linear",
+        outcome_learner="linear",
         dr_crossfit_folds=RECOVERY_EVAL_FOLDS,
         calibration_bins=5,
         rate_bootstrap_samples=RECOVERY_RATE_BOOTSTRAP,
@@ -48,7 +45,7 @@ def write_linear_meta_learner_evaluation_figures(
     predictions: dict[str, pd.DataFrame] = {}
     for kind, label in ((CATEKind.S_LEARNER, "s_learner"), (CATEKind.T_LEARNER, "t_learner")):
         estimator = create_cate_estimator(
-            spec=MetaCATEEstimatorSpec(kind=kind, outcome_learner=LinearRegression()),
+            spec=MetaCATEEstimatorSpec(kind=kind, outcome_learner="linear"),
             data=dataset,
         )
         estimator.fit(data=dataset)

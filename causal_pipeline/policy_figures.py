@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import matplotlib
 
 matplotlib.use("Agg")
@@ -15,7 +13,7 @@ from matplotlib.axes import Axes
 from matplotlib.patches import FancyBboxPatch
 from sklearn.tree import DecisionTreeRegressor, _tree
 
-from causal_pipeline.config import JsonValue
+from causal_pipeline.config import ArbitraryTypesModel, JsonValue
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.estimator_identity import normalize_estimator_alias
 from causal_pipeline.figures import INK, PUBLICATION_RC, REFERENCE_COLOR
@@ -42,8 +40,7 @@ FOOTNOTE = (
     "by the raw outcome scale. Tree structure and decisions come from the estimation sample."
 )
 
-@dataclass(frozen=True)
-class DrawnNode:
+class DrawnNode(ArbitraryTypesModel):
     key: str
     header: str
     is_leaf: bool
@@ -157,8 +154,7 @@ def sklearn_policy_tree(policy: FittedPolicy) -> PolicyTree | DecisionTreeRegres
     return None
 
 
-@dataclass(frozen=True)
-class NodeSpec:
+class NodeSpec(ArbitraryTypesModel):
     key: str
     header: str
     is_leaf: bool
@@ -264,7 +260,17 @@ def exact_tree_specs(
                 treatment_values=dataset.treatment_values,
             )
             specs.append(
-                NodeSpec(key, "Leaf", True, None, None, train_mask, test_mask, decision, depth)
+                NodeSpec(
+                    key=key,
+                    header="Leaf",
+                    is_leaf=True,
+                    children=None,
+                    branch_labels=None,
+                    train_mask=train_mask,
+                    test_mask=test_mask,
+                    decision=decision,
+                    depth=depth,
+                )
             )
             return
         if current.feature_index is None or current.threshold is None:
@@ -280,15 +286,15 @@ def exact_tree_specs(
         )
         specs.append(
             NodeSpec(
-                key,
-                header,
-                False,
-                (f"{key}L", f"{key}R"),
-                ("≤", ">"),
-                train_mask,
-                test_mask,
-                decision,
-                depth,
+                key=key,
+                header=header,
+                is_leaf=False,
+                children=(f"{key}L", f"{key}R"),
+                branch_labels=("≤", ">"),
+                train_mask=train_mask,
+                test_mask=test_mask,
+                decision=decision,
+                depth=depth,
             )
         )
         train_values = train_matrix[train_positions, current.feature_index]

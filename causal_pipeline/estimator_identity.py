@@ -13,8 +13,6 @@ from typing import TypeVar
 
 import pandas as pd
 from pydantic import BaseModel
-from sklearn.base import BaseEstimator
-
 from causal_pipeline.config import ATEEstimatorSpec, CATEEstimatorSpec
 
 EstimatorSpec = ATEEstimatorSpec | CATEEstimatorSpec
@@ -22,20 +20,9 @@ SpecT = TypeVar("SpecT", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
-LEARNER_FIELD_NAMES = frozenset(
-    {
-        "propensity_learner",
-        "outcome_learner",
-        "effect_learner",
-    }
-)
-
-
 def _serialize_config_value(value: object) -> object:
     if isinstance(value, StrEnum):
         return value.value
-    if isinstance(value, BaseEstimator):
-        return type(value).__name__
     return value
 
 
@@ -46,9 +33,6 @@ def estimator_config_columns(spec: EstimatorSpec) -> dict[str, object]:
         if name == "kind":
             continue
         value = getattr(spec, name)
-        if name in LEARNER_FIELD_NAMES:
-            columns[name] = type(value).__name__ if value is not None else None
-            continue
         if name == "clip_bounds":
             columns["propensity_clip_lower"] = value[0] if value is not None else None
             columns["propensity_clip_upper"] = value[1] if value is not None else None

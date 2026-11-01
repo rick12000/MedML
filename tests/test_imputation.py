@@ -7,9 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import LogisticRegression
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 
 from causal_pipeline.config import (
     ATEKind,
@@ -140,7 +138,6 @@ def test_skip_warnings_name_policy_sensitivity_and_unit_intervals(
 def test_imputed_pipeline_pools_the_ate_and_skips_policy(
     recovery_data_config: DataConfig,
     test_output_dir,
-    logistic_learner,
     shift_covariate_imputer,
 ) -> None:
     generator = np.random.default_rng(0)
@@ -156,12 +153,12 @@ def test_imputed_pipeline_pools_the_ate_and_skips_policy(
     config = PipelineConfig(
         data=recovery_data_config,
         split=SplitConfig(test_fraction=0.25),
-        overlap=OverlapConfig(n_folds=PIPELINE_FOLDS, propensity_learner=logistic_learner),
+        overlap=OverlapConfig(n_folds=PIPELINE_FOLDS, propensity_learner="linear"),
         ate_estimators=[
             IPWATEEstimatorSpec(
                 kind=ATEKind.IPW,
                 n_folds=PIPELINE_FOLDS,
-                propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+                propensity_learner="linear",
             )
         ],
         subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],

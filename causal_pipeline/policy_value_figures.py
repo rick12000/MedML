@@ -9,8 +9,6 @@ interval. Shaded cells are those whose interval excludes zero.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -26,6 +24,7 @@ from causal_pipeline.figures import (
     widest,
     write_text,
 )
+from causal_pipeline.config import ArbitraryTypesModel
 from causal_pipeline.policy import BOOTSTRAP_CI_LOWER_PERCENTILE, BOOTSTRAP_CI_UPPER_PERCENTILE
 from causal_pipeline.policy_value import ALWAYS_TREAT, NEVER_TREAT, OBSERVED
 from causal_pipeline.utils import save_figure
@@ -85,28 +84,24 @@ DETAIL_FONT_SIZE = 6.6
 FOOTNOTE_FONT_SIZE = 6.6
 
 
-@dataclass(frozen=True)
-class ValueCell:
+class ValueCell(ArbitraryTypesModel):
     estimate: float
     lower: float
     upper: float
 
 
-@dataclass(frozen=True)
-class ValueRow:
+class ValueRow(ArbitraryTypesModel):
     label: str
     detail: str
     cells: tuple[ValueCell, ...]
 
 
-@dataclass(frozen=True)
-class ValueColumn:
+class ValueColumn(ArbitraryTypesModel):
     group: str
     label: str
 
 
-@dataclass(frozen=True)
-class ValueTable:
+class ValueTable(ArbitraryTypesModel):
     title: str
     footnotes: tuple[str, ...]
     columns: tuple[ValueColumn, ...]
@@ -114,8 +109,7 @@ class ValueTable:
     decimals: int
 
 
-@dataclass(frozen=True)
-class ValueLayout:
+class ValueLayout(ArbitraryTypesModel):
     width: float
     label_left: float
     columns: tuple[tuple[float, float], ...]

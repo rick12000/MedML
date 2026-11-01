@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 from scipy import stats
 
 from causal_pipeline.ate import TreatmentContrastScores
-from causal_pipeline.config import SubgroupSplit
+from causal_pipeline.config import ArbitraryTypesModel, SubgroupSplit
 from causal_pipeline.data import CausalDataset, contrast_columns
 
 logger = logging.getLogger(__name__)
@@ -53,8 +51,7 @@ SUBGROUP_SPLIT_COLUMNS = [
 OVERALL_LABEL = "All"
 
 
-@dataclass(frozen=True)
-class MeanDifference:
+class MeanDifference(ArbitraryTypesModel):
     above: float
     below: float
     difference: float

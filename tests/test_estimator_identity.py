@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from causal_pipeline.config import ATEKind, IPWATEEstimatorSpec
 from causal_pipeline.estimator_identity import (
     assign_estimator_ids,

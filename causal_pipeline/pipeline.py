@@ -36,13 +36,7 @@ from causal_pipeline.config import (
     PipelineConfig,
     PolicyKind,
 )
-from causal_pipeline.learner_defaults import materialize_propensity_learner
-from causal_pipeline.learner_defaults import (
-    materialize_nuisance_screen_outcome_learners,
-    materialize_nuisance_screen_propensity,
-)
-from causal_pipeline.learner_resolve import materialize_sensitivity_outcome
-from causal_pipeline.learner_tuning import resolve_cate_spec_for_outer_train
+from causal_pipeline.learners import build_learner, outcome_task
 from causal_pipeline.crossfit import cross_fit_predictions, cross_fit_splits, dataset_groups
 from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
 from causal_pipeline.diagnostics import OverlapPreprocessor
@@ -177,15 +171,11 @@ def predict_cate_fold(
     tune_estimators: bool = False,
     forest_n_jobs: int | None = None,
 ) -> pd.DataFrame:
-    fold_spec = resolve_cate_spec_for_outer_train(
-        train=train,
-        spec=spec,
-        tune=tune_estimators,
-    )
     estimator = create_cate_estimator(
-        spec=fold_spec,
+        spec=spec,
         data=train,
         forest_n_jobs=forest_n_jobs,
+        tune_estimators=tune_estimators,
     )
     estimator.fit(data=train)
     if outcome_records is not None:
@@ -550,16 +540,17 @@ def independent_fit_jobs(
                 split_random_state=split_random_state,
                 forest_n_jobs=library_jobs,
                 screen=screen,
-                propensity_learner=materialize_nuisance_screen_propensity(
+                propensity_learner=build_learner(
                     screen.propensity_learner,
-                    random_state=screen.random_state,
+                    "classification",
+                    screen.random_state,
                 ),
-                outcome_learners=tuple(
-                    materialize_nuisance_screen_outcome_learners(
+                outcome_learners=(
+                    build_learner(
                         screen.outcome_learner,
-                        outcome_type=estimation.outcome_type,
-                        random_state=screen.random_state,
-                    )
+                        outcome_task(binary=estimation.outcome_type == OutcomeType.BINARY),
+                        screen.random_state,
+                    ),
                 ),
                 evaluator=None,
             )
@@ -1192,7 +1183,6 @@ class CausalPipeline:
                 df_excluded is not None
                 and len(df_excluded) > 0
                 and sensitivity.sampling_learner is not None
-                and sensitivity.propensity_learner is not None
             ):
                 covariates = list(estimation.X_adjustment.columns)
                 missing = [column for column in covariates if column not in df_excluded.columns]
@@ -1203,14 +1193,20 @@ class CausalPipeline:
                     included_treatment=estimation.treatment_series.copy(),
                     included_outcome=estimation.outcome_series.copy(),
                     excluded_covariates=df_excluded.loc[:, covariates].copy(),
-                    outcome_learner=materialize_sensitivity_outcome(
-                        sensitivity,
-                        outcome_type=estimation.outcome_type,
+                    outcome_learner=build_learner(
+                        sensitivity.outcome_learner,
+                        outcome_task(binary=estimation.outcome_type == OutcomeType.BINARY),
+                        DEFAULT_LEARNER_RANDOM_STATE,
                     ),
-                    sampling_learner=sensitivity.sampling_learner,
-                    propensity_learner=materialize_propensity_learner(
+                    sampling_learner=build_learner(
+                        sensitivity.sampling_learner,
+                        "classification",
+                        DEFAULT_LEARNER_RANDOM_STATE,
+                    ),
+                    propensity_learner=build_learner(
                         sensitivity.propensity_learner,
-                        random_state=DEFAULT_LEARNER_RANDOM_STATE,
+                        "classification",
+                        DEFAULT_LEARNER_RANDOM_STATE,
                     ),
                     treatment_values=estimation.treatment_values,
                     control_value=estimation.control_value,

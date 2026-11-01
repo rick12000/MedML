@@ -5,11 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import BaseEstimator
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from xgboost import XGBClassifier, XGBRegressor
-
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER, DEFAULT_XGBOOST_MAX_DEPTH
+from causal_pipeline.learners import LearnerArchitecture
 from causal_pipeline.parallel import available_cores
 
 from causal_pipeline.config import (
@@ -41,7 +37,6 @@ INTEGRATION_BOOTSTRAP_SAMPLES = 8
 INTEGRATION_TEST_FRACTION = 0.25
 INTEGRATION_ATE_TOLERANCE = 0.05
 INTEGRATION_LEARNER_OBSERVATIONS = 800
-INTEGRATION_BOOST_TREES = 20
 INTEGRATION_ATE_KINDS = [
     ATEKind.IPW,
     ATEKind.AIPW,
@@ -63,28 +58,26 @@ def pipeline_config(
     hold_out_for_policy: bool,
     data_config: DataConfig,
     results_dir: Path,
-    logistic_learner: BaseEstimator,
-    linear_learner: BaseEstimator,
     sensitivity: SensitivityConfig | None,
 ) -> PipelineConfig:
     if ate_kind == ATEKind.IPW:
         ate_spec = IPWATEEstimatorSpec(
             kind=ate_kind,
-            propensity_learner=logistic_learner,
+            propensity_learner="linear",
             n_folds=INTEGRATION_FOLDS,
         )
     elif ate_kind == ATEKind.AIPW:
         ate_spec = DoublyRobustATEEstimatorSpec(
             kind=ate_kind,
-            outcome_learner=linear_learner,
-            propensity_learner=logistic_learner,
+            outcome_learner="linear",
+            propensity_learner="linear",
             n_folds=INTEGRATION_FOLDS,
         )
     else:
         ate_spec = DoubleMLATEEstimatorSpec(
             kind=ate_kind,
-            outcome_learner=linear_learner,
-            propensity_learner=logistic_learner,
+            outcome_learner="linear",
+            propensity_learner="linear",
             n_folds=INTEGRATION_FOLDS,
         )
     policy = None
@@ -98,16 +91,16 @@ def pipeline_config(
             test_fraction=test_fraction,
             random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
-        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=INTEGRATION_FOLDS),
+        overlap=OverlapConfig(propensity_learner="linear", n_folds=INTEGRATION_FOLDS),
         ate_estimators=[ate_spec],
         cate_estimators=[
-            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, outcome_learner=linear_learner),
-            MetaCATEEstimatorSpec(kind=CATEKind.T_LEARNER, outcome_learner=linear_learner),
+            MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER, outcome_learner="linear"),
+            MetaCATEEstimatorSpec(kind=CATEKind.T_LEARNER, outcome_learner="linear"),
         ],
         sensitivity=sensitivity,
         cate_evaluation=CATEEvaluationConfig(
-            propensity_learner=logistic_learner,
-            outcome_learner=linear_learner,
+            propensity_learner="linear",
+            outcome_learner="linear",
             dr_crossfit_folds=INTEGRATION_FOLDS,
             rate_bootstrap_samples=INTEGRATION_BOOTSTRAP_SAMPLES,
             eceth_bootstrap_samples=INTEGRATION_BOOTSTRAP_SAMPLES,
@@ -128,8 +121,6 @@ def test_pipeline_recovers_constant_effect(
     test_output_dir: Path,
     recovery_data_config: DataConfig,
     constant_effect_cohort: tuple[pd.DataFrame, float],
-    logistic_learner: BaseEstimator,
-    linear_learner: BaseEstimator,
 ) -> None:
     frame, truth = constant_effect_cohort
     config = pipeline_config(
@@ -137,8 +128,6 @@ def test_pipeline_recovers_constant_effect(
         hold_out_for_policy=hold_out_for_policy,
         data_config=recovery_data_config,
         results_dir=test_output_dir,
-        logistic_learner=logistic_learner,
-        linear_learner=linear_learner,
         sensitivity=None,
     )
     CausalPipeline(config=config).run(df_input=frame)
@@ -201,16 +190,14 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
     test_output_dir: Path,
     recovery_data_config: DataConfig,
     constant_effect_cohort: tuple[pd.DataFrame, float],
-    logistic_learner: BaseEstimator,
-    linear_learner: BaseEstimator,
 ) -> None:
     frame, truth = constant_effect_cohort
     selected = frame.copy()
     selected["included"] = (selected["x1"] > 0.0).astype(int)
     sensitivity = SensitivityConfig(
-        outcome_learner=LinearRegression(),
-        sampling_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+        outcome_learner="linear",
+        sampling_learner="linear",
+        propensity_learner="linear",
         selection_column="included",
         inclusion_fraction=0.5,
     )
@@ -219,8 +206,6 @@ def test_pipeline_reports_selection_and_doubleml_sensitivity(
         hold_out_for_policy=False,
         data_config=recovery_data_config,
         results_dir=test_output_dir,
-        logistic_learner=logistic_learner,
-        linear_learner=linear_learner,
         sensitivity=sensitivity,
     )
     CausalPipeline(config=config).run(df_input=selected)
@@ -268,9 +253,9 @@ def integration_cohort(outcome_type: OutcomeType) -> tuple[pd.DataFrame, DataCon
 
 def integration_cate_spec(
     kind: CATEKind,
-    outcome_learner: BaseEstimator,
-    effect_learner: BaseEstimator,
-    propensity_learner: BaseEstimator,
+    outcome_learner: LearnerArchitecture,
+    effect_learner: LearnerArchitecture,
+    propensity_learner: LearnerArchitecture,
 ) -> CATEEstimatorSpec:
     if kind == CATEKind.CAUSAL_FOREST:
         return CausalForestCATEEstimatorSpec(
@@ -303,34 +288,9 @@ def test_pipeline_fits_each_learner_end_to_end(
     if parallel and available_cores() < 2:
         pytest.skip("Process parallelism needs at least two cores.")
     frame, data_config = integration_cohort(outcome_type)
-    propensity_learner = XGBClassifier(
-        n_estimators=INTEGRATION_BOOST_TREES,
-        max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
-        n_jobs=1,
-        random_state=DEFAULT_SPLIT_RANDOM_STATE,
-        eval_metric="logloss",
-    )
-    effect_learner = XGBRegressor(
-        n_estimators=INTEGRATION_BOOST_TREES,
-        max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
-        n_jobs=1,
-        random_state=DEFAULT_SPLIT_RANDOM_STATE + 1,
-    )
-    if outcome_type == OutcomeType.BINARY:
-        outcome_learner = XGBClassifier(
-            n_estimators=INTEGRATION_BOOST_TREES,
-            max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
-            n_jobs=1,
-            random_state=DEFAULT_SPLIT_RANDOM_STATE + 2,
-            eval_metric="logloss",
-        )
-    else:
-        outcome_learner = XGBRegressor(
-            n_estimators=INTEGRATION_BOOST_TREES,
-            max_depth=DEFAULT_XGBOOST_MAX_DEPTH,
-            n_jobs=1,
-            random_state=DEFAULT_SPLIT_RANDOM_STATE + 2,
-        )
+    propensity_learner: LearnerArchitecture = "xgboost"
+    effect_learner: LearnerArchitecture = "xgboost"
+    outcome_learner: LearnerArchitecture = "xgboost"
     config = PipelineConfig(
         data=data_config,
         split=SplitConfig(test_fraction=0.0, random_state=DEFAULT_SPLIT_RANDOM_STATE),

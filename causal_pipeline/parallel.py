@@ -3,8 +3,9 @@
 One worker runs one CATE fold, one whole in-process learner, one ATE fit,
 one imputation draw, or one sensitivity refit.
 
-Core budget: one logical core is always left idle, so the machine keeps a
-buffer. Every library call inside a worker is pinned to one thread, both by
+Core budget: one physical core is always left idle, so the machine keeps a
+buffer. Hyper-threads share a physical core, so the budget counts physical cores
+rather than logical processors. Every library call inside a worker is pinned to one thread, both by
 environment variables (BLAS, OpenMP) and by explicit library arguments
 (XGBoost, econml/grf forests). A single task in the parent may use the whole
 budget. Nested process pools are avoided: imputation draws get the pool only
@@ -13,6 +14,7 @@ when there are at least as many draws as budgeted cores.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import sys
@@ -20,6 +22,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TypeVar
 
+import psutil
 from joblib.externals.loky import get_reusable_executor
 
 from causal_pipeline.logging_config import configure_package_runtime
@@ -93,9 +96,14 @@ def background_priority() -> Iterator[None]:
         kernel32.SetPriorityClass(handle, previous)
 
 
+def physical_cores() -> int:
+    """Physical cores on the machine. Falls back to one if the platform cannot report them."""
+    return psutil.cpu_count(logical=False) or 1
+
+
 def available_cores() -> int:
-    """Cores the pipeline may use: every logical core except one, never fewer than one."""
-    return max(1, (os.cpu_count() or 1) - 1)
+    """Physical cores the pipeline may use: all but one, never fewer than one."""
+    return max(1, physical_cores() - 1)
 
 
 def pool_workers(parallel: bool, n_tasks: int) -> int:
@@ -155,9 +163,8 @@ def run_map(function: Callable[[Job], Result], items: Sequence[Job], parallel: b
 
 def load_parallel_worker(worker_index: int) -> int:
     """Import the fit stack so a later timed pool does not pay that cost."""
-    import causal_pipeline.pipeline  # noqa: F401
-    import xgboost  # noqa: F401
-
+    importlib.import_module("causal_pipeline.pipeline")
+    importlib.import_module("xgboost")
     return worker_index
 
 

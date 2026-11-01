@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +26,9 @@ from causal_pipeline.config import (
     IPWWeighting,
     JsonValue,
     OutcomeType,
+    DEFAULT_LEARNER_RANDOM_STATE,
+    ArbitraryTypesModel,
     SensitivityConfig,
-    require_classifier,
 )
 from causal_pipeline.crossfit import (
     aipw_arm_scores,
@@ -47,16 +47,24 @@ from causal_pipeline.nuisance_metrics import (
     log_doubleml_apos_nuisances,
     log_doubleml_irm_plr_nuisances,
 )
-from causal_pipeline.learner_resolve import (
-    materialize_doubly_robust_learners,
-    materialize_doubleml_learners,
-    materialize_ipw_propensity,
-)
+from causal_pipeline.learners import LearnerArchitecture, build_learner, outcome_task
 from causal_pipeline.parallel import run_map
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_dataframe, write_html
 
 logger = logging.getLogger(__name__)
+
+
+def nuisance_learners(
+    outcome_name: LearnerArchitecture,
+    propensity_name: LearnerArchitecture,
+    binary_outcome: bool,
+    random_state: int,
+) -> tuple[BaseEstimator, BaseEstimator]:
+    """Outcome and propensity learners for one ATE estimator, built from approved names."""
+    outcome = build_learner(outcome_name, outcome_task(binary_outcome), random_state)
+    propensity = build_learner(propensity_name, "classification", random_state)
+    return outcome, propensity
 
 DML_UNCLIPPED_THRESHOLD = 1e-12
 SYMMETRIC_CLIP_TOLERANCE = 1e-8
@@ -68,8 +76,7 @@ SENSITIVITY_POINT_BOUND = "theta"
 SENSITIVITY_INTERVAL_BOUND = "ci"
 
 
-@dataclass(frozen=True)
-class TreatmentContrastScores:
+class TreatmentContrastScores(ArbitraryTypesModel):
     """Per-row treatment contrasts whose average is the estimator's ATE."""
 
     values: pd.DataFrame
@@ -186,8 +193,11 @@ class IPWAdapter(BaseATEEstimator):
         self.source_index: pd.Index | None = None
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> IPWAdapter:
-        propensity_learner = materialize_ipw_propensity(self.spec)
-        require_classifier(propensity_learner, "IPW propensity_learner")
+        propensity_learner = build_learner(
+            self.spec.propensity_learner,
+            "classification",
+            self.spec.random_state,
+        )
         self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
@@ -263,13 +273,12 @@ class AIPWAdapter(BaseATEEstimator):
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> AIPWAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
-        outcome_learner, propensity_learner = materialize_doubly_robust_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=binary_outcome,
+            random_state=self.spec.random_state,
         )
-        require_classifier(propensity_learner, "AIPW propensity_learner")
-        if binary_outcome:
-            require_classifier(outcome_learner, "AIPW outcome_learner")
         self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
@@ -327,13 +336,12 @@ class TMLEAdapter(BaseATEEstimator):
 
     def fit(self, data: CausalDataset, tune_estimators: bool = False) -> TMLEAdapter:
         binary_outcome = data.outcome_type == OutcomeType.BINARY
-        outcome_learner, propensity_learner = materialize_doubly_robust_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=binary_outcome,
+            random_state=self.spec.random_state,
         )
-        require_classifier(propensity_learner, "TMLE propensity_learner")
-        if binary_outcome:
-            require_classifier(outcome_learner, "TMLE outcome_learner")
         self.source_index = data.df.index.copy()
         self.treatment = data.treatment_series.copy()
         self.outcome = data.outcome_series.copy()
@@ -405,15 +413,14 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        outcome_learner, propensity_learner = materialize_doubleml_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
         )
         ml_g = clone_scaled_estimator(outcome_learner)
         ml_m = clone_scaled_estimator(propensity_learner)
-        require_classifier(ml_m, "DoubleML IRM propensity_learner")
-        if data.outcome_type == OutcomeType.BINARY:
-            require_classifier(ml_g, "DoubleML IRM outcome_learner")
         self.model = DoubleMLIRM(
             dml_data,
             ml_g=ml_g,
@@ -486,13 +493,14 @@ class DoubleMLPLRAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        outcome_learner, propensity_learner = materialize_doubleml_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
         )
         ml_l = clone_scaled_estimator(outcome_learner)
         ml_m = clone_scaled_estimator(propensity_learner)
-        require_classifier(ml_m, "DoubleML PLR propensity_learner")
         self.model = DoubleMLPLR(
             dml_data,
             ml_l=ml_l,
@@ -647,15 +655,14 @@ class DoubleMLAPOSAdapter(BaseATEEstimator):
         dml_data = doubleml_data_from_frame(
             doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
         )
-        outcome_learner, propensity_learner = materialize_doubleml_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
         )
         ml_g = clone_scaled_estimator(outcome_learner)
         ml_m = clone_scaled_estimator(propensity_learner)
-        require_classifier(ml_m, "DoubleML APOS propensity_learner")
-        if data.outcome_type == OutcomeType.BINARY:
-            require_classifier(ml_g, "DoubleML APOS outcome_learner")
         self.model = ClusterCapableDoubleMLAPOS(
             dml_data,
             ml_g=ml_g,

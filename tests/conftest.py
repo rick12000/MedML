@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor
 
 from causal_pipeline.cate import create_cate_estimator
 from causal_pipeline.parallel import available_cores, warm_process_pool
@@ -32,14 +31,12 @@ from causal_pipeline.config import (
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
 from causal_pipeline.imputation import CovariateImputer
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from tests.cache_paths import (
     TEST_CACHE_ROOT,
     module_cache_key,
     sanitize_cache_segment,
 )
 
-TEST_LOGISTIC_MAX_ITER = DEFAULT_LOGISTIC_MAX_ITER
 TEST_RANDOM_STATE = 0
 TEST_FOREST_N_ESTIMATORS = 10
 TEST_SYNTHETIC_N_OBSERVATIONS = 200
@@ -52,8 +49,6 @@ CONSTANT_EFFECT_NOISE = 0.5
 HETEROGENEOUS_EFFECT_INTERCEPT = 1.0
 HETEROGENEOUS_EFFECT_SLOPE = 1.2
 HETEROGENEOUS_EFFECT_NOISE = 0.5
-RECOVERY_FOREST_TREES = 40
-RECOVERY_FOREST_DEPTH = 8
 PARALLEL_TIMING_OBSERVATIONS = 5_000
 PARALLEL_TIMING_COVARIATES = 8
 
@@ -141,44 +136,8 @@ def cohort_frame(
 
 
 @pytest.fixture
-def logistic_learner() -> BaseEstimator:
-    return LogisticRegression(max_iter=TEST_LOGISTIC_MAX_ITER)
-
-
-@pytest.fixture
-def linear_learner() -> BaseEstimator:
-    return LinearRegression()
-
-
-@pytest.fixture
-def recovery_regressor() -> BaseEstimator:
-    return RandomForestRegressor(
-        n_estimators=RECOVERY_FOREST_TREES,
-        max_depth=RECOVERY_FOREST_DEPTH,
-        random_state=TEST_RANDOM_STATE,
-    )
-
-
-@pytest.fixture
-def recovery_classifier() -> BaseEstimator:
-    return RandomForestClassifier(
-        n_estimators=RECOVERY_FOREST_TREES,
-        max_depth=RECOVERY_FOREST_DEPTH,
-        random_state=TEST_RANDOM_STATE,
-    )
-
-
-@pytest.fixture
 def forest_learner() -> BaseEstimator:
     return RandomForestRegressor(
-        n_estimators=TEST_FOREST_N_ESTIMATORS,
-        random_state=TEST_RANDOM_STATE,
-    )
-
-
-@pytest.fixture
-def forest_classifier() -> BaseEstimator:
-    return RandomForestClassifier(
         n_estimators=TEST_FOREST_N_ESTIMATORS,
         random_state=TEST_RANDOM_STATE,
     )
@@ -294,15 +253,15 @@ def recovered_linear_cate() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     estimator = create_cate_estimator(
         spec=MetaCATEEstimatorSpec(
             kind=CATEKind.T_LEARNER,
-            outcome_learner=LinearRegression(),
+            outcome_learner="linear",
         ),
         data=dataset,
     )
     estimator.fit(data=dataset)
     predicted = estimator.predict_effects(data=dataset).iloc[:, 0].to_numpy(dtype=float)
     evaluation = CATEEvaluationConfig(
-        propensity_learner=LogisticRegression(max_iter=TEST_LOGISTIC_MAX_ITER),
-        outcome_learner=LinearRegression(),
+        propensity_learner="linear",
+        outcome_learner="linear",
         dr_crossfit_folds=5,
         calibration_bins=5,
         random_state=TEST_RANDOM_STATE,
@@ -315,8 +274,6 @@ def recovered_linear_cate() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 @pytest.fixture
 def pipeline_config_no_policy(
     binary_data_config: DataConfig,
-    logistic_learner: BaseEstimator,
-    forest_classifier: BaseEstimator,
     test_output_dir: Path,
 ) -> PipelineConfig:
     return PipelineConfig(
@@ -325,14 +282,14 @@ def pipeline_config_no_policy(
             test_fraction=0.0,
             random_state=DEFAULT_SPLIT_RANDOM_STATE,
         ),
-        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=2),
+        overlap=OverlapConfig(propensity_learner="linear", n_folds=2),
         ate_estimators=[
-            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="linear"),
         ],
         cate_estimators=[
             MetaCATEEstimatorSpec(
                 kind=CATEKind.S_LEARNER,
-                outcome_learner=forest_classifier,
+                outcome_learner="xgboost",
             ),
         ],
         sensitivity=None,
@@ -345,27 +302,25 @@ def pipeline_config_no_policy(
 @pytest.fixture
 def pipeline_config_with_policy(
     binary_data_config: DataConfig,
-    logistic_learner: BaseEstimator,
-    forest_classifier: BaseEstimator,
     test_output_dir: Path,
 ) -> PipelineConfig:
     return PipelineConfig(
         data=binary_data_config,
         split=SplitConfig(test_fraction=0.2, random_state=DEFAULT_SPLIT_RANDOM_STATE),
-        overlap=OverlapConfig(propensity_learner=logistic_learner, n_folds=2),
+        overlap=OverlapConfig(propensity_learner="linear", n_folds=2),
         ate_estimators=[
-            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=logistic_learner),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="linear"),
         ],
         cate_estimators=[
             MetaCATEEstimatorSpec(
                 kind=CATEKind.S_LEARNER,
-                outcome_learner=forest_classifier,
+                outcome_learner="xgboost",
             ),
         ],
         sensitivity=None,
         cate_evaluation=CATEEvaluationConfig(
-            propensity_learner=logistic_learner,
-            outcome_learner=forest_classifier,
+            propensity_learner="linear",
+            outcome_learner="xgboost",
             dr_crossfit_folds=TEST_POLICY_CROSSFIT_FOLDS,
             rate_bootstrap_samples=TEST_POLICY_BOOTSTRAP_SAMPLES,
             random_state=TEST_RANDOM_STATE,

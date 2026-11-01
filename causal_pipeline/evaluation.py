@@ -28,13 +28,23 @@ from causal_pipeline.figures import (
     RankingSeries,
     plot_evaluation_figure,
 )
-from causal_pipeline.learner_resolve import materialize_evaluation_learners
+from causal_pipeline.learners import build_learner, outcome_task
 from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
 from causal_pipeline.policy import reward_direction
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.utils import write_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+def evaluation_learner_templates(
+    config: CATEEvaluationConfig,
+    binary: bool,
+) -> tuple[BaseEstimator, BaseEstimator]:
+    """Unfitted propensity and outcome learners for doubly robust evaluation scores."""
+    propensity = build_learner(config.propensity_learner, "classification", config.random_state)
+    outcome = build_learner(config.outcome_learner, outcome_task(binary), config.random_state)
+    return propensity, outcome
 
 
 def contrast_scores_from_arms(
@@ -270,9 +280,9 @@ class CATEEvaluator:
         """
         if signal == TestValidationSignal.TEST_FIT:
             return self.build_robust_scores(dataset=test)
-        propensity_template, outcome_template = materialize_evaluation_learners(
+        propensity_template, outcome_template = evaluation_learner_templates(
             self.evaluation,
-            outcome_type=estimation.outcome_type,
+            binary=estimation.outcome_type == OutcomeType.BINARY,
         )
         contrasts, propensity, outcomes = self.doubly_robust_contrasts(
             train=estimation,
@@ -347,9 +357,9 @@ class CATEEvaluator:
         contrast_values = {name: np.zeros(len(dataset.df)) for name in contrast_names}
         oof_propensity = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         oof_outcomes = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
-        propensity_template, outcome_template = materialize_evaluation_learners(
+        propensity_template, outcome_template = evaluation_learner_templates(
             self.evaluation,
-            outcome_type=dataset.outcome_type,
+            binary=dataset.outcome_type == OutcomeType.BINARY,
         )
 
         splits = list(

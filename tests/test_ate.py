@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from causallib.estimation import Standardization
-from sklearn.base import BaseEstimator
 from sklearn.linear_model import LinearRegression
 
 from causal_pipeline.ate import (
@@ -88,9 +87,7 @@ def test_factual_outcome_predictions_match_observed_arm() -> None:
     assert np.allclose(factual, expected)
 
 
-def test_doubleml_irm_rejects_multi_arm_treatment(
-    logistic_learner: BaseEstimator,
-) -> None:
+def test_doubleml_irm_rejects_multi_arm_treatment() -> None:
     config = DataConfig(
         outcome="y",
         treatment="t",
@@ -112,8 +109,8 @@ def test_doubleml_irm_rejects_multi_arm_treatment(
     estimator = DoubleMLIRMAdapter(
         spec=DoubleMLATEEstimatorSpec(
             kind=ATEKind.DML_IRM,
-            outcome_learner=LinearRegression(),
-            propensity_learner=logistic_learner,
+            outcome_learner="linear",
+            propensity_learner="linear",
         ),
         data=dataset,
     )
@@ -125,40 +122,34 @@ ATE_RECOVERY_TOLERANCE = 0.05
 RECOVERY_FOLDS = 5
 
 
-@pytest.mark.parametrize("architecture", ["linear", "forest"])
+@pytest.mark.parametrize("architecture", ["linear", "random_forest"])
 @pytest.mark.parametrize("kind", list(ATEKind))
 def test_ate_recovers_a_known_constant_effect(
     kind: ATEKind,
     architecture: str,
     recovery_data_config: DataConfig,
     constant_effect_cohort: tuple[pd.DataFrame, float],
-    linear_learner: BaseEstimator,
-    logistic_learner: BaseEstimator,
-    recovery_regressor: BaseEstimator,
-    recovery_classifier: BaseEstimator,
 ) -> None:
     frame, truth = constant_effect_cohort
     dataset = CausalDataset(data=recovery_data_config, df=frame)
-    outcome_learner = linear_learner if architecture == "linear" else recovery_regressor
-    propensity_learner = logistic_learner if architecture == "linear" else recovery_classifier
     if kind == ATEKind.IPW:
         spec = IPWATEEstimatorSpec(
             kind=kind,
-            propensity_learner=propensity_learner,
+            propensity_learner=architecture,
             n_folds=RECOVERY_FOLDS,
         )
     elif kind in {ATEKind.AIPW, ATEKind.TMLE}:
         spec = DoublyRobustATEEstimatorSpec(
             kind=kind,
-            outcome_learner=outcome_learner,
-            propensity_learner=propensity_learner,
+            outcome_learner=architecture,
+            propensity_learner=architecture,
             n_folds=RECOVERY_FOLDS,
         )
     else:
         spec = DoubleMLATEEstimatorSpec(
             kind=kind,
-            outcome_learner=outcome_learner,
-            propensity_learner=propensity_learner,
+            outcome_learner=architecture,
+            propensity_learner=architecture,
             n_folds=RECOVERY_FOLDS,
         )
     estimator = initialize_ate_estimator(spec=spec, data=dataset)

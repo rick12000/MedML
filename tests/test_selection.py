@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 
 from causal_pipeline.config import DEFAULT_PROPENSITY_CLIP
+from causal_pipeline.learners import build_learner
 from causal_pipeline.selection import (
     mixture_effect,
     split_included_population,
@@ -77,9 +76,9 @@ def test_transport_moves_the_effect_toward_the_excluded_covariate_distribution()
         included_treatment=included_frame["t"],
         included_outcome=included_frame["y"],
         excluded_covariates=excluded_frame,
-        outcome_learner=LinearRegression(),
-        sampling_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
+        outcome_learner=build_learner("linear", "regression", random_state=0),
+        sampling_learner=build_learner("linear", "classification", random_state=0),
+        propensity_learner=build_learner("linear", "classification", random_state=0),
         treatment_values=[0, 1],
         control_value=0,
         propensity_clip=DEFAULT_PROPENSITY_CLIP,

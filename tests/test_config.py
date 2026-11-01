@@ -3,11 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from pydantic import ValidationError
-from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
+from causal_pipeline.learners import DEFAULT_LOGISTIC_MAX_ITER
 
 from causal_pipeline.config import (
     ATEKind,
@@ -15,7 +14,6 @@ from causal_pipeline.config import (
     CausalForestCATEEstimatorSpec,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
-    DoublyRobustATEEstimatorSpec,
     DoubleMLATEEstimatorSpec,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
@@ -24,14 +22,7 @@ from causal_pipeline.config import (
     SplitConfig,
     SubgroupSplit,
     TreatmentMode,
-    clone_estimator,
     predict_outcome_mean,
-    require_classifier,
-)
-from causal_pipeline.learner_resolve import (
-    fill_cate_spec_learners,
-    materialize_ipw_propensity,
-    materialize_meta_cate_learners,
 )
 
 
@@ -119,50 +110,34 @@ def test_empty_policy_list_is_treated_as_disabled(
     assert not config.policy
 
 
-def test_clone_estimator_fit_does_not_mutate_original() -> None:
-    original = LogisticRegression(max_iter=200)
-    cloned = clone_estimator(original)
-    cloned.fit([[0.0], [1.0]], [0, 1])
-    assert not hasattr(original, "coef_")
-    assert hasattr(cloned, "coef_")
-
-
-def test_ipw_ate_spec_accepts_missing_propensity_learner() -> None:
+def test_ipw_ate_spec_defaults_to_xgboost_propensity() -> None:
     spec = IPWATEEstimatorSpec(kind=ATEKind.IPW)
-    learner = materialize_ipw_propensity(spec)
-    assert type(learner).__name__ == "XGBClassifier"
+    assert spec.propensity_learner == "xgboost"
 
 
-def test_meta_cate_spec_accepts_missing_outcome_learner() -> None:
-    spec = MetaCATEEstimatorSpec(kind=CATEKind.S_LEARNER)
-    outcome, effect, propensity = materialize_meta_cate_learners(
-        spec,
-        outcome_type=OutcomeType.CONTINUOUS,
-    )
-    assert type(outcome).__name__ == "XGBRegressor"
-    assert effect is None
-    assert propensity is None
+def test_meta_cate_spec_defaults_to_xgboost_learners() -> None:
+    spec = MetaCATEEstimatorSpec(kind=CATEKind.DR_LEARNER)
+    assert spec.outcome_learner == "xgboost"
+    assert spec.effect_learner == "xgboost"
+    assert spec.propensity_learner == "xgboost"
 
 
-@pytest.mark.parametrize("kind", [CATEKind.X_LEARNER, CATEKind.R_LEARNER, CATEKind.DR_LEARNER])
-def test_two_stage_meta_learners_materialize_effect_and_propensity(
-    kind: CATEKind,
-) -> None:
-    spec = MetaCATEEstimatorSpec(kind=kind)
-    outcome, effect, propensity = materialize_meta_cate_learners(
-        spec,
-        outcome_type=OutcomeType.CONTINUOUS,
-    )
-    assert type(outcome).__name__ == "XGBRegressor"
-    assert type(effect).__name__ == "XGBRegressor"
-    assert type(propensity).__name__ == "XGBClassifier"
-
-
-def test_causal_forest_cate_spec_accepts_missing_learners() -> None:
+def test_causal_forest_spec_defaults_to_xgboost_learners() -> None:
     spec = CausalForestCATEEstimatorSpec(kind=CATEKind.CAUSAL_FOREST)
-    filled = fill_cate_spec_learners(spec, outcome_type=OutcomeType.CONTINUOUS)
-    assert type(filled.outcome_learner).__name__ == "XGBRegressor"
-    assert type(filled.propensity_learner).__name__ == "XGBClassifier"
+    assert spec.outcome_learner == "xgboost"
+    assert spec.propensity_learner == "xgboost"
+
+
+def test_learner_fields_accept_only_approved_architecture_names() -> None:
+    spec = IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="random_forest")
+    assert spec.propensity_learner == "random_forest"
+    with pytest.raises(ValidationError):
+        IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="svm")
+
+
+def test_learner_fields_reject_user_supplied_estimator_objects() -> None:
+    with pytest.raises(ValidationError):
+        IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner=LogisticRegression())
 
 
 def test_data_config_rejects_non_integer_continuous_treatment() -> None:
@@ -202,11 +177,6 @@ def test_predict_outcome_mean_returns_positive_class_probability() -> None:
     expected = model.predict_proba(features)[:, 1]
     assert predicted.shape == labels.shape
     assert np.allclose(predicted, expected)
-
-
-def test_require_classifier_rejects_regressor(forest_learner: RandomForestRegressor) -> None:
-    with pytest.raises(TypeError):
-        require_classifier(estimator=forest_learner, role="outcome_learner")
 
 
 def test_predict_outcome_mean_uses_regressor_predict(forest_learner: RandomForestRegressor) -> None:

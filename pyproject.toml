@@ -22,6 +22,7 @@ dependencies = [
     "causalml>=0.15",
     "optuna>=3.6",
     "xgboost>=2.0",
+    "psutil>=7.2.2",
 ]
 
 [project.optional-dependencies]

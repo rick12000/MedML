@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.config import (
+    DEFAULT_LEARNER_RANDOM_STATE,
+    ArbitraryTypesModel,
     OutcomeType,
     DRPolicyTreeMethodSpec,
     ExactPolicyTreeMethodSpec,
@@ -24,9 +25,8 @@ from causal_pipeline.config import (
     PolicySearchMode,
     PolicyTreeMethodSpec,
     VirtualTwinsMethodSpec,
-    clone_estimator,
 )
-from causal_pipeline.learner_resolve import materialize_dr_policy_learners
+from causal_pipeline.learners import build_learner, outcome_task
 from causal_pipeline.scaling import clone_scaled_estimator
 from causal_pipeline.data import CausalDataset, contrast_columns
 from causal_pipeline.policy_tree import (
@@ -57,8 +57,7 @@ POLICY_DATA_SPLIT_TRAIN = "train"
 POLICY_DATA_SPLIT_TEST = "test"
 
 
-@dataclass(frozen=True)
-class SubgroupInterval:
+class SubgroupInterval(ArbitraryTypesModel):
     estimate: float
     ci_lower: float
     ci_upper: float
@@ -173,7 +172,7 @@ class PolicyService:
             control_value=dataset.control_value,
             direction=reward_direction(dataset.data.outcome_favorability),
         )
-        tree = clone_estimator(spec.tree)
+        tree = PolicyTree()
         tree.fit(X_mod, reward)
         rules = self.extract_policy_tree_rules(
             tree=tree,
@@ -277,10 +276,9 @@ class PolicyService:
     ) -> FittedPolicy:
         logger.info("Fitting DRPolicyTree...")
         levels = control_first_arms(dataset.treatment_values, dataset.control_value)
-        outcome_learner, propensity_learner = materialize_dr_policy_learners(
-            spec,
-            outcome_type=dataset.outcome_type,
-        )
+        binary = dataset.outcome_type == OutcomeType.BINARY
+        outcome_learner = build_learner(spec.outcome_learner, outcome_task(binary), DEFAULT_LEARNER_RANDOM_STATE)
+        propensity_learner = build_learner(spec.propensity_learner, "classification", DEFAULT_LEARNER_RANDOM_STATE)
         tree = DRPolicyTree(
             model_regression=clone_scaled_estimator(outcome_learner),
             model_propensity=clone_scaled_estimator(propensity_learner),
@@ -328,11 +326,8 @@ class PolicyService:
         robust_scores: pd.DataFrame | None,
     ) -> FittedPolicy:
         logger.info("Fitting virtual twins for %s...", estimator_id)
-        tree = clone_estimator(spec.tree)
-        if not isinstance(tree, DecisionTreeRegressor):
-            raise TypeError("Virtual twins require a regression tree.")
         twins = VirtualTwins(
-            tree=tree,
+            tree=DecisionTreeRegressor(),
             minimum_effect=spec.minimum_effect,
             bootstrap_samples=self.bootstrap_samples,
             random_state=self.random_state,
@@ -708,8 +703,7 @@ class PolicyService:
         )
 
 
-@dataclass(frozen=True)
-class SubgroupBenefit:
+class SubgroupBenefit(ArbitraryTypesModel):
     arm: JsonValue
     raw_effect: float
     benefit: float

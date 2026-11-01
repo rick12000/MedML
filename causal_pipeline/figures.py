@@ -6,8 +6,6 @@ import logging
 import zlib
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-
 import matplotlib
 
 matplotlib.use("Agg")
@@ -19,6 +17,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
+from causal_pipeline.config import ArbitraryTypesModel
 from causal_pipeline.utils import save_figure
 
 logger = logging.getLogger(__name__)
@@ -118,15 +117,13 @@ ESTIMATOR_LABELS = {
 }
 
 
-@dataclass(frozen=True)
-class SeriesStyle:
+class SeriesStyle(ArbitraryTypesModel):
     color: str
     marker: str
     linestyle: str
 
 
-@dataclass(frozen=True)
-class RankingSeries:
+class RankingSeries(ArbitraryTypesModel):
     estimator_id: str
     toc_fraction: np.ndarray
     toc_value: np.ndarray
@@ -136,8 +133,7 @@ class RankingSeries:
     qini_p_value: float
 
 
-@dataclass(frozen=True)
-class CalibrationSeries:
+class CalibrationSeries(ArbitraryTypesModel):
     estimator_id: str
     predicted: np.ndarray
     observed: np.ndarray
@@ -670,8 +666,7 @@ RANKING_COLUMNS = ("AUTOC", "p")
 ESTIMATOR_ORDER = tuple(ESTIMATOR_LABELS)
 
 
-@dataclass(frozen=True)
-class EvaluationRow:
+class EvaluationRow(ArbitraryTypesModel):
     label: str
     values: tuple[str, ...]
 

@@ -6,8 +6,6 @@ import importlib.util
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 import causalml.inference.meta.rlearner as causalml_rlearner
@@ -30,6 +28,7 @@ from causalml.propensity import compute_r_residuals
 from sklearn.model_selection import cross_val_predict
 
 from causal_pipeline.config import (
+    ArbitraryTypesModel,
     CATEEstimatorSpec,
     CATEKind,
     CausalForestCATEEstimatorSpec,
@@ -40,7 +39,6 @@ from causal_pipeline.config import (
     OutcomeType,
     TARNetCATEEstimatorSpec,
     predict_outcome_mean,
-    require_classifier,
 )
 from causal_pipeline.crossfit import (
     cross_fit_meta_learner_sample,
@@ -55,10 +53,7 @@ from causal_pipeline.nuisance_metrics import (
     outcome_metric_from_predictions,
 )
 
-from causal_pipeline.learner_resolve import (
-    materialize_causal_forest_learners,
-    materialize_meta_cate_learners,
-)
+from causal_pipeline.learner_tuning import CATELearners, resolve_cate_learners
 from causal_pipeline.parallel import SINGLE_CORE_N_JOBS, available_cores
 from causal_pipeline.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
 
@@ -114,12 +109,17 @@ def ensure_cate_spec_supported(spec: CATEEstimatorSpec) -> None:
     if spec.kind == CATEKind.DRAGONNET:
         _ensure_modules(("jax", "flax"), spec.kind.value)
         try:
-            from causalml.inference.jax import DragonNet  # noqa: F401
+            causalml_jax = importlib.import_module("causalml.inference.jax")
         except ImportError as error:
             raise ImportError(
                 f"DragonNet is not available with the installed packages. "
                 f"Install with: {NEURAL_EXTRA_INSTALL}"
             ) from error
+        if not hasattr(causalml_jax, "DragonNet"):
+            raise ImportError(
+                f"DragonNet is not available with the installed packages. "
+                f"Install with: {NEURAL_EXTRA_INSTALL}"
+            )
 
 
 def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
@@ -132,24 +132,37 @@ def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
     )
 
 
+META_LETTERS = {
+    CATEKind.S_LEARNER: "s",
+    CATEKind.T_LEARNER: "t",
+    CATEKind.X_LEARNER: "x",
+    CATEKind.R_LEARNER: "r",
+    CATEKind.DR_LEARNER: "dr",
+}
+
+
 def create_cate_estimator(
     spec: CATEEstimatorSpec,
     data: CausalDataset,
     forest_n_jobs: int | None = None,
+    tune_estimators: bool = False,
 ) -> BaseCATEEstimator:
     ensure_cate_spec_supported(spec=spec)
-    if spec.kind == CATEKind.S_LEARNER:
-        return MetaLearnerAdapter(spec=spec, data=data, letter="s")
-    if spec.kind == CATEKind.T_LEARNER:
-        return MetaLearnerAdapter(spec=spec, data=data, letter="t")
-    if spec.kind == CATEKind.X_LEARNER:
-        return MetaLearnerAdapter(spec=spec, data=data, letter="x")
-    if spec.kind == CATEKind.R_LEARNER:
-        return MetaLearnerAdapter(spec=spec, data=data, letter="r")
-    if spec.kind == CATEKind.DR_LEARNER:
-        return MetaLearnerAdapter(spec=spec, data=data, letter="dr")
+    learners = resolve_cate_learners(data, spec, tune=tune_estimators)
+    if spec.kind in META_LETTERS:
+        return MetaLearnerAdapter(
+            spec=spec,
+            data=data,
+            letter=META_LETTERS[spec.kind],
+            learners=learners,
+        )
     if spec.kind == CATEKind.CAUSAL_FOREST:
-        return CausalForestAdapter(spec=spec, data=data, forest_n_jobs=forest_n_jobs)
+        return CausalForestAdapter(
+            spec=spec,
+            data=data,
+            learners=learners,
+            forest_n_jobs=forest_n_jobs,
+        )
     if spec.kind == CATEKind.TARNET:
         return TARNetAdapter(spec=spec, data=data)
     if spec.kind == CATEKind.CFRNET:
@@ -279,30 +292,27 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         spec: MetaCATEEstimatorSpec,
         data: CausalDataset,
         letter: str,
+        learners: CATELearners,
     ) -> None:
         self.spec = spec
         self.data = data
         self.letter = letter
         self.model = None
-        self.resolved_outcome_learner: BaseEstimator | None = None
-        self.resolved_propensity_learner: BaseEstimator | None = None
+        self.resolved_outcome_learner: BaseEstimator | None = learners.outcome
+        self.resolved_propensity_learner: BaseEstimator | None = learners.propensity
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
         )
+        self.resolved_effect_learner = learners.effect
 
     def fit(self, data: CausalDataset) -> MetaLearnerAdapter:
         # The pipeline predicts each group from a model fit on the other groups.
         # Any cross-fit inside causalml only reshuffles that training subset.
         binary = self.data.outcome_type == OutcomeType.BINARY
-        outcome_learner, effect_learner, propensity_learner = materialize_meta_cate_learners(
-            self.spec,
-            outcome_type=data.outcome_type,
-        )
-        if binary:
-            require_classifier(outcome_learner, "CATE outcome_learner")
-        self.resolved_outcome_learner = outcome_learner
-        self.resolved_propensity_learner = propensity_learner
+        outcome_learner = self.resolved_outcome_learner
+        effect_learner = self.resolved_effect_learner
+        propensity_learner = self.resolved_propensity_learner
         self.model = build_meta_learner(
             letter=self.letter,
             binary_outcome=binary,
@@ -318,7 +328,6 @@ class MetaLearnerAdapter(BaseCATEEstimator):
         if self.letter in {"x", "r", "dr"}:
             if propensity_learner is None:
                 raise ValueError(f"{self.letter}-learner requires propensity_learner.")
-            require_classifier(propensity_learner, "CATE propensity_learner")
             features, treatment, outcome, propensity = cross_fit_meta_learner_sample(
                 covariates=features,
                 treatment=treatment,
@@ -444,12 +453,15 @@ class CausalForestAdapter(BaseCATEEstimator):
         self,
         spec: CausalForestCATEEstimatorSpec,
         data: CausalDataset,
+        learners: CATELearners,
         forest_n_jobs: int | None = None,
     ) -> None:
         self.spec = spec
         self.data = data
         self.forest_n_jobs = available_cores() if forest_n_jobs is None else forest_n_jobs
         self.model = None
+        self.resolved_outcome_learner: BaseEstimator | None = learners.outcome
+        self.resolved_propensity_learner: BaseEstimator | None = learners.propensity
         self.contrast_names = contrast_columns(
             data.control_value,
             data.treatment_values,
@@ -457,18 +469,9 @@ class CausalForestAdapter(BaseCATEEstimator):
 
     def fit(self, data: CausalDataset) -> CausalForestAdapter:
         binary_outcome = self.data.outcome_type == OutcomeType.BINARY
-        outcome_learner, propensity_learner = materialize_causal_forest_learners(
-            self.spec,
-            outcome_type=self.data.outcome_type,
-        )
-        if binary_outcome:
-            require_classifier(outcome_learner, "Causal forest outcome_learner")
-        require_classifier(propensity_learner, "Causal forest propensity_learner")
-        self.resolved_outcome_learner = outcome_learner
-        self.resolved_propensity_learner = propensity_learner
         self.model = CausalForestDML(
-            model_y=clone_scaled_estimator(outcome_learner),
-            model_t=clone_scaled_estimator(propensity_learner),
+            model_y=clone_scaled_estimator(self.resolved_outcome_learner),
+            model_t=clone_scaled_estimator(self.resolved_propensity_learner),
             discrete_treatment=True,
             discrete_outcome=binary_outcome,
             n_jobs=self.forest_n_jobs,
@@ -486,8 +489,8 @@ class CausalForestAdapter(BaseCATEEstimator):
         log_econml_crossfit_nuisances(
             scope="CATE/causal_forest",
             model=self.model,
-            outcome_learner=outcome_learner,
-            propensity_learner=propensity_learner,
+            outcome_learner=self.resolved_outcome_learner,
+            propensity_learner=self.resolved_propensity_learner,
             binary_outcome=binary_outcome,
         )
         return self
@@ -822,8 +825,7 @@ class ArmProbabilityModel:
         return probability_of_arm(probabilities, self.arm)
 
 
-@dataclass(frozen=True)
-class MetaLearnerAteResult:
+class MetaLearnerAteResult(ArbitraryTypesModel):
     point: np.ndarray
     lower: np.ndarray
     upper: np.ndarray

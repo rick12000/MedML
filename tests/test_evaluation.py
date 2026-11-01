@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from causal_pipeline.config import (
     CATEEvaluationConfig,
@@ -35,7 +34,6 @@ from causal_pipeline.figures import (
     RankingSeries,
     plot_evaluation_figure,
 )
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from tests.cache_paths import artifact_path
 
 CALIBRATION_BINS = 5
@@ -262,8 +260,8 @@ def test_evaluate_cate_models_writes_pipeline_style_artifacts(
     predictions = {"t_learner": pd.DataFrame({"1_vs_0": predicted})}
     scores = pd.DataFrame({"1_vs_0": proxy})
     evaluation = CATEEvaluationConfig(
-        propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-        outcome_learner=LinearRegression(),
+        propensity_learner="linear",
+        outcome_learner="linear",
         dr_crossfit_folds=3,
         calibration_bins=5,
         rate_bootstrap_samples=8,
@@ -372,8 +370,8 @@ def test_estimation_full_fit_scores_test_outcomes_from_estimation_nuisances() ->
     )
     evaluator = CATEEvaluator(
         evaluation=CATEEvaluationConfig(
-            propensity_learner=LogisticRegression(max_iter=DEFAULT_LOGISTIC_MAX_ITER),
-            outcome_learner=LinearRegression(),
+            propensity_learner="linear",
+            outcome_learner="linear",
             dr_crossfit_folds=5,
             random_state=0,
         )

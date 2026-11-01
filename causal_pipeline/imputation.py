@@ -254,7 +254,7 @@ def miceforest_impute(
         num_datasets=datasets,
         random_state=random_state,
     )
-    # Imputation runs in the parent. LightGBM would otherwise take every logical core.
+    # Imputation runs in the parent. LightGBM would otherwise take every core.
     kernel.mice(iterations=iterations, verbose=False, num_threads=available_cores())
     completed_frames = []
     for dataset_index in range(datasets):

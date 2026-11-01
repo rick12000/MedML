@@ -52,3 +52,4 @@ def test_overlap_preprocessor_writes_plot_under_results_root(
     assert overlap_path.is_file()
     assert (test_output_dir / "diagnostics" / "propensity_overlap.csv").is_file()
     assert result.diagnostics.propensity_overlap_path is not None
+    assert (test_output_dir / "diagnostics" / "covariate_balance.png").is_file()

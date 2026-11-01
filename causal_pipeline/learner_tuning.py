@@ -16,22 +16,17 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split
 
-from causal_pipeline.learner_defaults import DEFAULT_LOGISTIC_MAX_ITER
 from causal_pipeline.config import (
+    DEFAULT_LEARNER_RANDOM_STATE,
+    ArbitraryTypesModel,
     CATEEstimatorSpec,
     CATEKind,
     CausalForestCATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
-    clone_estimator,
 )
 from causal_pipeline.data import CausalDataset
-from causal_pipeline.learner_defaults import (
-    apply_defaults,
-    materialize_outcome_learner,
-    materialize_propensity_learner,
-)
-from causal_pipeline.learner_resolve import fill_cate_spec_learners
+from causal_pipeline.learners import DEFAULT_LOGISTIC_MAX_ITER, build_learner
 from causal_pipeline.nuisance_metrics import outcome_metric_from_predictions, propensity_auc
 from causal_pipeline.scaling import clone_scaled_estimator
 
@@ -66,7 +61,7 @@ def prepare_learner_for_outer_train(
     binary_outcome: bool = False,
 ) -> BaseEstimator:
     """Pick hyperparameters on outer-train only, then return an unfitted learner for that fold."""
-    base = apply_defaults(clone_estimator(template))
+    base = clone(template)
     if not tune or len(features) < MINIMUM_TUNING_ROWS:
         return base
     inner_train, inner_val = inner_holdout(
@@ -106,36 +101,41 @@ def prepare_learner_for_outer_train(
                 validation_labels=labels.loc[inner_val.index],
             )
     best_params = run_study(objective=objective, random_state=random_state)
-    tuned = clone_estimator(base)
+    tuned = clone(base)
     tuned.set_params(**best_params)
     return tuned
 
 
-def resolve_cate_spec_for_outer_train(
+class CATELearners(ArbitraryTypesModel):
+    """Learners a CATE estimator fits. Unused slots stay None."""
+
+    outcome: BaseEstimator | None = None
+    effect: BaseEstimator | None = None
+    propensity: BaseEstimator | None = None
+
+
+TWO_STAGE_META_KINDS = frozenset({CATEKind.X_LEARNER, CATEKind.R_LEARNER, CATEKind.DR_LEARNER})
+
+
+def resolve_cate_learners(
     train: CausalDataset,
     spec: CATEEstimatorSpec,
     tune: bool,
-) -> CATEEstimatorSpec:
-    """Apply defaults or fold-local tuning to learner templates before CATE fit."""
-    random_state = getattr(spec, "random_state", 0) if hasattr(spec, "random_state") else 0
+) -> CATELearners:
+    """Build the learners a CATE spec names. Tuning, when requested, uses outer-train only."""
     binary_outcome = train.outcome_type == OutcomeType.BINARY
     features = train.X_adjustment.copy()
     treatment = train.treatment_series
     outcome = train.outcome_series
-
-    if spec.kind in {CATEKind.TARNET, CATEKind.CFRNET, CATEKind.DRAGONNET}:
-        return spec
-
-    spec = fill_cate_spec_learners(spec=spec, outcome_type=train.outcome_type)
-    if not tune:
-        return spec
+    outcome_task = TuningTask.CLASSIFICATION if binary_outcome else TuningTask.REGRESSION
 
     if isinstance(spec, MetaCATEEstimatorSpec):
+        random_state = spec.random_state
         outcome_learner = prepare_learner_for_outer_train(
-            template=spec.outcome_learner,
+            template=build_learner(spec.outcome_learner, outcome_task, random_state),
             features=features,
             labels=outcome,
-            task=TuningTask.CLASSIFICATION if binary_outcome else TuningTask.REGRESSION,
+            task=outcome_task,
             tune=tune,
             random_state=random_state,
             stratify=treatment,
@@ -143,69 +143,61 @@ def resolve_cate_spec_for_outer_train(
             outcome_treatment=treatment,
             binary_outcome=binary_outcome,
         )
-        effect_learner = spec.effect_learner
-        if effect_learner is not None:
-            # causalml meta-learners keep effect models as regressors even for binary Y.
-            # Tuning them with validation R² on 0/1 labels is misleading, so use defaults.
-            if not binary_outcome:
-                effect_learner = prepare_learner_for_outer_train(
-                    template=effect_learner,
-                    features=features,
-                    labels=outcome,
-                    task=TuningTask.REGRESSION,
-                    tune=True,
-                    random_state=random_state,
-                    stratify=treatment,
-                )
-        propensity_learner = spec.propensity_learner
-        if propensity_learner is not None:
-            propensity_learner = prepare_learner_for_outer_train(
-                template=propensity_learner,
-                features=features,
-                labels=treatment,
-                task=TuningTask.CLASSIFICATION,
-                tune=True,
-                random_state=random_state,
-                stratify=treatment,
-                score_outcome=None,
-            )
-        return spec.model_copy(
-            update={
-                "outcome_learner": outcome_learner,
-                "effect_learner": effect_learner,
-                "propensity_learner": propensity_learner,
-            },
+        if spec.kind not in TWO_STAGE_META_KINDS:
+            return CATELearners(outcome=outcome_learner)
+        # causalml meta-learners keep effect models as regressors even for binary Y.
+        # Tuning them with validation R² on 0/1 labels is misleading, so use defaults.
+        effect_learner = prepare_learner_for_outer_train(
+            template=build_learner(spec.effect_learner, TuningTask.REGRESSION, random_state),
+            features=features,
+            labels=outcome,
+            task=TuningTask.REGRESSION,
+            tune=tune and not binary_outcome,
+            random_state=random_state,
+            stratify=treatment,
+        )
+        propensity_learner = prepare_learner_for_outer_train(
+            template=build_learner(spec.propensity_learner, TuningTask.CLASSIFICATION, random_state),
+            features=features,
+            labels=treatment,
+            task=TuningTask.CLASSIFICATION,
+            tune=tune,
+            random_state=random_state,
+            stratify=treatment,
+            score_outcome=None,
+        )
+        return CATELearners(
+            outcome=outcome_learner,
+            effect=effect_learner,
+            propensity=propensity_learner,
         )
 
     if isinstance(spec, CausalForestCATEEstimatorSpec):
-        outcome_task = TuningTask.CLASSIFICATION if binary_outcome else TuningTask.REGRESSION
-        return spec.model_copy(
-            update={
-                "outcome_learner": prepare_learner_for_outer_train(
-                    template=spec.outcome_learner,
-                    features=features,
-                    labels=outcome,
-                    task=outcome_task,
-                    tune=tune,
-                    random_state=0,
-                    stratify=treatment,
-                    score_outcome=score_standardized_outcome,
-                    outcome_treatment=treatment,
-                    binary_outcome=binary_outcome,
-                ),
-                "propensity_learner": prepare_learner_for_outer_train(
-                    template=spec.propensity_learner,
-                    features=features,
-                    labels=treatment,
-                    task=TuningTask.CLASSIFICATION,
-                    tune=tune,
-                    random_state=0,
-                    stratify=treatment,
-                ),
-            },
+        random_state = DEFAULT_LEARNER_RANDOM_STATE
+        outcome_learner = prepare_learner_for_outer_train(
+            template=build_learner(spec.outcome_learner, outcome_task, random_state),
+            features=features,
+            labels=outcome,
+            task=outcome_task,
+            tune=tune,
+            random_state=random_state,
+            stratify=treatment,
+            score_outcome=score_standardized_outcome,
+            outcome_treatment=treatment,
+            binary_outcome=binary_outcome,
         )
+        propensity_learner = prepare_learner_for_outer_train(
+            template=build_learner(spec.propensity_learner, TuningTask.CLASSIFICATION, random_state),
+            features=features,
+            labels=treatment,
+            task=TuningTask.CLASSIFICATION,
+            tune=tune,
+            random_state=random_state,
+            stratify=treatment,
+        )
+        return CATELearners(outcome=outcome_learner, propensity=propensity_learner)
 
-    return spec
+    return CATELearners()
 
 
 def inner_holdout(
@@ -395,21 +387,20 @@ def build_trial_estimator(
         )
         return estimator
     logger.warning("No tuning space for %s; using defaults only.", name)
-    return apply_defaults(estimator)
+    return estimator
 
 
 def propensity_learner_for_fold(
-    template: BaseEstimator | None,
+    template: BaseEstimator,
     train_features: pd.DataFrame,
     train_treatment: pd.Series,
     tune: bool,
     random_state: int,
 ) -> BaseEstimator:
-    resolved = materialize_propensity_learner(template, random_state=random_state)
     if not tune:
-        return resolved
+        return clone(template)
     return prepare_learner_for_outer_train(
-        template=resolved,
+        template=template,
         features=train_features,
         labels=train_treatment,
         task=TuningTask.CLASSIFICATION,
@@ -420,7 +411,7 @@ def propensity_learner_for_fold(
 
 
 def outcome_learner_for_fold(
-    template: BaseEstimator | None,
+    template: BaseEstimator,
     train_features: pd.DataFrame,
     train_treatment: pd.Series,
     train_outcome: pd.Series,
@@ -429,16 +420,10 @@ def outcome_learner_for_fold(
     random_state: int,
 ) -> BaseEstimator:
     task = TuningTask.CLASSIFICATION if binary_outcome else TuningTask.REGRESSION
-    outcome_type = OutcomeType.BINARY if binary_outcome else OutcomeType.CONTINUOUS
-    resolved = materialize_outcome_learner(
-        template,
-        outcome_type=outcome_type,
-        random_state=random_state,
-    )
     if not tune:
-        return resolved
+        return clone(template)
     return prepare_learner_for_outer_train(
-        template=resolved,
+        template=template,
         features=train_features,
         labels=train_outcome,
         task=task,

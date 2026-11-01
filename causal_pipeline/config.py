@@ -1,4 +1,4 @@
-"""Central Pydantic configuration and estimator cloning."""
+"""Central Pydantic configuration."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from typing import Annotated, Literal, Union
 
 import numpy as np
 import pandas as pd
-from econml.policy import PolicyTree
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sklearn.base import BaseEstimator, clone
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.base import BaseEstimator
+
+from causal_pipeline.learners import LearnerArchitecture
 
 ColumnName = Annotated[str, Field(min_length=1)]
 Fraction = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -83,6 +83,10 @@ class TestValidationSignal(StrEnum):
 
 
 DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
+DEFAULT_PROPENSITY_LEARNER: LearnerArchitecture = "xgboost"
+DEFAULT_OUTCOME_LEARNER: LearnerArchitecture = "xgboost"
+DEFAULT_EFFECT_LEARNER: LearnerArchitecture = "xgboost"
+DEFAULT_SCREEN_LEARNER: LearnerArchitecture = "linear"
 
 
 def validate_probability_bounds(bounds: tuple[float, float] | None, name: str) -> None:
@@ -141,7 +145,9 @@ CATE_DEPENDENT_POLICY_KINDS = frozenset(
 
 
 class ArbitraryTypesModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    """Immutable in-memory result. Holds arrays, frames, and fitted objects, which pydantic checks by type."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 
 
 class EstimatorAliasMixin(BaseModel):
@@ -162,11 +168,6 @@ class EstimatorAliasMixin(BaseModel):
         return stripped
 
 
-def clone_estimator(estimator: BaseEstimator) -> BaseEstimator:
-    """Return an unfitted copy so fitting cannot mutate a shared config object."""
-    return clone(estimator)
-
-
 def predict_outcome_mean(
     estimator: BaseEstimator,
     features: pd.DataFrame | np.ndarray,
@@ -179,13 +180,6 @@ def predict_outcome_mean(
                 raise ValueError("Only binary outcome classifiers are supported.")
             return proba[:, 1]
     return np.ravel(estimator.predict(features))
-
-
-def require_classifier(estimator: BaseEstimator, role: str) -> None:
-    if not hasattr(estimator, "predict_proba"):
-        raise TypeError(
-            f"{role} must be a classifier with predict_proba; got {type(estimator).__name__}."
-        )
 
 
 class DataConfig(BaseModel):
@@ -224,9 +218,9 @@ class DataConfig(BaseModel):
         return self
 
 
-class IPWATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
+class IPWATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[ATEKind.IPW]
-    propensity_learner: BaseEstimator | None = None
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     weighting: IPWWeighting = IPWWeighting.HAJEK
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
@@ -240,10 +234,10 @@ class IPWATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
         return self
 
 
-class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
+class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[ATEKind.AIPW, ATEKind.TMLE]
-    outcome_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     reduced: bool = DEFAULT_TMLE_REDUCED
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
@@ -257,10 +251,10 @@ class DoublyRobustATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
         return self
 
 
-class DoubleMLATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
+class DoubleMLATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS]
-    outcome_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     n_rep: PositiveInt = DEFAULT_DML_N_REP
@@ -290,11 +284,11 @@ MetaCATEKind = Literal[
 ]
 
 
-class MetaCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
+class MetaCATEEstimatorSpec(EstimatorAliasMixin):
     kind: MetaCATEKind
-    outcome_learner: BaseEstimator | None = None
-    effect_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
+    effect_learner: LearnerArchitecture = DEFAULT_EFFECT_LEARNER
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     clip_bounds: tuple[float, float] | None = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
@@ -307,10 +301,10 @@ class MetaCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
         return self
 
 
-class CausalForestCATEEstimatorSpec(EstimatorAliasMixin, ArbitraryTypesModel):
+class CausalForestCATEEstimatorSpec(EstimatorAliasMixin):
     kind: Literal[CATEKind.CAUSAL_FOREST]
-    outcome_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
 
 
 class TARNetCATEEstimatorSpec(EstimatorAliasMixin):
@@ -345,10 +339,10 @@ class SplitConfig(BaseModel):
     random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
-class OverlapConfig(ArbitraryTypesModel):
+class OverlapConfig(BaseModel):
     """Cross-fit propensity on the pooled analysis sample, then optionally trim it."""
 
-    propensity_learner: BaseEstimator | None = None
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     n_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
     trim_bounds: tuple[float, float] | None = None
@@ -360,26 +354,22 @@ class OverlapConfig(ArbitraryTypesModel):
         return self
 
 
-class SensitivityConfig(ArbitraryTypesModel):
-    outcome_learner: BaseEstimator | None = None
+class SensitivityConfig(BaseModel):
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
     null_effect: float = DEFAULT_NULL_EFFECT
     benchmark_multiplier_max: float = DEFAULT_BENCHMARK_MULTIPLIER_MAX
     benchmark_grid_size: PositiveInt = DEFAULT_BENCHMARK_GRID_SIZE
     confidence_level: ConfidenceLevel = DEFAULT_SENSITIVITY_CONFIDENCE_LEVEL
     selection_column: ColumnName | None = None
-    sampling_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    sampling_learner: LearnerArchitecture | None = None
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
     inclusion_fraction: float | None = None
     outcome_bounds: tuple[float, float] | None = None
 
     @model_validator(mode="after")
     def validate_selection(self) -> SensitivityConfig:
-        if self.selection_column is not None and (
-            self.sampling_learner is None or self.propensity_learner is None
-        ):
-            raise ValueError(
-                "Observed-selection transport requires sampling_learner and propensity_learner."
-            )
+        if self.selection_column is not None and self.sampling_learner is None:
+            raise ValueError("Observed-selection transport requires sampling_learner.")
         if self.inclusion_fraction is not None and not 0.0 < self.inclusion_fraction < 1.0:
             raise ValueError("inclusion_fraction must lie strictly between 0 and 1.")
         if self.outcome_bounds is not None and self.outcome_bounds[0] >= self.outcome_bounds[1]:
@@ -387,11 +377,11 @@ class SensitivityConfig(ArbitraryTypesModel):
         return self
 
 
-class CATEEvaluationConfig(ArbitraryTypesModel):
+class CATEEvaluationConfig(BaseModel):
     """Cross-fitted doubly robust scores and CATE metrics on the estimation sample."""
 
-    propensity_learner: BaseEstimator | None = None
-    outcome_learner: BaseEstimator | None = None
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
     dr_crossfit_folds: PositiveInt = DEFAULT_CATE_EVAL_CROSSFIT_FOLDS
     propensity_clip: tuple[float, float] = Field(default_factory=lambda: DEFAULT_PROPENSITY_CLIP)
     calibration_bins: PositiveInt = DEFAULT_CALIBRATION_BINS
@@ -401,18 +391,17 @@ class CATEEvaluationConfig(ArbitraryTypesModel):
     random_state: int = DEFAULT_SPLIT_RANDOM_STATE
 
 
-class PolicyTreeMethodSpec(ArbitraryTypesModel):
+class PolicyTreeMethodSpec(BaseModel):
     kind: Literal[PolicyKind.POLICY_TREE]
-    tree: PolicyTree = Field(default_factory=PolicyTree)
 
 
-class DRPolicyTreeMethodSpec(ArbitraryTypesModel):
+class DRPolicyTreeMethodSpec(BaseModel):
     kind: Literal[PolicyKind.DR_POLICY_TREE]
-    outcome_learner: BaseEstimator | None = None
-    propensity_learner: BaseEstimator | None = None
+    outcome_learner: LearnerArchitecture = DEFAULT_OUTCOME_LEARNER
+    propensity_learner: LearnerArchitecture = DEFAULT_PROPENSITY_LEARNER
 
 
-class ExactPolicyTreeMethodSpec(ArbitraryTypesModel):
+class ExactPolicyTreeMethodSpec(BaseModel):
     """Globally optimal depth-2 policy tree, in welfare or CAPITAL mode."""
 
     kind: Literal[PolicyKind.EXACT_POLICY_TREE]
@@ -425,9 +414,8 @@ class ExactPolicyTreeMethodSpec(ArbitraryTypesModel):
     negative_effect_penalty: float = Field(default=DEFAULT_NEGATIVE_EFFECT_PENALTY, ge=0.0)
 
 
-class VirtualTwinsMethodSpec(ArbitraryTypesModel):
+class VirtualTwinsMethodSpec(BaseModel):
     kind: Literal[PolicyKind.VIRTUAL_TWINS]
-    tree: DecisionTreeRegressor = Field(default_factory=DecisionTreeRegressor)
     minimum_effect: float = Field(default=DEFAULT_MINIMUM_EFFECT, ge=0.0)
 
 
@@ -456,7 +444,7 @@ class ImputationConfig(BaseModel):
     random_state: int = DEFAULT_IMPUTATION_RANDOM_STATE
 
 
-class NuisanceScreenConfig(ArbitraryTypesModel):
+class NuisanceScreenConfig(BaseModel):
     """Held-out propensity and outcome nuisance fits with importance diagnostics."""
 
     enabled: bool = True
@@ -465,8 +453,8 @@ class NuisanceScreenConfig(ArbitraryTypesModel):
     random_state: int = DEFAULT_LEARNER_RANDOM_STATE
     column_drop_repeats: PositiveInt = DEFAULT_COLUMN_DROP_REPEATS
     column_drop_top_features: PositiveInt = DEFAULT_COLUMN_DROP_TOP_FEATURES
-    propensity_learner: BaseEstimator | None = None
-    outcome_learner: BaseEstimator | None = None
+    propensity_learner: LearnerArchitecture = DEFAULT_SCREEN_LEARNER
+    outcome_learner: LearnerArchitecture = DEFAULT_SCREEN_LEARNER
 
 
 class SubgroupSplit(BaseModel):

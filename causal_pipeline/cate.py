@@ -25,7 +25,7 @@ from causalml.inference.meta import (
     BaseXRegressor,
 )
 from econml.dml import CausalForestDML
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from causalml.propensity import compute_r_residuals
 from sklearn.model_selection import cross_val_predict
 
@@ -193,6 +193,37 @@ def mean_cate_table(predictions: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+class ProbabilityOutcomeRegressor(RegressorMixin, BaseEstimator):
+    """Predict P(Y=1 | X) so a DR-learner pseudo-outcome stays on the probability scale.
+
+    causalml builds that pseudo-outcome with ``learner.predict``. A classifier's
+    ``predict`` returns a class label, which replaces the conditional probability
+    with 0 or 1 inside the doubly robust formula.
+    """
+
+    def __init__(self, classifier: BaseEstimator) -> None:
+        self.classifier = classifier
+
+    def fit(
+        self,
+        features: pd.DataFrame | np.ndarray,
+        outcome: pd.Series | np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> ProbabilityOutcomeRegressor:
+        self.model_ = clone(self.classifier)
+        if sample_weight is None:
+            self.model_.fit(features, outcome)
+        else:
+            self.model_.fit(features, outcome, sample_weight=sample_weight)
+        return self
+
+    def predict(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
+        probabilities = self.model_.predict_proba(features)
+        if probabilities.ndim != 2 or probabilities.shape[1] != 2:
+            raise ValueError("Binary DR outcome models must expose two class probabilities.")
+        return np.asarray(probabilities[:, 1], dtype=float)
+
+
 def build_meta_learner(
     letter: str,
     binary_outcome: bool,
@@ -221,6 +252,17 @@ def build_meta_learner(
             outcome_learner=clone_scaled_estimator(outcome_learner),
             effect_learner=clone_scaled_estimator(effect_learner),
             propensity_learner=clone_scaled_estimator(propensity_learner),
+            control_name=control_name,
+        )
+    if letter == "dr" and binary_outcome:
+        return BaseDRRegressor(
+            control_outcome_learner=ProbabilityOutcomeRegressor(
+                classifier=clone_scaled_estimator(outcome_learner),
+            ),
+            treatment_outcome_learner=ProbabilityOutcomeRegressor(
+                classifier=clone_scaled_estimator(outcome_learner),
+            ),
+            treatment_effect_learner=clone_scaled_estimator(effect_learner),
             control_name=control_name,
         )
     return model_cls(

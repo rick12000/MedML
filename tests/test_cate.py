@@ -60,6 +60,28 @@ def test_grouped_neural_split_warns_and_continues(
     assert "row-wise" in warnings[0].getMessage()
 
 
+def test_binary_dr_outcome_model_predicts_probabilities(
+    binary_data_config: DataConfig,
+    df_synthetic_binary: pd.DataFrame,
+    logistic_learner: BaseEstimator,
+    linear_learner: BaseEstimator,
+) -> None:
+    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
+    spec = MetaCATEEstimatorSpec(
+        kind=CATEKind.DR_LEARNER,
+        outcome_learner=logistic_learner,
+        effect_learner=linear_learner,
+        propensity_learner=logistic_learner,
+        n_folds=2,
+    )
+    estimator = create_cate_estimator(spec=spec, data=dataset)
+    estimator.fit(data=dataset)
+    sample = dataset.X_adjustment.iloc[:30]
+    predicted = np.asarray(estimator.model.models_mu_c[0].predict(sample), dtype=float)
+    assert np.all((predicted > 0.0) & (predicted < 1.0))
+    assert not np.all(np.isin(predicted, (0.0, 1.0)))
+
+
 def test_binary_s_learner_rejects_regressor_outcome_model(
     binary_data_config: DataConfig,
     forest_learner: BaseEstimator,

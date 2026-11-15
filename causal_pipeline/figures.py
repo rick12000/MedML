@@ -33,6 +33,17 @@ SERIES_COLORS = (
     "#000000",
     "#F0E442",
 )
+# Nature Publishing Group palette for the overlap and balance diagnostics.
+DIAGNOSTIC_COLORS = (
+    "#3C5488",
+    "#E64B35",
+    "#00A087",
+    "#4DBBD5",
+    "#8491B4",
+    "#F39B7F",
+    "#91D1C2",
+    "#7E6148",
+)
 LINE_STYLES = ("solid", "dashed", "dotted", "dashdot")
 MARKERS = ("o", "s", "D", "^", "v", "P", "X", "h")
 INK = "#1B1B1B"
@@ -59,6 +70,10 @@ TICK_LABEL_SIZE = 7.5
 CAPTION_FONT_SIZE = 7.5
 PANEL_LABEL_SIZE = 9.0
 LEGEND_FONT_SIZE = 7.5
+DIAGNOSTIC_LABEL_SIZE = 10.5
+DIAGNOSTIC_TICK_SIZE = 9.0
+DIAGNOSTIC_TITLE_SIZE = 11.0
+DIAGNOSTIC_LEGEND_SIZE = 9.5
 P_VALUE_FLOOR = 0.001
 P_VALUE_TABLE_FLOOR = 0.01
 STATISTIC_SCIENTIFIC_FLOOR = 0.001
@@ -217,6 +232,20 @@ def format_statistic(value: float) -> str:
     return f"{value:.3f}"
 
 
+def diagnostic_color(index: int) -> str:
+    return DIAGNOSTIC_COLORS[index % len(DIAGNOSTIC_COLORS)]
+
+
+def style_diagnostic_axis(axis: Axes) -> None:
+    """Open spines with the larger type used by the overlap and balance figures."""
+    style_axis(axis)
+    axis.tick_params(axis="both", which="major", labelsize=DIAGNOSTIC_TICK_SIZE, pad=3)
+    axis.xaxis.label.set_size(DIAGNOSTIC_LABEL_SIZE)
+    axis.yaxis.label.set_size(DIAGNOSTIC_LABEL_SIZE)
+    axis.title.set_size(DIAGNOSTIC_TITLE_SIZE)
+    axis.title.set_fontweight("bold")
+
+
 def style_axis(axis: Axes) -> None:
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
@@ -245,13 +274,19 @@ def style_axis(axis: Axes) -> None:
     axis.set_axisbelow(True)
 
 
-def mark_panel(axis: Axes, letter: str, x: float = -0.02) -> None:
+def mark_panel(
+    axis: Axes,
+    letter: str,
+    x: float = -0.02,
+    y: float = 1.03,
+    fontsize: float = PANEL_LABEL_SIZE,
+) -> None:
     axis.text(
         x,
-        1.03,
+        y,
         letter,
         transform=axis.transAxes,
-        fontsize=PANEL_LABEL_SIZE,
+        fontsize=fontsize,
         fontweight="bold",
         color=INK,
         ha="left",
@@ -267,6 +302,63 @@ def place_outside_legend(axis: Axes) -> None:
         bbox_to_anchor=(1.02, 0.5),
         borderaxespad=0.0,
         fontsize=LEGEND_FONT_SIZE,
+    )
+
+
+def place_bottom_strip_legend(
+    figure: Figure,
+    anchor: Axes,
+    handles_axis: Axes,
+    ncol: int,
+    fontsize: float = DIAGNOSTIC_LEGEND_SIZE,
+) -> None:
+    """Legend centred in the strip reserved beneath ``anchor``."""
+    handles, labels = handles_axis.get_legend_handles_labels()
+    position = anchor.get_position()
+    figure.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=((position.x0 + position.x1) / 2, 0.0),
+        bbox_transform=figure.transFigure,
+        ncol=ncol,
+        frameon=False,
+        fontsize=fontsize,
+        columnspacing=1.6,
+        handletextpad=0.5,
+        handlelength=1.4,
+        borderaxespad=0.0,
+    )
+
+
+def place_legend_under_axis(
+    figure: Figure,
+    anchor: Axes,
+    handles_axis: Axes,
+    ncol: int,
+    clearance_inches: float,
+    fontsize: float = DIAGNOSTIC_LEGEND_SIZE,
+) -> None:
+    """Legend centred under ``anchor``, with its top ``clearance_inches`` below the axes."""
+    handles, labels = handles_axis.get_legend_handles_labels()
+    position = anchor.get_position()
+    figure_height = float(figure.get_size_inches()[1])
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(
+            (position.x0 + position.x1) / 2,
+            position.y0 - clearance_inches / figure_height,
+        ),
+        bbox_transform=figure.transFigure,
+        ncol=ncol,
+        frameon=False,
+        fontsize=fontsize,
+        columnspacing=1.5,
+        handletextpad=0.45,
+        handlelength=1.4,
+        borderaxespad=0.0,
     )
 
 

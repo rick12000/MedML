@@ -2,8 +2,9 @@
 
 Each covariate is one row. Hollow circles are the unadjusted standardized mean difference
 and filled circles are the weighted one, joined by a thin connector. Rows are ranked by
-the unadjusted magnitude, largest first, and capped at ``max_covariates``. Dotted lines
-mark the conventional ±0.1 balance threshold, and the dashed line marks perfect balance.
+the unadjusted magnitude, largest first, and capped at ``max_covariates``. A pale band
+and dotted lines mark the conventional ±0.1 balance threshold, and the dashed line marks
+perfect balance.
 
 Multi-arm analyses get one panel per arm contrast. The legend sits centred beneath the
 chart in a single row of two columns.
@@ -18,16 +19,22 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from causal_pipeline.figures import (
+    DIAGNOSTIC_LABEL_SIZE,
+    DIAGNOSTIC_LEGEND_SIZE,
+    DIAGNOSTIC_TITLE_SIZE,
     EFFECT_FIGURE_WIDTH,
-    MARKER_SIZE,
+    INK,
     REFERENCE_COLOR,
     REFERENCE_LINEWIDTH,
-    SERIES_COLORS,
     configure_effect_axis,
+    diagnostic_color,
+    display_contrast,
     mark_panel,
     panel_letter,
+    place_bottom_strip_legend,
     publication_style,
     row_positions,
+    style_diagnostic_axis,
 )
 from causal_pipeline.utils import save_figure
 
@@ -36,23 +43,24 @@ DEFAULT_MAX_COVARIATES = 10
 REQUIRED_COLUMNS = ("covariate", "unweighted_smd", "weighted_smd")
 UNADJUSTED_LABEL = "Unadjusted"
 WEIGHTED_LABEL = "Weighted"
-# Okabe-Ito vermilion for the unadjusted state and blue for the weighted state, matching the series palette.
-UNADJUSTED_COLOR = SERIES_COLORS[1]
-WEIGHTED_COLOR = SERIES_COLORS[0]
-CONNECTOR_COLOR = "#BDBDBD"
-CONNECTOR_WIDTH = 0.8
-UNADJUSTED_EDGE_WIDTH = 0.9
-WEIGHTED_EDGE_WIDTH = 0.4
+UNADJUSTED_COLOR = diagnostic_color(1)
+WEIGHTED_COLOR = diagnostic_color(0)
+BALANCE_BAND_COLOR = "#F1F3F5"
+CONNECTOR_COLOR = "#C5CED6"
+CONNECTOR_WIDTH = 1.0
+UNADJUSTED_EDGE_WIDTH = 1.2
+WEIGHTED_EDGE_WIDTH = 0.6
+LOVE_MARKER_AREA = 38.0
 THRESHOLD = 0.1
-THRESHOLD_LINESTYLE = (0, (1.0, 1.5))
-LOVE_ROW_INCHES = 0.20
-LOVE_PANEL_PAD_INCHES = 0.75
-LOVE_MIN_PANEL_INCHES = 1.5
-LEGEND_HEIGHT_INCHES = 0.32
-LABEL_FONT_SIZE = 9.5
-TICK_FONT_SIZE = 8.5
-LEGEND_FONT_SIZE = 9.0
+THRESHOLD_LINESTYLE = (0, (1.1, 1.6))
+LOVE_ROW_INCHES = 0.30
+LOVE_PANEL_PAD_INCHES = 0.95
+LOVE_MIN_PANEL_INCHES = 2.15
+LEGEND_HEIGHT_INCHES = 0.42
+LABEL_FONT_SIZE = DIAGNOSTIC_LABEL_SIZE
+LEGEND_FONT_SIZE = DIAGNOSTIC_LEGEND_SIZE
 X_LABEL = "Standardized Mean Difference"
+BALANCE_TITLE = "Covariate balance"
 
 
 def plot_covariate_balance(
@@ -90,7 +98,7 @@ def compose_covariate_balance(
         is_last = index == len(panels) - 1
         draw_balance_panel(axis=axis, frame=frame, xlabel=X_LABEL if is_last else "", contrast=contrast)
         if len(panels) > 1:
-            mark_panel(axis, panel_letter(index))
+            mark_panel(axis, panel_letter(index), x=-0.06, y=1.06, fontsize=DIAGNOSTIC_TITLE_SIZE)
     figure.tight_layout(rect=(0.0, LEGEND_HEIGHT_INCHES / figure_height, 1.0, 1.0))
     place_legend_below(figure, axes[-1], axes[0])
     return figure
@@ -122,7 +130,15 @@ def draw_balance_panel(axis: Axes, frame: pd.DataFrame, xlabel: str, contrast: s
     positions = row_positions(len(frame))
     unadjusted = frame["unweighted_smd"].to_numpy(dtype=float)
     weighted = frame["weighted_smd"].to_numpy(dtype=float)
-    axis.hlines(positions, unadjusted, weighted, color=CONNECTOR_COLOR, linewidth=CONNECTOR_WIDTH, zorder=2)
+    axis.axvspan(-THRESHOLD, THRESHOLD, color=BALANCE_BAND_COLOR, linewidth=0, zorder=0)
+    axis.hlines(
+        positions,
+        unadjusted,
+        weighted,
+        color=CONNECTOR_COLOR,
+        linewidth=CONNECTOR_WIDTH,
+        zorder=2,
+    )
     for threshold in (-THRESHOLD, THRESHOLD):
         axis.axvline(
             threshold,
@@ -134,7 +150,7 @@ def draw_balance_panel(axis: Axes, frame: pd.DataFrame, xlabel: str, contrast: s
     axis.scatter(
         unadjusted,
         positions,
-        s=MARKER_SIZE**2,
+        s=LOVE_MARKER_AREA,
         facecolors="white",
         edgecolors=UNADJUSTED_COLOR,
         linewidths=UNADJUSTED_EDGE_WIDTH,
@@ -144,9 +160,9 @@ def draw_balance_panel(axis: Axes, frame: pd.DataFrame, xlabel: str, contrast: s
     axis.scatter(
         weighted,
         positions,
-        s=MARKER_SIZE**2,
+        s=LOVE_MARKER_AREA,
         color=WEIGHTED_COLOR,
-        edgecolors=WEIGHTED_COLOR,
+        edgecolors="white",
         linewidths=WEIGHTED_EDGE_WIDTH,
         zorder=4,
         label=WEIGHTED_LABEL,
@@ -160,25 +176,25 @@ def draw_balance_panel(axis: Axes, frame: pd.DataFrame, xlabel: str, contrast: s
         contrast=contrast,
         reference_zorder=1,
     )
-    axis.tick_params(axis="both", labelsize=TICK_FONT_SIZE)
+    style_diagnostic_axis(axis)
+    title = BALANCE_TITLE if contrast == "" else display_contrast(contrast)
+    axis.set_title(
+        title,
+        loc="center",
+        pad=8,
+        fontsize=DIAGNOSTIC_TITLE_SIZE,
+        fontweight="bold",
+        color=INK,
+    )
     axis.xaxis.label.set_size(LABEL_FONT_SIZE)
-    axis.set_title(axis.get_title(), fontsize=LABEL_FONT_SIZE)
 
 
 def place_legend_below(figure: Figure, chart_axis: Axes, handle_axis: Axes) -> None:
     """Two-column legend centred under the chart, in the strip reserved beneath the x-axis label."""
-    handles, labels = handle_axis.get_legend_handles_labels()
-    position = chart_axis.get_position()
-    figure.legend(
-        handles,
-        labels,
-        loc="lower center",
-        bbox_to_anchor=((position.x0 + position.x1) / 2, 0.0),
-        bbox_transform=figure.transFigure,
+    place_bottom_strip_legend(
+        figure=figure,
+        anchor=chart_axis,
+        handles_axis=handle_axis,
         ncol=2,
-        frameon=False,
         fontsize=LEGEND_FONT_SIZE,
-        columnspacing=2.0,
-        handletextpad=0.5,
-        borderaxespad=0.0,
     )

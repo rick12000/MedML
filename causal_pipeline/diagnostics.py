@@ -3,40 +3,86 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.axes import Axes
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 from causallib.utils.stat_utils import calc_weighted_standardized_mean_differences
 from pydantic import BaseModel, ConfigDict
 
-from causal_pipeline.balance_figures import COVARIATE_BALANCE_FIGURE_NAME, plot_covariate_balance
+from causal_pipeline.balance_figures import (
+    COVARIATE_BALANCE_FIGURE_NAME,
+    DEFAULT_MAX_COVARIATES,
+    LOVE_MIN_PANEL_INCHES,
+    LOVE_PANEL_PAD_INCHES,
+    LOVE_ROW_INCHES,
+    X_LABEL,
+    balance_panels,
+    draw_balance_panel,
+    plot_covariate_balance,
+)
 from causal_pipeline.config import JsonValue, OverlapConfig, TreatmentMode
 from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
 from causal_pipeline.learners import build_learner
-from causal_pipeline.data import CausalDataset, DataPartitions, ipw_weights_multi
+from causal_pipeline.data import (
+    PROPENSITY_CLIP_FLOOR,
+    CausalDataset,
+    DataPartitions,
+    ipw_weights_multi,
+)
 from causal_pipeline.figures import (
-    PANEL_HEIGHT,
-    place_outside_legend,
+    DIAGNOSTIC_LABEL_SIZE,
+    DIAGNOSTIC_LEGEND_SIZE,
+    DIAGNOSTIC_TITLE_SIZE,
+    INK,
+    add_inch_axes,
+    diagnostic_color,
+    mark_panel,
+    panel_letter,
+    place_bottom_strip_legend,
+    place_legend_under_axis,
     publication_style,
-    series_style,
-    style_axis,
+    style_diagnostic_axis,
+    text_width,
+    widest,
 )
 from causal_pipeline.utils import save_figure, write_dataframe
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
 OVERLAP_HISTOGRAM_BINS = 30
-OVERLAP_FIGURE_WIDTH = 4.6
-OVERLAP_PANEL_HEIGHT = PANEL_HEIGHT
-HISTOGRAM_ALPHA = 0.38
-HISTOGRAM_EDGE_WIDTH = 0.8
+OVERLAP_FIGURE_WIDTH = 5.15
+OVERLAP_PANEL_HEIGHT = 2.70
+HISTOGRAM_ALPHA = 0.32
+HISTOGRAM_EDGE_WIDTH = 1.05
 PROPENSITY_AXIS_MIN = 0.0
 PROPENSITY_AXIS_MAX = 1.0
+PROPENSITY_TICKS = (0.0, 0.25, 0.5, 0.75, 1.0)
+PROPENSITY_TICK_LABELS = ("0", "0.25", "0.5", "0.75", "1")
+OVERLAP_TITLE = "Propensity overlap"
+DIAGNOSTIC_PAIR_FIGURE_NAME = "propensity_balance.png"
+PAIR_TOP_INCHES = 0.42
+SAMPLE_SIZE_FONT_SIZE = 8.5
+SAMPLE_SIZE_LINE_INCHES = 0.20
+XLABEL_NOTE_GAP_INCHES = 0.50
+NOTE_LEGEND_GAP_INCHES = 0.08
+LEGEND_STRIP_INCHES = 0.34
+OVERLAP_NOTE_WIDTH_INCHES = 4.3
+PAIR_OVERLAP_WIDTH_INCHES = 3.55
+PAIR_BALANCE_WIDTH_INCHES = 3.75
+PAIR_COLUMN_GAP_INCHES = 0.40
+PAIR_LEFT_MARGIN_INCHES = 0.72
+PAIR_RIGHT_MARGIN_INCHES = 0.18
+PAIR_PANEL_GAP_INCHES = 0.62
+PAIR_LABEL_GAP_INCHES = 0.18
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +95,33 @@ def draw_propensity_histogram(
     treatment: np.ndarray,
     treatment_values: list[JsonValue],
 ) -> None:
+    bins = np.linspace(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX, OVERLAP_HISTOGRAM_BINS + 1)
     for arm_index, arm in enumerate(treatment_values):
-        style = series_style(arm_index)
+        color = diagnostic_color(arm_index)
         mask = treatment == arm
         axis.hist(
             probabilities[mask],
-            bins=OVERLAP_HISTOGRAM_BINS,
+            bins=bins,
+            range=(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX),
             density=True,
             histtype="stepfilled",
-            color=style.color,
+            color=color,
             alpha=HISTOGRAM_ALPHA,
-            edgecolor=style.color,
+            edgecolor=color,
             linewidth=HISTOGRAM_EDGE_WIDTH,
             label=str(arm),
+            zorder=2,
+        )
+        axis.hist(
+            probabilities[mask],
+            bins=bins,
+            range=(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX),
+            density=True,
+            histtype="step",
+            color=color,
+            linewidth=HISTOGRAM_EDGE_WIDTH,
+            label="_nolegend_",
+            zorder=3,
         )
 
 
@@ -150,6 +210,15 @@ class OverlapPreprocessor:
             plot_covariate_balance(
                 balance=balance,
                 save_path=str(Path(results_root) / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
+            )
+            plot_diagnostic_pair(
+                treatment=pooled.treatment_series.to_numpy(),
+                probabilities=propensity,
+                treatment_mode=pooled.treatment_mode,
+                treatment_values=pooled.treatment_values,
+                control_value=pooled.control_value,
+                balance=balance,
+                save_path=str(Path(results_root) / "diagnostics" / DIAGNOSTIC_PAIR_FIGURE_NAME),
             )
         trimmed_balance = None
         reduced = partitions
@@ -262,6 +331,153 @@ def partition_count(name: str, before: CausalDataset, after: CausalDataset) -> d
     }
 
 
+class ArmSampleSize(NamedTuple):
+    label: str
+    count: int
+    effective_sample_size: float
+
+
+def kish_effective_sample_size(weights: np.ndarray) -> float:
+    """Kish ESS, (sum w)^2 / sum w^2. A constant scale cancels, so it is unchanged by stabilization."""
+    finite = np.asarray(weights, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan")
+    weight_sum = float(np.sum(finite))
+    square_sum = float(np.sum(np.square(finite)))
+    if square_sum == 0.0:
+        return 0.0
+    return weight_sum**2 / square_sum
+
+
+def arm_effective_sample_sizes(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+) -> list[ArmSampleSize]:
+    """Kish ESS within each arm on the rows drawn in the overlap figure.
+
+    Cross-fitting, when the overlap stage uses it, has already stored one
+    out-of-fold propensity per row. Estimation and test rows are already
+    pooled in that vector. Each row contributes its own weight once; fold
+    membership is not averaged. The weight is the inverse probability of the
+    received arm, floored the same way as the balance weights.
+    """
+    if len(treatment) != len(probabilities):
+        raise ValueError("Treatment and propensity rows differ.")
+    received = propensity_of_received_arm(
+        treatment=treatment,
+        probabilities=probabilities,
+        treatment_mode=treatment_mode,
+        treatment_values=treatment_values,
+    )
+    weights = 1.0 / np.clip(received, PROPENSITY_CLIP_FLOOR, None)
+    sizes = []
+    for arm in treatment_values:
+        mask = treatment == arm
+        sizes.append(
+            ArmSampleSize(
+                label=str(arm),
+                count=int(np.sum(mask)),
+                effective_sample_size=kish_effective_sample_size(weights[mask]),
+            )
+        )
+    return sizes
+
+
+def propensity_of_received_arm(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+) -> np.ndarray:
+    """P(T = T_i | X_i). A missing binary column is the complement of the column that is present."""
+    received = np.full(len(treatment), np.nan, dtype=float)
+    known = [arm for arm in treatment_values if propensity_column(probabilities, arm) is not None]
+    for arm in known:
+        mask = treatment == arm
+        received[mask] = probability_of_arm(probabilities, arm)[mask]
+    if treatment_mode != TreatmentMode.BINARY or len(known) != 1:
+        return received
+    missing = [arm for arm in treatment_values if arm not in known]
+    if len(missing) != 1:
+        return received
+    present_probability = probability_of_arm(probabilities, known[0])
+    mask = treatment == missing[0]
+    received[mask] = 1.0 - present_probability[mask]
+    return received
+
+
+def propensity_column(probabilities: pd.DataFrame, arm: JsonValue) -> str | None:
+    for column in probabilities.columns:
+        if column == arm or str(column) == str(arm):
+            return str(column)
+    return None
+
+
+def format_effective_sample_size(value: float) -> str:
+    if not np.isfinite(value):
+        return "NA"
+    return f"{float(value):.1f}"
+
+
+def arm_sample_label(sample: ArmSampleSize) -> str:
+    ess = format_effective_sample_size(sample.effective_sample_size)
+    return f"{sample.label}: n = {sample.count}, ESS = {ess}"
+
+
+def format_arm_sample_sizes(samples: Sequence[ArmSampleSize]) -> str:
+    return "; ".join(arm_sample_label(sample) for sample in samples)
+
+
+def sample_size_note(samples: Sequence[ArmSampleSize], width_inches: float) -> str:
+    """One line of arm labels when they fit under the panel, otherwise one arm per line."""
+    lines: list[str] = []
+    current = ""
+    for sample in samples:
+        part = arm_sample_label(sample)
+        candidate = part if current == "" else f"{current}    {part}"
+        if current and text_width(candidate, SAMPLE_SIZE_FONT_SIZE) > width_inches:
+            lines.append(current)
+            current = part
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
+def sample_note_inches(note: str) -> float:
+    line_count = note.count("\n") + 1 if note else 0
+    return SAMPLE_SIZE_LINE_INCHES * line_count
+
+
+def overlap_legend_inches(note: str) -> float:
+    """Strip below an x-axis label: the sample-size line, then the legend."""
+    return sample_note_inches(note) + NOTE_LEGEND_GAP_INCHES + LEGEND_STRIP_INCHES
+
+
+def joint_bottom_inches(note: str) -> float:
+    """Same strip, plus room for the x-axis label that hangs below the joint-panel spine."""
+    return XLABEL_NOTE_GAP_INCHES + overlap_legend_inches(note)
+
+
+def place_sample_size_note(figure: Figure, anchor: Axes, note: str, top_fraction: float) -> None:
+    position = anchor.get_position()
+    figure.text(
+        (position.x0 + position.x1) / 2,
+        top_fraction,
+        note,
+        ha="center",
+        va="top",
+        fontsize=SAMPLE_SIZE_FONT_SIZE,
+        color=INK,
+        linespacing=1.3,
+        transform=figure.transFigure,
+    )
+
+
 def plot_overlap(
     treatment: np.ndarray,
     probabilities: pd.DataFrame,
@@ -270,49 +486,294 @@ def plot_overlap(
     control_value: JsonValue,
     save_path: str | None = None,
 ) -> None:
-    panel_count = 1 if treatment_mode == TreatmentMode.BINARY else len(treatment_values)
-    with publication_style():
-        figure, axes = plt.subplots(
-            nrows=panel_count,
-            figsize=(OVERLAP_FIGURE_WIDTH, OVERLAP_PANEL_HEIGHT * panel_count),
-            squeeze=False,
-        )
-        if treatment_mode == TreatmentMode.BINARY:
-            axis = axes[0, 0]
-            non_control = next(arm for arm in treatment_values if arm != control_value)
-            propensity = probability_of_arm(probabilities, non_control)
-            draw_propensity_histogram(
-                axis=axis,
-                probabilities=propensity,
+    logger.info(
+        "Overlap Kish effective sample size: %s",
+        format_arm_sample_sizes(
+            arm_effective_sample_sizes(
                 treatment=treatment,
+                probabilities=probabilities,
+                treatment_mode=treatment_mode,
                 treatment_values=treatment_values,
             )
-            axis.set_title("Propensity overlap", loc="left", pad=4)
-            axis.set_xlabel(f"P(T={non_control} | X)")
-            axis.set_ylabel("Density")
-            style_axis(axis)
-            place_outside_legend(axis)
-            axis.set_xlim(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX)
-        else:
-            for panel_index, arm in enumerate(treatment_values):
-                axis = axes[panel_index, 0]
-                draw_propensity_histogram(
-                    axis=axis,
-                    probabilities=probability_of_arm(probabilities, arm),
-                    treatment=treatment,
-                    treatment_values=treatment_values,
-                )
-                axis.set_title(f"P(T={arm} | X)", loc="left", pad=4)
-                style_axis(axis)
-                place_outside_legend(axis)
-                axis.set_xlim(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX)
-                if panel_index == len(treatment_values) - 1:
-                    axis.set_xlabel("Probability")
-                axis.set_ylabel("Density")
-        figure.tight_layout()
+        ),
+    )
+    with publication_style():
+        figure = compose_propensity_overlap(
+            treatment=treatment,
+            probabilities=probabilities,
+            treatment_mode=treatment_mode,
+            treatment_values=treatment_values,
+            control_value=control_value,
+        )
         if save_path is not None:
             save_figure(save_path, figure)
         plt.close(figure)
+
+
+def plot_diagnostic_pair(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+    balance: pd.DataFrame,
+    save_path: str,
+    max_covariates: int = DEFAULT_MAX_COVARIATES,
+) -> None:
+    with publication_style():
+        figure = compose_diagnostic_pair(
+            treatment=treatment,
+            probabilities=probabilities,
+            treatment_mode=treatment_mode,
+            treatment_values=treatment_values,
+            control_value=control_value,
+            balance=balance,
+            max_covariates=max_covariates,
+        )
+        save_figure(save_path, figure)
+        plt.close(figure)
+
+
+def compose_propensity_overlap(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+) -> Figure:
+    panel_count = overlap_panel_count(treatment_mode=treatment_mode, treatment_values=treatment_values)
+    note = sample_size_note(
+        arm_effective_sample_sizes(
+            treatment=treatment,
+            probabilities=probabilities,
+            treatment_mode=treatment_mode,
+            treatment_values=treatment_values,
+        ),
+        width_inches=OVERLAP_NOTE_WIDTH_INCHES,
+    )
+    bottom_inches = overlap_legend_inches(note)
+    figure_height = OVERLAP_PANEL_HEIGHT * panel_count + bottom_inches
+    figure, grid = plt.subplots(
+        nrows=panel_count,
+        ncols=1,
+        figsize=(OVERLAP_FIGURE_WIDTH, figure_height),
+        squeeze=False,
+    )
+    axes = [grid[index, 0] for index in range(panel_count)]
+    handle_axis = draw_overlap_panels(
+        axes=axes,
+        treatment=treatment,
+        probabilities=probabilities,
+        treatment_mode=treatment_mode,
+        treatment_values=treatment_values,
+        control_value=control_value,
+    )
+    if panel_count > 1:
+        for index, axis in enumerate(axes):
+            mark_panel(axis, panel_letter(index), x=-0.06, y=1.06, fontsize=DIAGNOSTIC_TITLE_SIZE)
+    figure.tight_layout(rect=(0.0, bottom_inches / figure_height, 1.0, 1.0))
+    place_sample_size_note(
+        figure=figure,
+        anchor=axes[-1],
+        note=note,
+        top_fraction=bottom_inches / figure_height,
+    )
+    place_bottom_strip_legend(
+        figure=figure,
+        anchor=axes[-1],
+        handles_axis=handle_axis,
+        ncol=len(treatment_values),
+        fontsize=DIAGNOSTIC_LEGEND_SIZE,
+    )
+    return figure
+
+
+def compose_diagnostic_pair(
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+    balance: pd.DataFrame,
+    max_covariates: int = DEFAULT_MAX_COVARIATES,
+) -> Figure:
+    """Propensity overlap on the left and covariate balance on the right."""
+    panels = balance_panels(balance, max_covariates=max_covariates)
+    overlap_count = overlap_panel_count(treatment_mode=treatment_mode, treatment_values=treatment_values)
+    overlap_heights = [OVERLAP_PANEL_HEIGHT] * overlap_count
+    balance_heights = [balance_panel_height(frame) for _, frame in panels]
+    if overlap_count == 1 and len(panels) == 1:
+        matched_height = max(overlap_heights[0], balance_heights[0])
+        overlap_heights = [matched_height]
+        balance_heights = [matched_height]
+    left_stack = column_stack_height(overlap_heights)
+    right_stack = column_stack_height(balance_heights)
+    note = sample_size_note(
+        arm_effective_sample_sizes(
+            treatment=treatment,
+            probabilities=probabilities,
+            treatment_mode=treatment_mode,
+            treatment_values=treatment_values,
+        ),
+        width_inches=PAIR_OVERLAP_WIDTH_INCHES,
+    )
+    bottom_inches = joint_bottom_inches(note)
+    figure_height = PAIR_TOP_INCHES + max(left_stack, right_stack) + bottom_inches
+    name_width = widest(
+        (str(name) for _, frame in panels for name in frame["covariate"].tolist()),
+        DIAGNOSTIC_LABEL_SIZE,
+    )
+    figure_width = (
+        PAIR_LEFT_MARGIN_INCHES
+        + PAIR_OVERLAP_WIDTH_INCHES
+        + PAIR_COLUMN_GAP_INCHES
+        + name_width
+        + PAIR_LABEL_GAP_INCHES
+        + PAIR_BALANCE_WIDTH_INCHES
+        + PAIR_RIGHT_MARGIN_INCHES
+    )
+    figure = plt.figure(figsize=(figure_width, figure_height))
+    overlap_axes = stack_panels(
+        figure=figure,
+        left=PAIR_LEFT_MARGIN_INCHES,
+        width=PAIR_OVERLAP_WIDTH_INCHES,
+        heights=overlap_heights,
+    )
+    balance_left = (
+        PAIR_LEFT_MARGIN_INCHES + PAIR_OVERLAP_WIDTH_INCHES + PAIR_COLUMN_GAP_INCHES + name_width + PAIR_LABEL_GAP_INCHES
+    )
+    balance_axes = stack_panels(
+        figure=figure,
+        left=balance_left,
+        width=PAIR_BALANCE_WIDTH_INCHES,
+        heights=balance_heights,
+    )
+    handle_axis = draw_overlap_panels(
+        axes=overlap_axes,
+        treatment=treatment,
+        probabilities=probabilities,
+        treatment_mode=treatment_mode,
+        treatment_values=treatment_values,
+        control_value=control_value,
+    )
+    for index, ((contrast, frame), axis) in enumerate(zip(panels, balance_axes, strict=True)):
+        draw_balance_panel(
+            axis=axis,
+            frame=frame,
+            xlabel=X_LABEL if index == len(balance_axes) - 1 else "",
+            contrast=contrast,
+        )
+    letter_panels([*overlap_axes, *balance_axes])
+    place_sample_size_note(
+        figure=figure,
+        anchor=overlap_axes[-1],
+        note=note,
+        top_fraction=overlap_axes[-1].get_position().y0 - XLABEL_NOTE_GAP_INCHES / figure_height,
+    )
+    legend_clearance = XLABEL_NOTE_GAP_INCHES + sample_note_inches(note) + NOTE_LEGEND_GAP_INCHES
+    place_legend_under_axis(
+        figure=figure,
+        anchor=overlap_axes[-1],
+        handles_axis=handle_axis,
+        ncol=len(treatment_values),
+        clearance_inches=legend_clearance,
+    )
+    place_legend_under_axis(
+        figure=figure,
+        anchor=balance_axes[-1],
+        handles_axis=balance_axes[0],
+        ncol=2,
+        clearance_inches=legend_clearance,
+    )
+    return figure
+
+
+def overlap_panel_count(treatment_mode: TreatmentMode, treatment_values: Sequence[JsonValue]) -> int:
+    if treatment_mode == TreatmentMode.BINARY:
+        return 1
+    return len(treatment_values)
+
+
+def balance_panel_height(frame: pd.DataFrame) -> float:
+    return max(LOVE_MIN_PANEL_INCHES, LOVE_ROW_INCHES * len(frame) + LOVE_PANEL_PAD_INCHES)
+
+
+def column_stack_height(heights: Sequence[float]) -> float:
+    if not heights:
+        return 0.0
+    return float(sum(heights) + PAIR_PANEL_GAP_INCHES * (len(heights) - 1))
+
+
+def stack_panels(
+    figure: Figure,
+    left: float,
+    width: float,
+    heights: Sequence[float],
+) -> list[Axes]:
+    axes: list[Axes] = []
+    top = PAIR_TOP_INCHES
+    for height in heights:
+        axes.append(add_inch_axes(figure, left, top, width, height))
+        top += height + PAIR_PANEL_GAP_INCHES
+    return axes
+
+
+def letter_panels(axes: Sequence[Axes]) -> None:
+    if len(axes) < 2:
+        return
+    for index, axis in enumerate(axes):
+        mark_panel(axis, panel_letter(index), x=-0.06, y=1.06, fontsize=DIAGNOSTIC_TITLE_SIZE)
+
+
+def draw_overlap_panels(
+    axes: Sequence[Axes],
+    treatment: np.ndarray,
+    probabilities: pd.DataFrame,
+    treatment_mode: TreatmentMode,
+    treatment_values: list[JsonValue],
+    control_value: JsonValue,
+) -> Axes:
+    """Draw one density panel per propensity and return the axis that carries the legend."""
+    if treatment_mode == TreatmentMode.BINARY:
+        axis = axes[0]
+        non_control = next(arm for arm in treatment_values if arm != control_value)
+        draw_propensity_histogram(
+            axis=axis,
+            probabilities=probability_of_arm(probabilities, non_control),
+            treatment=treatment,
+            treatment_values=treatment_values,
+        )
+        finish_overlap_axis(axis, title=OVERLAP_TITLE, xlabel=f"P(T = {non_control} | X)")
+        return axis
+    for panel_index, arm in enumerate(treatment_values):
+        axis = axes[panel_index]
+        draw_propensity_histogram(
+            axis=axis,
+            probabilities=probability_of_arm(probabilities, arm),
+            treatment=treatment,
+            treatment_values=treatment_values,
+        )
+        xlabel = "Probability" if panel_index == len(treatment_values) - 1 else ""
+        finish_overlap_axis(axis, title=f"P(T = {arm} | X)", xlabel=xlabel)
+    return axes[0]
+
+
+def finish_overlap_axis(axis: Axes, title: str, xlabel: str) -> None:
+    style_diagnostic_axis(axis)
+    axis.set_title(title, loc="center", pad=8, fontsize=DIAGNOSTIC_TITLE_SIZE, fontweight="bold", color=INK)
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel("Density")
+    axis.set_xlim(PROPENSITY_AXIS_MIN, PROPENSITY_AXIS_MAX)
+    axis.set_xticks(list(PROPENSITY_TICKS))
+    axis.set_xticklabels(list(PROPENSITY_TICK_LABELS))
+    if xlabel == "":
+        axis.tick_params(axis="x", labelbottom=False)
+    axis.xaxis.label.set_size(DIAGNOSTIC_LABEL_SIZE)
+    axis.yaxis.label.set_size(DIAGNOSTIC_LABEL_SIZE)
+    lower, upper = axis.get_ylim()
+    ceiling = upper if upper > lower else 1.0
+    axis.set_ylim(0.0, ceiling * 1.16 if ceiling > 0.0 else 1.0)
+    axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
 
 
 def covariate_balance(

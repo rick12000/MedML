@@ -11,7 +11,7 @@ import pandas as pd
 from causal_pipeline.balance_figures import COVARIATE_BALANCE_FIGURE_NAME, plot_covariate_balance
 from causal_pipeline.cate import mean_cate_table
 from causal_pipeline.config import DEFAULT_ATE_CONFIDENCE_LEVEL, ArbitraryTypesModel, PipelineConfig
-from causal_pipeline.diagnostics import plot_overlap
+from causal_pipeline.diagnostics import DIAGNOSTIC_PAIR_FIGURE_NAME, plot_diagnostic_pair, plot_overlap
 from causal_pipeline.estimator_identity import assign_estimator_ids, attach_estimator_metadata
 from causal_pipeline.evaluation import (
     ContrastEvaluation,
@@ -270,6 +270,7 @@ def write_pooled_balance(
     completed_runs: list[CompletedAnalysis],
 ) -> None:
     """Average covariate balance and the propensity-overlap scatter."""
+    pooled_balance = None
     balance_tables = [run.df_balance for run in completed_runs if not run.df_balance.empty]
     if len(balance_tables) == len(completed_runs) and balance_tables:
         keys = [column for column in ("covariate", "arm_a", "arm_b") if column in balance_tables[0].columns]
@@ -281,6 +282,8 @@ def write_pooled_balance(
             save_path=str(results.root / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
         )
     overlap_paths = [run.results_root / "diagnostics" / "propensity_overlap.csv" for run in completed_runs]
+    df_averaged = None
+    df_probabilities = None
     if all(path.exists() for path in overlap_paths):
         overlap_tables = [read_dataframe(path) for path in overlap_paths]
         same_length = all(len(df_one) == len(overlap_tables[0]) for df_one in overlap_tables)
@@ -306,6 +309,17 @@ def write_pooled_balance(
                 control_value=data.control_value,
                 save_path=str(destination.with_suffix(".png")),
             )
+    if pooled_balance is not None and df_averaged is not None and df_probabilities is not None:
+        data = config.data
+        plot_diagnostic_pair(
+            treatment=df_averaged["treatment"].to_numpy(),
+            probabilities=df_probabilities,
+            treatment_mode=data.treatment_mode,
+            treatment_values=data.treatment_values,
+            control_value=data.control_value,
+            balance=pooled_balance,
+            save_path=str(results.root / "diagnostics" / DIAGNOSTIC_PAIR_FIGURE_NAME),
+        )
 
 
 def write_pooled_transport(

@@ -82,7 +82,7 @@ class TestValidationSignal(StrEnum):
     TEST_FIT = "test_fit"
 
 
-DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.02, 0.98)
+DEFAULT_PROPENSITY_CLIP: tuple[float, float] = (0.01, 0.99)
 DEFAULT_PROPENSITY_LEARNER: LearnerArchitecture = "xgboost"
 DEFAULT_OUTCOME_LEARNER: LearnerArchitecture = "xgboost"
 DEFAULT_EFFECT_LEARNER: LearnerArchitecture = "xgboost"

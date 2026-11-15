@@ -143,6 +143,7 @@ def test_pipeline_recovers_constant_effect(
     assert np.isfinite(cate_summary["eceth"]).all()
     contrast_dir = test_output_dir / "cate" / "comparison" / "1_vs_0"
     assert (test_output_dir / "diagnostics" / "propensity_overlap.png").is_file()
+    assert (test_output_dir / "diagnostics" / "propensity_balance.png").is_file()
     assert (test_output_dir / "diagnostics" / "propensity_overlap.csv").is_file()
     assert (test_output_dir / "data" / "estimation.parquet").is_file()
     assert (test_output_dir / "summary" / "ate_intervals.png").is_file()

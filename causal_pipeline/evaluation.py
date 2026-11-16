@@ -64,6 +64,7 @@ def contrast_scores_from_arms(
 RATE_WEIGHTING_AUTOC = "autoc"
 RATE_WEIGHTING_QINI = "qini"
 MINIMUM_SAMPLE = 2
+CONTROL_OUTCOME_SCORE = "__control_outcome_score"
 
 
 def require_aligned_scores(
@@ -271,15 +272,20 @@ class CATEEvaluator:
         estimation: CausalDataset,
         test: CausalDataset,
         signal: TestValidationSignal,
+        include_control_outcome: bool = False,
     ) -> pd.DataFrame:
         """Doubly robust contrast scores on the test set for policy evaluation.
 
         Cross-fit estimation scores are left untouched. Estimation-full-fit learns the
         nuisances on every estimation row, then scores test covariates with test treatment
         and outcome. Test-fit cross-fits those nuisances inside the test set.
+        include_control_outcome retains the raw control-arm DR score alongside contrasts
+        so policy valuation can compare observed outcomes against all-control outcomes.
         """
         if signal == TestValidationSignal.TEST_FIT:
-            return self.build_robust_scores(dataset=test)
+            return self.build_multi_arm_robust_scores(
+                dataset=test, include_control_outcome=include_control_outcome,
+            )
         propensity_template, outcome_template = evaluation_learner_templates(
             self.evaluation,
             binary=estimation.outcome_type == OutcomeType.BINARY,
@@ -289,6 +295,7 @@ class CATEEvaluator:
             score_rows=test,
             propensity_template=propensity_template,
             outcome_template=outcome_template,
+            include_control_outcome=include_control_outcome,
         )
         log_crossfit_nuisances(
             scope="policy/test DR",
@@ -308,6 +315,7 @@ class CATEEvaluator:
         score_rows: CausalDataset,
         propensity_template: BaseEstimator,
         outcome_template: BaseEstimator,
+        include_control_outcome: bool = False,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Fit arm nuisances on train and return contrast scores on score_rows."""
         clip_min, clip_max = self.evaluation.propensity_clip
@@ -339,13 +347,19 @@ class CATEEvaluator:
             )
         aligned_propensity = propensity.reindex(columns=levels)
         aligned_propensity.index = score_covariates.index
+        contrasts = contrast_scores_from_arms(gamma_by_arm, train)
+        if include_control_outcome:
+            contrasts[CONTROL_OUTCOME_SCORE] = gamma_by_arm[train.control_value]
         return (
-            contrast_scores_from_arms(gamma_by_arm, train),
+            contrasts,
             aligned_propensity,
             outcomes,
         )
 
-    def build_multi_arm_robust_scores(self, dataset: CausalDataset) -> pd.DataFrame:
+    def build_multi_arm_robust_scores(
+        self, dataset: CausalDataset, include_control_outcome: bool = False,
+    ) -> pd.DataFrame:
+        """Cross-fit contrasts, optionally retaining control scores from the same fits."""
         logger.info(
             "Cross-fitting doubly robust CATE scores (%s folds)...",
             self.evaluation.dr_crossfit_folds,
@@ -355,6 +369,8 @@ class CATEEvaluator:
         levels = dataset.treatment_values
         contrast_names = contrast_columns(dataset.control_value, levels)
         contrast_values = {name: np.zeros(len(dataset.df)) for name in contrast_names}
+        if include_control_outcome:
+            contrast_values[CONTROL_OUTCOME_SCORE] = np.zeros(len(dataset.df))
         oof_propensity = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         oof_outcomes = pd.DataFrame(np.nan, index=covariates.index, columns=levels, dtype=float)
         propensity_template, outcome_template = evaluation_learner_templates(
@@ -382,10 +398,11 @@ class CATEEvaluator:
                 score_rows=dataset.subset(test_idx),
                 propensity_template=propensity_template,
                 outcome_template=outcome_template,
+                include_control_outcome=include_control_outcome,
             )
             oof_propensity.iloc[test_idx] = propensity.to_numpy()
             oof_outcomes.iloc[test_idx] = outcomes.to_numpy()
-            for name in contrast_names:
+            for name in contrast_values:
                 contrast_values[name][test_idx] = contrasts[name].to_numpy()
 
         log_crossfit_nuisances(

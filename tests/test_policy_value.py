@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.tree import DecisionTreeRegressor
 
 from causal_pipeline.config import (
@@ -95,7 +96,9 @@ def test_policy_differences_are_paired_mean_gain_differences() -> None:
         scores=pd.DataFrame({"1_vs_0": [1.0, -1.0, 2.0, 0.0]}),
         dataset=dataset,
     )
-    baselines = baseline_assignments(dataset=dataset, gains=gains)
+    baselines = baseline_assignments(
+        dataset=dataset, gains=gains, control_outcome_scores=np.zeros(4),
+    )
     learned = make_assignment(
         name="policy_tree_s_learner",
         method="policy_tree",
@@ -116,7 +119,7 @@ def test_policy_differences_are_paired_mean_gain_differences() -> None:
     assert table.loc["never_treat", ["vs_never_treat_ci_lower", "vs_never_treat_ci_upper"]].tolist() == [0.0, 0.0]
     assert np.isclose(table.loc["policy_tree_s_learner", "vs_never_treat"], 0.5)
     assert np.isclose(table.loc["policy_tree_s_learner", "vs_always_treat_1"], 0.0)
-    assert np.isclose(table.loc["policy_tree_s_learner", "vs_observed"], -0.25)
+    assert np.isclose(table.loc["policy_tree_s_learner", "vs_observed"], 0.5)
     assert table.loc["observed", "vs_observed"] == 0.0
     assert table.loc["observed", ["vs_observed_ci_lower", "vs_observed_ci_upper"]].tolist() == [0.0, 0.0]
 
@@ -138,7 +141,9 @@ def test_each_non_control_arm_gets_its_own_always_treat_assignment() -> None:
         scores=pd.DataFrame({"1_vs_0": [0.1, 0.2, 0.3], "2_vs_0": [0.4, 0.5, 0.6]}),
         dataset=dataset,
     )
-    assignments = baseline_assignments(dataset=dataset, gains=gains)
+    assignments = baseline_assignments(
+        dataset=dataset, gains=gains, control_outcome_scores=np.zeros(3),
+    )
     assert [assignment.name for assignment in assignments] == [
         "never_treat",
         "always_treat_1",
@@ -149,3 +154,30 @@ def test_each_non_control_arm_gets_its_own_always_treat_assignment() -> None:
     assert np.allclose(always_second_arm.gain, [0.4, 0.5, 0.6])
     assert always_second_arm.share_treated == 1.0
     assert assignments[0].share_treated == 0.0
+
+
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+@pytest.mark.parametrize("outcome_model_correct", [True, False])
+def test_observed_gain_is_doubly_robust(direction: float, outcome_model_correct: bool) -> None:
+    frame = pd.DataFrame({"y": [5.0, 6.0], "t": [0, 1], "x": [0.0, 0.0]})
+    favorability = (
+        OutcomeFavorability.HIGHER_IS_BETTER if direction == 1.0
+        else OutcomeFavorability.LOWER_IS_BETTER
+    )
+    dataset = two_arm_dataset(frame, favorability)
+    # Either correct outcome means with wrong propensity, or vice versa.
+    propensity = 0.8 if outcome_model_correct else 0.5
+    mean_control = 5.0 if outcome_model_correct else 0.0
+    mean_treated = 6.0 if outcome_model_correct else 0.0
+    treatment = frame["t"].to_numpy()
+    gamma_control = mean_control + (1 - treatment) * (frame["y"].to_numpy() - mean_control) / (1 - propensity)
+    gamma_treated = mean_treated + treatment * (frame["y"].to_numpy() - mean_treated) / propensity
+    gains = benefit_matrix(
+        scores=pd.DataFrame({"1_vs_0": gamma_treated - gamma_control}), dataset=dataset,
+    )
+    assignments = baseline_assignments(
+        dataset=dataset, gains=gains, control_outcome_scores=gamma_control,
+    )
+    assert len(assignments) == 3
+    assert assignments[-1].gain.shape == (2,)
+    assert assignments[-1].gain.mean() == pytest.approx(direction * 0.5)

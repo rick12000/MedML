@@ -5,12 +5,23 @@ import pandas as pd
 import pytest
 
 from causal_pipeline.crossfit import (
+    cluster_robust_standard_error,
     clip_propensity,
     cross_fit_splits,
     maybe_clip_propensity,
     one_versus_control_propensity,
     target_potential_outcomes,
 )
+
+
+@pytest.mark.parametrize("shift", [0.0, 100.0])
+def test_cluster_mean_variance_centers_rows_with_unequal_cluster_sizes(shift: float) -> None:
+    scores = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) + shift
+    groups = np.array([0, 1, 1, 2, 2, 2])
+    # Centered cluster sums are -2.5, -2, 4.5.
+    expected = np.sqrt(1.5 * (2.5**2 + 2.0**2 + 4.5**2)) / 6
+    assert cluster_robust_standard_error(scores, groups) == pytest.approx(expected)
+    assert cluster_robust_standard_error(np.ones(6) + shift, groups) == pytest.approx(0.0)
 
 
 def test_maybe_clip_propensity_is_identity_when_bounds_are_none() -> None:

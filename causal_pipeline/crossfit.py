@@ -49,7 +49,8 @@ def normal_interval_from_scores(
 
 def cluster_robust_standard_error(scores: np.ndarray, groups: np.ndarray) -> float:
     """Liang-Zeger standard error for a mean when rows are independent across groups."""
-    totals = pd.DataFrame({"score": scores, "group": groups}).groupby("group")["score"].sum()
+    residuals = np.asarray(scores, dtype=float) - float(np.mean(scores))
+    totals = pd.DataFrame({"score": residuals, "group": groups}).groupby("group")["score"].sum()
     n_groups = len(totals)
     if n_groups < MINIMUM_CROSSFIT_FOLDS:
         raise ValueError("Cluster-robust intervals need at least two groups.")

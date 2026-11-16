@@ -261,6 +261,13 @@ class DoubleMLATEEstimatorSpec(EstimatorAliasMixin):
     confidence_level: ConfidenceLevel = DEFAULT_ATE_CONFIDENCE_LEVEL
     estimand: str = DEFAULT_ESTIMAND_ATE
 
+    @field_validator("n_rep")
+    @classmethod
+    def validate_single_repetition(cls, value: int) -> int:
+        if value != DEFAULT_DML_N_REP:
+            raise ValueError("DML estimators require n_rep=1; repeated cross-fitting is not supported.")
+        return value
+
     @model_validator(mode="after")
     def validate_propensity_bounds(self) -> DoubleMLATEEstimatorSpec:
         validate_probability_bounds(self.clip_bounds, "clip_bounds")
@@ -508,6 +515,16 @@ class PipelineConfig(BaseModel):
             split_keys = [(split.column, split.cutoff) for split in self.subgroup_splits]
             if len(split_keys) != len(set(split_keys)):
                 raise ValueError("Subgroup splits must be unique column and cutoff pairs.")
+            incompatible = [
+                spec.kind.value for spec in self.ate_estimators or []
+                if spec.kind not in {ATEKind.AIPW, ATEKind.DML_IRM}
+            ]
+            if incompatible:
+                raise ValueError(
+                    "subgroup_splits supports only AIPW and DML-IRM ATE estimators; "
+                    f"incompatible estimator(s): {', '.join(incompatible)}. "
+                    "Remove subgroup_splits or use only aipw and dml_irm estimators."
+                )
 
         if self.cate_evaluation is not None and not cate_configured and not policy_configured:
             raise ValueError(

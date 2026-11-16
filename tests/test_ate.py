@@ -23,8 +23,46 @@ from causal_pipeline.config import (
     IPWATEEstimatorSpec,
     OutcomeType,
     TreatmentMode,
+    SubgroupSplit,
 )
 from causal_pipeline.data import CausalDataset
+from causal_pipeline.subgroup import subgroup_split_table
+
+
+@pytest.mark.parametrize("kind", [ATEKind.AIPW, ATEKind.DML_IRM])
+def test_supported_scores_recover_heterogeneous_subgroup_ates(kind: ATEKind) -> None:
+    generator = np.random.default_rng(42)
+    subgroup = np.repeat([0, 1], 1500)
+    treatment = generator.binomial(1, 0.5, size=len(subgroup))
+    frame = pd.DataFrame({
+        "x": subgroup, "t": treatment,
+        "y": 10.0 * subgroup + treatment * (1.0 + 2.0 * subgroup),
+    })
+    dataset = CausalDataset(data=DataConfig(
+        outcome="y", treatment="t", confounders=["x"], effect_modifiers=["x"],
+        outcome_type=OutcomeType.CONTINUOUS, treatment_mode=TreatmentMode.BINARY,
+        control_value=0, treatment_values=[0, 1],
+    ), df=frame)
+    arguments = dict(kind=kind, outcome_learner="linear", propensity_learner="linear", n_folds=2)
+    spec = (
+        DoublyRobustATEEstimatorSpec(**arguments) if kind == ATEKind.AIPW
+        else DoubleMLATEEstimatorSpec(**arguments)
+    )
+    estimator = initialize_ate_estimator(spec=spec, data=dataset).fit(dataset)
+    scores = estimator.treatment_contrast_scores()
+    assert scores.values.shape == (len(frame), 1)
+    if kind == ATEKind.DML_IRM:
+        assert not estimator.model.normalize_ipw
+        assert np.allclose(scores.values.iloc[:, 0], estimator.model.psi_elements["psi_b"][:, 0, 0])
+        assert np.allclose(estimator.model.psi_elements["psi_a"], -1.0)
+    table = subgroup_split_table(
+        dataset=dataset, splits=[SubgroupSplit(column="x", cutoff=0.5)],
+        scores=scores, estimator_id=kind.value,
+    )
+    assert len(table) == 1
+    assert table.iloc[0]["effect_below"] == pytest.approx(1.0, abs=0.1)
+    assert table.iloc[0]["effect_above"] == pytest.approx(3.0, abs=0.1)
+    assert table.iloc[0]["effect_difference"] == pytest.approx(2.0, abs=0.1)
 
 
 def test_orthogonal_scores_follow_the_median_repetition() -> None:

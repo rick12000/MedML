@@ -118,7 +118,7 @@ def run_setting(
         CATEEvaluationConfig(propensity_learner=BASE_LEARNER, outcome_learner=BASE_LEARNER)
     )
     scores = evaluator.build_test_validation_scores(
-        estimation=estimation, test=test, signal=_signal()
+        estimation=estimation, test=test, signal=_signal(), include_control_outcome=True,
     )
     report = evaluate_policy_values(
         policies=policies,

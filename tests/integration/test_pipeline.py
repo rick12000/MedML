@@ -28,6 +28,8 @@ from causal_pipeline.config import (
     SensitivityConfig,
     SplitConfig,
     TreatmentMode,
+    NuisanceScreenConfig,
+    SubgroupSplit,
 )
 from causal_pipeline.pipeline import CausalPipeline
 from causal_pipeline.utils import read_dataframe
@@ -51,6 +53,43 @@ INTEGRATION_CATE_KINDS = [
     CATEKind.DR_LEARNER,
     CATEKind.CAUSAL_FOREST,
 ]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", [ATEKind.AIPW, ATEKind.DML_IRM])
+def test_pipeline_publishes_clustered_subgroup_effects(kind: ATEKind, test_output_dir: Path) -> None:
+    generator = np.random.default_rng(52)
+    patient = np.repeat(np.arange(1000), np.tile([1, 2, 3, 4], 250))
+    subgroup = patient % 2
+    treatment = generator.binomial(1, 0.5, size=len(patient))
+    frame = pd.DataFrame({
+        "patient": patient, "x": subgroup, "t": treatment,
+        "y": 5.0 * subgroup + treatment * (1.0 + 2.0 * subgroup),
+    })
+    data = DataConfig(
+        outcome="y", treatment="t", confounders=["x"], effect_modifiers=["x"],
+        group_id="patient", outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.BINARY, control_value=0, treatment_values=[0, 1],
+    )
+    arguments = dict(kind=kind, outcome_learner="linear", propensity_learner="linear", n_folds=2)
+    spec = (
+        DoublyRobustATEEstimatorSpec(**arguments) if kind == ATEKind.AIPW
+        else DoubleMLATEEstimatorSpec(**arguments)
+    )
+    config = PipelineConfig(
+        data=data, split=SplitConfig(), ate_estimators=[spec],
+        subgroup_splits=[SubgroupSplit(column="x", cutoff=0.5)],
+        overlap=OverlapConfig(propensity_learner="linear", n_folds=2),
+        nuisance_screen=NuisanceScreenConfig(enabled=False), results_dir=str(test_output_dir),
+    )
+    CausalPipeline(config=config).run(frame)
+    table = read_dataframe(test_output_dir / "ate" / "subgroup_splits.csv")
+    assert len(table) == 2
+    split = table.loc[table["cutoff"].notna()].iloc[0]
+    assert split["n_above"] + split["n_below"] == len(frame)
+    assert split["effect_above"] == pytest.approx(3.0, abs=0.1)
+    assert split["effect_below"] == pytest.approx(1.0, abs=0.1)
+    assert np.isfinite(split[["effect_se", "effect_ci_lower", "effect_ci_upper"]].to_numpy(dtype=float)).all()
 
 
 def pipeline_config(

@@ -428,6 +428,7 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
             n_folds=self.spec.n_folds,
             n_rep=self.spec.n_rep,
             score="ATE",
+            normalize_ipw=False,
             ps_processor_config=doubleml_propensity_processor(self.spec),
         )
         self.model.fit()
@@ -465,10 +466,8 @@ class DoubleMLIRMAdapter(BaseATEEstimator):
         if self.model is None or self.scored_positions is None:
             raise RuntimeError("Estimator is not fitted.")
         contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
-        scores = orthogonal_coefficient_scores(
-            self.model.psi_elements["psi_a"],
-            self.model.psi_elements["psi_b"],
-        )
+        # Unweighted IRM ATE has psi_a=-1; psi_b is the arm-level DR contrast.
+        scores = self.model.psi_elements["psi_b"][:, 0, 0]
         return package_contrast_scores(
             values=pd.DataFrame({contrast: scores}),
             positions=self.scored_positions,

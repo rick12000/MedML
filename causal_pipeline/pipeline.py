@@ -1085,6 +1085,7 @@ class CausalPipeline:
                 estimation=estimation,
                 test=partitions.test,
                 signal=self.config.test_validation_signal,
+                include_control_outcome=True,
             )
             df_policy = self.policy_service.evaluate_policies(
                 policies=policies,

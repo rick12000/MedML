@@ -17,6 +17,7 @@ from causal_pipeline.config import (
     DataConfig,
     ImputationConfig,
     IPWATEEstimatorSpec,
+    DoublyRobustATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     NuisanceScreenConfig,
     OverlapConfig,
@@ -155,10 +156,11 @@ def test_imputed_pipeline_pools_the_ate_and_skips_policy(
         split=SplitConfig(test_fraction=0.25),
         overlap=OverlapConfig(n_folds=PIPELINE_FOLDS, propensity_learner="linear"),
         ate_estimators=[
-            IPWATEEstimatorSpec(
-                kind=ATEKind.IPW,
+            DoublyRobustATEEstimatorSpec(
+                kind=ATEKind.AIPW,
                 n_folds=PIPELINE_FOLDS,
                 propensity_learner="linear",
+                outcome_learner="linear",
             )
         ],
         subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],

@@ -1,9 +1,8 @@
 """Held-out policy values: each policy and each reference treatment on the same patients.
 
-Every candidate assigns one treatment to each held-out patient. The patient's realized
-gain is the oriented doubly robust score for that treatment, on the incremental scale
-where control is zero. Differences between candidates are paired patient-level means,
-so their intervals use the same bootstrap resamples for both sides.
+Fixed policies use oriented doubly robust treatment contrasts relative to control.
+Observed treatment practice uses observed outcome minus the control-outcome DR score.
+Differences are paired patient-level means, with shared bootstrap resamples.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from causal_pipeline.config import ArbitraryTypesModel, JsonValue
 from causal_pipeline.crossfit import dataset_groups
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.estimator_identity import normalize_estimator_alias
-from causal_pipeline.evaluation import resample_positions
+from causal_pipeline.evaluation import CONTROL_OUTCOME_SCORE, resample_positions
 from causal_pipeline.policy import (
     BOOTSTRAP_CI_LOWER_PERCENTILE,
     BOOTSTRAP_CI_UPPER_PERCENTILE,
@@ -93,10 +92,15 @@ def make_assignment(
     )
 
 
-def baseline_assignments(dataset: CausalDataset, gains: pd.DataFrame) -> list[PolicyAssignment]:
-    """Never treat, treat everyone with each non-control arm, and the observed treatments."""
+def baseline_assignments(
+    dataset: CausalDataset, gains: pd.DataFrame, control_outcome_scores: np.ndarray,
+) -> list[PolicyAssignment]:
+    """Reference policies, with observed gain estimated as Y minus the control DR score."""
     control = dataset.control_value
     sample_size = len(dataset.df)
+    control_scores = np.asarray(control_outcome_scores, dtype=float)
+    if control_scores.shape != (sample_size,) or not np.isfinite(control_scores).all():
+        raise ValueError("Control-outcome scores must be finite and aligned to the evaluation rows.")
     assignments = [
         make_assignment(
             name=NEVER_TREAT,
@@ -121,13 +125,14 @@ def baseline_assignments(dataset: CausalDataset, gains: pd.DataFrame) -> list[Po
             )
         )
     assignments.append(
-        make_assignment(
+        PolicyAssignment(
             name=OBSERVED,
             method=OBSERVED,
             source_cate_model=None,
             treatment=dataset.treatment_series.to_numpy(dtype=object),
-            gains=gains,
-            control_value=control,
+            gain=reward_direction(dataset.data.outcome_favorability)
+            * (dataset.outcome_series.to_numpy(dtype=float) - control_scores),
+            share_treated=float(np.mean(dataset.treatment_series.to_numpy() != control)),
         )
     )
     return assignments
@@ -224,7 +229,15 @@ def evaluate_policy_values(
         len(test.df),
     )
     gains = benefit_matrix(scores=test_scores, dataset=test)
-    baselines = baseline_assignments(dataset=test, gains=gains)
+    if CONTROL_OUTCOME_SCORE not in test_scores.columns:
+        raise ValueError(
+            "Observed-policy comparison requires control-outcome DR scores. "
+            "Build test validation scores with include_control_outcome=True."
+        )
+    baselines = baseline_assignments(
+        dataset=test, gains=gains,
+        control_outcome_scores=test_scores[CONTROL_OUTCOME_SCORE].to_numpy(dtype=float),
+    )
     learned = [learned_assignment(policy=policy, dataset=test, gains=gains) for policy in policies]
     assignments = [*baselines, *learned]
     table = policy_value_table(

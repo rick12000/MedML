@@ -16,6 +16,7 @@ from causal_pipeline.config import (
 )
 from causal_pipeline.data import CausalDataset
 from causal_pipeline.evaluation import (
+    CONTROL_OUTCOME_SCORE,
     RATE_WEIGHTING_AUTOC,
     RATE_WEIGHTING_QINI,
     CATEEvaluator,
@@ -29,6 +30,41 @@ from causal_pipeline.evaluation import (
     resample_positions,
     targeting_operator_curve,
 )
+from causal_pipeline.policy_value import evaluate_policy_values
+
+
+@pytest.mark.parametrize("signal", list(TestValidationSignal))
+@pytest.mark.parametrize("levels", [[0, 1], [0, 1, 2]])
+def test_policy_scores_preserve_control_outcome_for_observed_comparison(
+    signal: TestValidationSignal, levels: list[int],
+) -> None:
+    treatment = np.tile(levels, 40)
+    frame = pd.DataFrame({
+        "x": np.linspace(-1.0, 1.0, len(treatment)),
+        "t": treatment, "y": 5.0 + 2.0 * treatment,
+    })
+    control = levels[-1]
+    data = DataConfig(
+        outcome="y", treatment="t", confounders=["x"], effect_modifiers=["x"],
+        outcome_type=OutcomeType.CONTINUOUS,
+        treatment_mode=TreatmentMode.BINARY if len(levels) == 2 else TreatmentMode.MULTI,
+        control_value=control, treatment_values=levels,
+    )
+    dataset = CausalDataset(data=data, df=frame)
+    evaluator = CATEEvaluator(evaluation=CATEEvaluationConfig(
+        propensity_learner="linear", outcome_learner="linear", dr_crossfit_folds=2,
+    ))
+    scores = evaluator.build_test_validation_scores(
+        estimation=dataset, test=dataset, signal=signal, include_control_outcome=True,
+    )
+    assert scores.shape == (len(frame), len(levels))
+    assert np.allclose(scores[CONTROL_OUTCOME_SCORE], 5.0 + 2.0 * control)
+    report = evaluate_policy_values(
+        policies=[], test=dataset, test_scores=scores, bootstrap_samples=20, random_state=0,
+    )
+    assert report.assignments["observed"].gain.mean() == pytest.approx(
+        frame["y"].mean() - (5.0 + 2.0 * control)
+    )
 from causal_pipeline.figures import (
     CalibrationSeries,
     RankingSeries,

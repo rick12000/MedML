@@ -15,6 +15,7 @@ from causal_pipeline.config import (
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
     DoubleMLATEEstimatorSpec,
+    DoublyRobustATEEstimatorSpec,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
     OutcomeType,
@@ -24,6 +25,47 @@ from causal_pipeline.config import (
     TreatmentMode,
     predict_outcome_mean,
 )
+
+
+@pytest.mark.parametrize("kind", list(ATEKind))
+def test_subgroup_estimator_compatibility_is_validated_early(
+    kind: ATEKind, binary_data_config: DataConfig,
+) -> None:
+    if kind == ATEKind.IPW:
+        spec = IPWATEEstimatorSpec(kind=kind)
+    elif kind in {ATEKind.AIPW, ATEKind.TMLE}:
+        spec = DoublyRobustATEEstimatorSpec(kind=kind)
+    else:
+        spec = DoubleMLATEEstimatorSpec(kind=kind)
+    config = dict(
+        data=binary_data_config, split=SplitConfig(), ate_estimators=[spec],
+        subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],
+    )
+    if kind in {ATEKind.AIPW, ATEKind.DML_IRM}:
+        assert PipelineConfig(**config).subgroup_splits
+    else:
+        with pytest.raises(ValueError, match="supports only AIPW and DML-IRM"):
+            PipelineConfig(**config)
+
+
+@pytest.mark.parametrize("kind", [ATEKind.DML_IRM, ATEKind.DML_PLR, ATEKind.DML_APOS])
+def test_dml_rejects_repeated_splitting(kind: ATEKind) -> None:
+    with pytest.raises(ValueError, match="n_rep=1"):
+        DoubleMLATEEstimatorSpec(kind=kind, n_rep=2)
+
+
+def test_subgroups_reject_mixed_compatible_and_incompatible_estimators(
+    binary_data_config: DataConfig,
+) -> None:
+    with pytest.raises(ValueError, match="incompatible estimator\\(s\\): ipw"):
+        PipelineConfig(
+            data=binary_data_config, split=SplitConfig(),
+            ate_estimators=[
+                DoublyRobustATEEstimatorSpec(kind=ATEKind.AIPW),
+                IPWATEEstimatorSpec(kind=ATEKind.IPW),
+            ],
+            subgroup_splits=[SubgroupSplit(column="x1", cutoff=0.0)],
+        )
 
 
 def test_pipeline_config_accepts_valid_no_policy_split(

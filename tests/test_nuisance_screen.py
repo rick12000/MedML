@@ -62,11 +62,47 @@ def test_nuisance_screen_writes_test_metrics(
     assert shap_plot.exists()
     assert correlation.exists()
     assert correlation_plot.exists()
+    summary = pd.read_csv(test_output_dir / "nuisance_screen" / "nuisance_performance_summary.csv")
+    assert list(summary.columns) == ["role", "learner", "task", "auc", "brier", "r2", "rmse"]
+    assert len(summary) == 2
+    assert set(summary["task"]) == {"classification"}
+    assert summary["auc"].notna().all()
+    assert summary["brier"].notna().all()
     table = pd.read_csv(correlation)
     assert list(table["alias"]) == list(range(1, len(table) + 1))
     assert {"x1", "t", "y"}.issubset(set(table["variable"]))
     outcome_alias = str(int(table.loc[table["variable"] == "y", "alias"].iloc[0]))
     assert float(table.loc[table["variable"] == "y", outcome_alias].iloc[0]) == 1.0
+
+
+def test_nuisance_performance_summary_reports_regression_metrics(
+    constant_effect_cohort,
+    recovery_data_config,
+    test_output_dir: Path,
+) -> None:
+    frame, _ = constant_effect_cohort
+    dataset = CausalDataset(data=recovery_data_config, df=frame)
+    screen = NuisanceScreenConfig(
+        test_fraction=0.2,
+        validation_fraction=0.25,
+        random_state=0,
+        column_drop_repeats=1,
+        outcome_learner="linear",
+    )
+    run_nuisance_screen(
+        dataset=dataset,
+        screen=screen,
+        results_root=test_output_dir,
+        propensity_learner=build_learner("linear", "classification", random_state=0),
+        outcome_learners=[build_learner("linear", "regression", random_state=0)],
+    )
+    summary = pd.read_csv(test_output_dir / "nuisance_screen" / "nuisance_performance_summary.csv")
+    outcome = summary.loc[summary["role"] == "outcome"].iloc[0]
+    assert outcome["task"] == "regression"
+    assert np.isfinite(outcome["r2"])
+    assert np.isfinite(outcome["rmse"])
+    assert pd.isna(outcome["auc"])
+    assert pd.isna(outcome["brier"])
 
 
 def test_correlation_export_aliases_a_wide_matrix(tmp_path: Path) -> None:

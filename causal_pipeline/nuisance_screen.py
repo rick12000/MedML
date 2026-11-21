@@ -15,6 +15,7 @@ import pandas as pd
 import shap
 from sklearn.base import BaseEstimator, clone
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import brier_score_loss, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from xgboost import XGBClassifier, XGBRegressor
 
@@ -87,7 +88,7 @@ def run_nuisance_screen(
         validation_fraction=screen.validation_fraction,
         random_state=screen.random_state,
     )
-    fit_role(
+    summary_rows = [fit_role(
         role="propensity",
         learner=propensity_learner,
         split=split,
@@ -99,7 +100,7 @@ def run_nuisance_screen(
         column_drop_repeats=screen.column_drop_repeats,
         column_drop_top_features=screen.column_drop_top_features,
         destination=root / "propensity" / learner_directory_name(propensity_learner),
-    )
+    )]
     outcome_frame = outcome_design(
         covariates=covariates,
         treatment=treatment,
@@ -110,7 +111,7 @@ def run_nuisance_screen(
     used_names: set[str] = set()
     for learner in outcome_learners:
         directory_name = learner_directory_name(learner, used_names)
-        fit_role(
+        summary_rows.append(fit_role(
             role="outcome",
             learner=learner,
             split=outcome_split,
@@ -122,7 +123,8 @@ def run_nuisance_screen(
             column_drop_repeats=screen.column_drop_repeats,
             column_drop_top_features=screen.column_drop_top_features,
             destination=root / "outcome" / directory_name,
-        )
+        ))
+    write_dataframe(root / "nuisance_performance_summary.csv", pd.DataFrame(summary_rows))
     logger.info("Wrote nuisance screens under %s", root)
     logger.info("...Finished nuisance learner screens")
 
@@ -380,7 +382,7 @@ def fit_role(
     column_drop_repeats: int,
     column_drop_top_features: int,
     destination: Path,
-) -> None:
+) -> dict[str, object]:
     train_features = split.train.loc[:, feature_columns]
     validation_features = split.validation.loc[:, feature_columns]
     test_features = split.test.loc[:, feature_columns]
@@ -410,6 +412,63 @@ def fit_role(
         column_drop_repeats=column_drop_repeats,
         column_drop_top_features=column_drop_top_features,
     )
+    return performance_summary_row(
+        role=role,
+        learner=learner,
+        model=model,
+        features=test_features,
+        labels=split.test[label_column],
+        classification=classification,
+    )
+
+
+def classification_brier(labels: pd.Series, probabilities: pd.DataFrame) -> float | None:
+    """Mean one-vs-rest Brier score across arms that appear in both labels and probabilities."""
+    scores: list[float] = []
+    for arm in probabilities.columns:
+        indicator = (labels == arm).astype(int)
+        if indicator.nunique() < 2:
+            continue
+        scores.append(float(brier_score_loss(indicator, probabilities[arm])))
+    if not scores:
+        return None
+    return float(np.mean(scores))
+
+
+def performance_summary_row(
+    role: str,
+    learner: BaseEstimator,
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    labels: pd.Series,
+    classification: bool,
+) -> dict[str, object]:
+    """Held-out metrics for the joint nuisance performance summary."""
+    name = type(learner).__name__
+    if classification:
+        probabilities = pd.DataFrame(model.predict_proba(features), columns=list(model.classes_))
+        auc = propensity_auc(labels, probabilities)
+        brier = classification_brier(labels, probabilities)
+        return {
+            "role": role,
+            "learner": name,
+            "task": "classification",
+            "auc": np.nan if auc is None else float(auc),
+            "brier": np.nan if brier is None else float(brier),
+            "r2": np.nan,
+            "rmse": np.nan,
+        }
+    observed = labels.to_numpy(dtype=float)
+    predicted = predict_outcome_mean(model, features)
+    return {
+        "role": role,
+        "learner": name,
+        "task": "regression",
+        "auc": np.nan,
+        "brier": np.nan,
+        "r2": float(r2_score(observed, predicted)),
+        "rmse": float(np.sqrt(mean_squared_error(observed, predicted))),
+    }
 
 
 def fit_screen_learner(

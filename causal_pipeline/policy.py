@@ -327,7 +327,7 @@ class PolicyService:
     ) -> FittedPolicy:
         logger.info("Fitting virtual twins for %s...", estimator_id)
         twins = VirtualTwins(
-            tree=DecisionTreeRegressor(),
+            tree=DecisionTreeRegressor(random_state=self.random_state),
             minimum_effect=spec.minimum_effect,
             bootstrap_samples=self.bootstrap_samples,
             random_state=self.random_state,

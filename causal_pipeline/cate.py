@@ -33,6 +33,7 @@ from causal_pipeline.config import (
     CATEKind,
     CausalForestCATEEstimatorSpec,
     CFRNetCATEEstimatorSpec,
+    DEFAULT_LEARNER_RANDOM_STATE,
     DragonNetCATEEstimatorSpec,
     JsonValue,
     MetaCATEEstimatorSpec,
@@ -475,6 +476,7 @@ class CausalForestAdapter(BaseCATEEstimator):
             discrete_treatment=True,
             discrete_outcome=binary_outcome,
             n_jobs=self.forest_n_jobs,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
         )
         features = data.X_effect_modifiers.copy()
         controls = data.X_controls.copy()

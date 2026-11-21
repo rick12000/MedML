@@ -491,6 +491,10 @@ class PipelineConfig(BaseModel):
     cate_crossfit_folds: PositiveInt = DEFAULT_DML_N_FOLDS
     policy_bootstrap_samples: PositiveInt = DEFAULT_POLICY_BOOTSTRAP_SAMPLES
     policy_random_state: int = DEFAULT_POLICY_RANDOM_STATE
+    random_state: int = Field(
+        default=DEFAULT_LEARNER_RANDOM_STATE,
+        description="Seeds NumPy's global generator, which DoubleML fold splitting draws from.",
+    )
     results_dir: str = DEFAULT_RESULTS_DIR
     nuisance_screen: NuisanceScreenConfig = Field(default_factory=NuisanceScreenConfig)
     imputation: ImputationConfig = Field(default_factory=ImputationConfig)

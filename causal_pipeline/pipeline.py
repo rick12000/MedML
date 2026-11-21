@@ -7,6 +7,7 @@ import logging
 import shutil
 import warnings
 from collections.abc import Callable
+from functools import partial
 from enum import StrEnum
 from pathlib import Path
 
@@ -463,6 +464,12 @@ def execute_independent_fit(job: IndependentFit) -> IndependentFitResult:
     )
 
 
+def execute_seeded_fit(job: IndependentFit, random_state: int) -> IndependentFitResult:
+    """Seed NumPy's global generator per job, so results do not depend on worker or job order."""
+    np.random.seed(random_state)
+    return execute_independent_fit(job)
+
+
 def cate_fit_job(
     estimation: CausalDataset,
     results_root: Path,
@@ -800,6 +807,7 @@ class CausalPipeline:
 
     def _run(self, df_input: pd.DataFrame) -> None:
         configure_package_runtime()
+        np.random.seed(self.config.random_state)
         logger.info("Starting causal pipeline run...")
         logger.debug("Input cohort: %s rows, %s columns.", len(df_input), df_input.shape[1])
         sensitivity = self.config.sensitivity
@@ -1013,7 +1021,9 @@ class CausalPipeline:
             parallel=parallel,
         )
         logger.debug("Dispatching %s independent fit jobs", len(jobs))
-        pieces = run_map(execute_independent_fit, jobs, parallel=parallel)
+        pieces = run_map(
+            partial(execute_seeded_fit, random_state=self.config.random_state), jobs, parallel=parallel
+        )
         ate_models, ate_by_estimator, cate_by_estimator, estimation_scores = collect_independent_fits(
             pieces=pieces,
             row_count=len(estimation.df),

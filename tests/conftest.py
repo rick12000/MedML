@@ -16,8 +16,11 @@ from causal_pipeline.config import (
     ATEKind,
     CATEEvaluationConfig,
     CATEKind,
+    CausalForestCATEEstimatorSpec,
     DataConfig,
     DEFAULT_SPLIT_RANDOM_STATE,
+    DoubleMLATEEstimatorSpec,
+    VirtualTwinsMethodSpec,
     OverlapConfig,
     IPWATEEstimatorSpec,
     MetaCATEEstimatorSpec,
@@ -327,6 +330,45 @@ def pipeline_config_with_policy(
         ),
         policy=[PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE)],
         results_dir=str(test_output_dir),
+    )
+
+
+@pytest.fixture
+def reproducibility_config(
+    binary_data_config: DataConfig,
+    test_output_dir: Path,
+) -> PipelineConfig:
+    """Covers the random sources: global NumPy (DoubleML), forests, bootstraps, held-out split."""
+    return PipelineConfig(
+        data=binary_data_config,
+        split=SplitConfig(test_fraction=0.2),
+        overlap=OverlapConfig(propensity_learner="linear", n_folds=2),
+        ate_estimators=[
+            DoubleMLATEEstimatorSpec(
+                kind=ATEKind.DML_IRM, outcome_learner="random_forest", propensity_learner="linear", n_folds=2
+            ),
+            IPWATEEstimatorSpec(kind=ATEKind.IPW, propensity_learner="random_forest", n_folds=2),
+        ],
+        cate_estimators=[
+            MetaCATEEstimatorSpec(kind=CATEKind.X_LEARNER, outcome_learner="xgboost"),
+            CausalForestCATEEstimatorSpec(
+                kind=CATEKind.CAUSAL_FOREST, outcome_learner="linear", propensity_learner="linear"
+            ),
+        ],
+        cate_evaluation=CATEEvaluationConfig(
+            propensity_learner="linear",
+            outcome_learner="xgboost",
+            dr_crossfit_folds=2,
+            rate_bootstrap_samples=TEST_POLICY_BOOTSTRAP_SAMPLES,
+            eceth_bootstrap_samples=TEST_POLICY_BOOTSTRAP_SAMPLES,
+        ),
+        policy=[
+            PolicyTreeMethodSpec(kind=PolicyKind.POLICY_TREE),
+            VirtualTwinsMethodSpec(kind=PolicyKind.VIRTUAL_TWINS),
+        ],
+        cate_crossfit_folds=2,
+        policy_bootstrap_samples=TEST_POLICY_BOOTSTRAP_SAMPLES,
+        results_dir=str(test_output_dir / "first"),
     )
 
 

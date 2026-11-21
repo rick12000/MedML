@@ -100,7 +100,11 @@ def prepare_learner_for_outer_train(
                 validation_features=inner_val,
                 validation_labels=labels.loc[inner_val.index],
             )
-    best_params = run_study(objective=objective, random_state=random_state)
+    best_params = run_study(
+        objective=objective,
+        random_state=random_state,
+        search_target=type(base).__name__,
+    )
     tuned = clone(base)
     tuned.set_params(**best_params)
     return tuned
@@ -233,15 +237,51 @@ def make_tuning_sampler(random_state: int) -> BaseSampler:
     return TPESampler(seed=random_state, n_startup_trials=TUNING_N_STARTUP_TRIALS)
 
 
+def make_tuning_trial_logger(
+    search_target: str,
+) -> Callable[[optuna.Study, optuna.trial.FrozenTrial], None]:
+    def log_tuning_trial(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        if trial.value is None:
+            logger.info(
+                "Hyperparameter trial %s/%s for %s: no score (state=%s)",
+                trial.number + 1,
+                TUNING_N_TRIALS,
+                search_target,
+                trial.state.name,
+            )
+            return
+        logger.info(
+            "Hyperparameter trial %s/%s for %s: score=%.6g (best=%.6g)",
+            trial.number + 1,
+            TUNING_N_TRIALS,
+            search_target,
+            trial.value,
+            study.best_value,
+        )
+
+    return log_tuning_trial
+
+
 def run_study(
     objective: Callable[[optuna.Trial], float],
     random_state: int,
+    *,
+    search_target: str = "learner",
 ) -> dict[str, object]:
-    logger.debug("Running hyperparameter search (%s trials)", TUNING_N_TRIALS)
+    logger.info("Hyperparameter search for %s (%s trials)...", search_target, TUNING_N_TRIALS)
     sampler = make_tuning_sampler(random_state=random_state)
     study = optuna.create_study(direction="maximize", sampler=sampler)
-    study.optimize(objective, n_trials=TUNING_N_TRIALS, show_progress_bar=False)
-    logger.debug("Finished hyperparameter search")
+    study.optimize(
+        objective,
+        n_trials=TUNING_N_TRIALS,
+        show_progress_bar=False,
+        callbacks=[make_tuning_trial_logger(search_target)],
+    )
+    logger.info(
+        "...finished hyperparameter search for %s (best score=%.6g)",
+        search_target,
+        study.best_value,
+    )
     return study.best_params
 
 

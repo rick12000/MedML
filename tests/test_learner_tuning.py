@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from optuna.samplers import GPSampler, TPESampler
 from sklearn.linear_model import LogisticRegression
 
@@ -13,6 +15,7 @@ from causal_pipeline.learner_tuning import (
     make_tuning_sampler,
     prepare_learner_for_outer_train,
     resolve_cate_learners,
+    run_study,
 )
 
 
@@ -36,6 +39,21 @@ def test_prepare_learner_skips_study_when_tuning_disabled(
 
 def test_tuning_trial_budget_is_thirty_inclusive() -> None:
     assert TUNING_N_TRIALS == 30
+
+
+def test_run_study_logs_each_trial_score(monkeypatch, caplog) -> None:
+    monkeypatch.setattr("causal_pipeline.learner_tuning.TUNING_N_TRIALS", 2)
+
+    def objective(trial):
+        return float(trial.suggest_float("x", 0.0, 1.0))
+
+    with caplog.at_level(logging.INFO, logger="causal_pipeline.learner_tuning"):
+        run_study(objective, random_state=0, search_target="Ridge")
+
+    assert "Hyperparameter search for Ridge (2 trials)..." in caplog.text
+    assert "Hyperparameter trial 1/2 for Ridge: score=" in caplog.text
+    assert "Hyperparameter trial 2/2 for Ridge: score=" in caplog.text
+    assert "...finished hyperparameter search for Ridge (best score=" in caplog.text
 
 
 def test_make_tuning_sampler_uses_tpe_without_torch(monkeypatch) -> None:

@@ -500,6 +500,7 @@ class PipelineConfig(BaseModel):
     imputation: ImputationConfig = Field(default_factory=ImputationConfig)
     tune_estimators: bool = DEFAULT_TUNE_ESTIMATORS
     parallel: bool = DEFAULT_PARALLEL
+    figure_format: Literal["png", "pdf"] = "png"
 
     @model_validator(mode="after")
     def validate_pipeline_contract(self) -> PipelineConfig:

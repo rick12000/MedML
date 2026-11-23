@@ -36,9 +36,10 @@ from causal_pipeline.figures import (
     row_positions,
     style_diagnostic_axis,
 )
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import figure_file, save_figure
 
-COVARIATE_BALANCE_FIGURE_NAME = "covariate_balance.png"
+COVARIATE_BALANCE_STEM = "covariate_balance"
+COVARIATE_BALANCE_FIGURE_NAME = figure_file(COVARIATE_BALANCE_STEM)
 DEFAULT_MAX_COVARIATES = 10
 REQUIRED_COLUMNS = ("covariate", "unweighted_smd", "weighted_smd")
 UNADJUSTED_LABEL = "Unadjusted"

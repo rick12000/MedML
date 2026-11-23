@@ -187,7 +187,7 @@ def test_pipeline_recovers_constant_effect(
     assert (test_output_dir / "data" / "estimation.parquet").is_file()
     assert (test_output_dir / "summary" / "ate_intervals.png").is_file()
     assert (test_output_dir / "summary" / "cate_mean_effects.png").is_file()
-    assert (contrast_dir / "evaluation.png").is_file()
+    assert (contrast_dir / "cate_evaluation.png").is_file()
     assert (contrast_dir / "toc.csv").is_file()
     assert (contrast_dir / "calibration.csv").is_file()
     s_learner_id = cate_summary.loc[cate_summary["estimator_kind"] == "s_learner", "estimator"].iloc[0]

@@ -92,7 +92,7 @@ from causal_pipeline.policy import (
     PolicyService,
 )
 from causal_pipeline.policy_figures import (
-    POLICY_TREE_FIGURE_NAME,
+    POLICY_TREE_STEM,
     policy_slice_slug,
     save_policy_slice_figure,
 )
@@ -101,7 +101,7 @@ from causal_pipeline.policy_value import (
     evaluate_policy_values,
     patient_assignment_table,
 )
-from causal_pipeline.policy_value_figures import POLICY_VALUE_FIGURE_NAME, plot_policy_value_table
+from causal_pipeline.policy_value_figures import POLICY_VALUE_STEM, plot_policy_value_table
 from causal_pipeline.results import ResultStore
 from causal_pipeline.selection import (
     plot_tipping_point,
@@ -112,7 +112,7 @@ from causal_pipeline.selection import (
 from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
 from causal_pipeline.subgroup_figures import write_subgroup_figures
 from causal_pipeline.logging_config import configure_package_runtime
-from causal_pipeline.utils import read_dataframe, write_dataframe
+from causal_pipeline.utils import figure_file, read_dataframe, write_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +246,7 @@ class IndependentFit(ArbitraryTypesModel):
     propensity_learner: BaseEstimator | None
     outcome_learners: tuple[BaseEstimator, ...]
     evaluator: CATEEvaluator | None
+    figure_format: str = "png"
     held_out: CausalDataset | None = None
     held_out_positions: np.ndarray | None = None
 
@@ -395,6 +396,7 @@ def execute_independent_fit(job: IndependentFit) -> IndependentFitResult:
             results_root=job.results_root,
             propensity_learner=job.propensity_learner,
             outcome_learners=list(job.outcome_learners),
+            figure_format=job.figure_format,
         )
         return IndependentFitResult(
             kind=job.kind,
@@ -514,6 +516,7 @@ def independent_fit_jobs(
     split_random_state: int,
     evaluator: CATEEvaluator | None,
     parallel: bool,
+    figure_format: str = "png",
 ) -> list[IndependentFit]:
     fold_widths = [cate_map_width(spec=spec, parallel=parallel, n_folds=cate_folds) for _, spec in cate_runs]
     n_tasks = len(ate_runs) + sum(fold_widths)
@@ -560,6 +563,7 @@ def independent_fit_jobs(
                     ),
                 ),
                 evaluator=None,
+                figure_format=figure_format,
             )
         )
     for estimator_id, spec in ate_runs:
@@ -768,6 +772,7 @@ class CausalPipeline:
         self.overlap = overlap_preprocessor or OverlapPreprocessor(
             overlap=config.overlap,
             minimum_folds=minimum_groups_for_crossfit(config),
+            figure_format=config.figure_format,
         )
         if sensitivity_analyzer is not None:
             self.sensitivity_analyzer = sensitivity_analyzer
@@ -1019,6 +1024,7 @@ class CausalPipeline:
             split_random_state=self.config.split.random_state,
             evaluator=self.evaluator if score_cate else None,
             parallel=parallel,
+            figure_format=self.config.figure_format,
         )
         logger.debug("Dispatching %s independent fit jobs", len(jobs))
         pieces = run_map(
@@ -1075,6 +1081,7 @@ class CausalPipeline:
                 results_root=results.root,
                 outcome_favorability=estimation.data.outcome_favorability,
                 groups=dataset_groups(estimation),
+                figure_format=self.config.figure_format,
             )
             self.persist_cate_evaluation(cate_evaluation=cate_evaluation, results=results)
 
@@ -1112,7 +1119,9 @@ class CausalPipeline:
             results.write_dataframe("policy/value_comparison.csv", policy_values.table)
             plot_policy_value_table(
                 table=policy_values.table,
-                save_path=str(results.root / "policy" / POLICY_VALUE_FIGURE_NAME),
+                save_path=str(
+                    results.root / "policy" / figure_file(POLICY_VALUE_STEM, self.config.figure_format)
+                ),
             )
             self.persist_policy_artifacts(
                 policies=policies,
@@ -1247,7 +1256,10 @@ class CausalPipeline:
                                 save_path=str(
                                     results.ate_dir(estimator_id)
                                     / "selection"
-                                    / f"tipping_{estimate_row['contrast']}.png"
+                                    / figure_file(
+                                        f"tipping_{estimate_row['contrast']}",
+                                        self.config.figure_format,
+                                    )
                                 ),
                             )
                     write_dataframe(
@@ -1322,6 +1334,7 @@ class CausalPipeline:
                 table=df_subgroups,
                 split_order=[(split.column, split.cutoff) for split in splits],
                 output_dir=results.root / "ate",
+                figure_format=self.config.figure_format,
             )
             logger.info("...Finished estimating pre-specified subgroup splits")
         return df_subgroups
@@ -1442,7 +1455,7 @@ class CausalPipeline:
                 train_scores=df_estimation_scores,
                 test=test,
                 test_scores=df_test_scores,
-                save_path=str(slice_dir / POLICY_TREE_FIGURE_NAME),
+                save_path=str(slice_dir / figure_file(POLICY_TREE_STEM, self.config.figure_format)),
             )
         logger.info("Saved policy slice tables and figures under %s", results.root / "policy")
 
@@ -1457,13 +1470,13 @@ class CausalPipeline:
         ate_for_figure = drop_nonfinite_effect_estimates(
             ate_summary,
             "estimate",
-            figure_name="ate_intervals.png",
+            figure_name=figure_file("ate_intervals", self.config.figure_format),
         )
         if not ate_for_figure.empty:
             wrote_figure = True
             plot_interval_estimates(
                 estimates=ate_for_figure,
-                save_path=str(summary_dir / "ate_intervals.png"),
+                save_path=str(summary_dir / figure_file("ate_intervals", self.config.figure_format)),
                 estimator_column="estimator",
                 contrast_column="contrast",
                 estimate_column="estimate",
@@ -1474,13 +1487,13 @@ class CausalPipeline:
         cate_for_figure = drop_nonfinite_effect_estimates(
             cate_summary,
             "mean_crossfit_cate",
-            figure_name="cate_mean_effects.png",
+            figure_name=figure_file("cate_mean_effects", self.config.figure_format),
         )
         if not cate_for_figure.empty:
             wrote_figure = True
             plot_point_estimates(
                 estimates=cate_for_figure,
-                save_path=str(summary_dir / "cate_mean_effects.png"),
+                save_path=str(summary_dir / figure_file("cate_mean_effects", self.config.figure_format)),
                 estimator_column="estimator",
                 contrast_column="contrast",
                 estimate_column="mean_crossfit_cate",

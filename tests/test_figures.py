@@ -260,7 +260,7 @@ def test_evaluation_figure_puts_calibration_and_ranking_side_by_side(test_output
     plot_evaluation_figure(
         calibration=calibration,
         ranking=ranking,
-        save_path=str(artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "evaluation.png")),
+        save_path=str(artifact_path(test_output_dir, "cate", "comparison", "1_vs_0", "cate_evaluation.png")),
     )
 
 

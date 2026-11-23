@@ -47,10 +47,12 @@ from causal_pipeline.figures import (
 )
 from causal_pipeline.config import ArbitraryTypesModel
 from causal_pipeline.subgroup import ABOVE_CUTOFF_RULE, OVERALL_LABEL
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import DEFAULT_FIGURE_FORMAT, figure_file, save_figure
 
-SUBGROUP_SPLITS_FIGURE_NAME = "subgroup_splits.png"
-SUBGROUP_DIFFERENCES_FIGURE_NAME = "subgroup_differences.png"
+SUBGROUP_SPLITS_STEM = "subgroup_splits"
+SUBGROUP_DIFFERENCES_STEM = "subgroup_differences"
+SUBGROUP_SPLITS_FIGURE_NAME = figure_file(SUBGROUP_SPLITS_STEM)
+SUBGROUP_DIFFERENCES_FIGURE_NAME = figure_file(SUBGROUP_DIFFERENCES_STEM)
 
 DELTA = "Δ"
 ATE_KIND = "ate"
@@ -225,11 +227,16 @@ def write_subgroup_figures(
     table: pd.DataFrame,
     split_order: Sequence[tuple[str, float]],
     output_dir: str | Path,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     """Write both subgroup images into ``output_dir``."""
     output = Path(output_dir)
-    plot_subgroup_splits_table(table, split_order, str(output / SUBGROUP_SPLITS_FIGURE_NAME))
-    plot_subgroup_differences_table(table, split_order, str(output / SUBGROUP_DIFFERENCES_FIGURE_NAME))
+    plot_subgroup_splits_table(
+        table, split_order, str(output / figure_file(SUBGROUP_SPLITS_STEM, figure_format))
+    )
+    plot_subgroup_differences_table(
+        table, split_order, str(output / figure_file(SUBGROUP_DIFFERENCES_STEM, figure_format))
+    )
 
 
 def _save_model(model: TableModel, save_path: str) -> None:

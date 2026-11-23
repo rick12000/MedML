@@ -33,7 +33,7 @@ from causal_pipeline.nuisance_metrics import (
     propensity_auc,
 )
 from causal_pipeline.scaling import ScaledClassifier, ScaledLearner
-from causal_pipeline.utils import save_figure, write_dataframe
+from causal_pipeline.utils import DEFAULT_FIGURE_FORMAT, figure_file, save_figure, write_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ def run_nuisance_screen(
     results_root: Path,
     propensity_learner: BaseEstimator,
     outcome_learners: list[BaseEstimator],
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     """Fit configured nuisances on an internal split of the estimation sample."""
     logger.info("Running nuisance learner screens...")
@@ -79,7 +80,11 @@ def run_nuisance_screen(
     treatment = dataset.treatment_series.copy()
     outcome = dataset.outcome_series.copy()
     binary_outcome = dataset.outcome_type == OutcomeType.BINARY
-    write_correlation(variables=correlation_variables(dataset), destination=root / "correlation")
+    write_correlation(
+        variables=correlation_variables(dataset),
+        destination=root / "correlation",
+        figure_format=figure_format,
+    )
     split = screen_split(
         frame=screen_frame(dataset),
         group_id=dataset.group_id,
@@ -100,6 +105,7 @@ def run_nuisance_screen(
         column_drop_repeats=screen.column_drop_repeats,
         column_drop_top_features=screen.column_drop_top_features,
         destination=root / "propensity" / learner_directory_name(propensity_learner),
+        figure_format=figure_format,
     )]
     outcome_frame = outcome_design(
         covariates=covariates,
@@ -123,6 +129,7 @@ def run_nuisance_screen(
             column_drop_repeats=screen.column_drop_repeats,
             column_drop_top_features=screen.column_drop_top_features,
             destination=root / "outcome" / directory_name,
+            figure_format=figure_format,
         ))
     write_dataframe(root / "nuisance_performance_summary.csv", pd.DataFrame(summary_rows))
     logger.info("Wrote nuisance screens under %s", root)
@@ -260,11 +267,15 @@ def correlation_export(matrix: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-def write_correlation(variables: pd.DataFrame, destination: Path) -> None:
+def write_correlation(
+    variables: pd.DataFrame,
+    destination: Path,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
+) -> None:
     matrix = correlation_matrix(variables)
     write_dataframe(destination / "correlation.csv", correlation_export(matrix))
     figure = plot_correlation(matrix)
-    save_figure(destination / "correlation.png", figure)
+    save_figure(destination / figure_file("correlation", figure_format), figure)
     plt.close(figure)
 
 
@@ -382,6 +393,7 @@ def fit_role(
     column_drop_repeats: int,
     column_drop_top_features: int,
     destination: Path,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> dict[str, object]:
     train_features = split.train.loc[:, feature_columns]
     validation_features = split.validation.loc[:, feature_columns]
@@ -411,6 +423,7 @@ def fit_role(
         random_state=random_state,
         column_drop_repeats=column_drop_repeats,
         column_drop_top_features=column_drop_top_features,
+        figure_format=figure_format,
     )
     return performance_summary_row(
         role=role,
@@ -526,6 +539,7 @@ def write_model_screen(
     random_state: int,
     column_drop_repeats: int,
     column_drop_top_features: int,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     del role
     score = validation_score(
@@ -549,7 +563,13 @@ def write_model_screen(
             destination / "gain_importance.csv",
             importance.sort_values("gain_importance", ascending=False),
         )
-    write_shap(model=model, features=features, destination=destination, random_state=random_state)
+    write_shap(
+        model=model,
+        features=features,
+        destination=destination,
+        random_state=random_state,
+        figure_format=figure_format,
+    )
     write_column_drop_importance(
         learner=learner,
         training_features=training_features,
@@ -562,6 +582,7 @@ def write_model_screen(
         top_features=column_drop_top_features,
         destination=destination,
         random_state=random_state,
+        figure_format=figure_format,
     )
 
 
@@ -668,6 +689,7 @@ def write_column_drop_importance(
     top_features: int,
     destination: Path,
     random_state: int,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     table = column_drop_importance_table(
         learner=learner,
@@ -688,7 +710,7 @@ def write_column_drop_importance(
         table=ranked,
         metric_name=metric_name,
         top_features=top_features,
-        destination=destination / "column_drop_importance.png",
+        destination=destination / figure_file("column_drop_importance", figure_format),
     )
 
 
@@ -726,16 +748,17 @@ def write_shap(
     features: pd.DataFrame,
     destination: Path,
     random_state: int,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     sample = features.sample(n=min(SHAP_ROW_LIMIT, len(features)), random_state=random_state)
     values = shap_matrix(model=model, sample=sample)
     table = pd.DataFrame(values, columns=list(sample.columns))
     write_dataframe(destination / "shap_values.csv", table)
     shap.summary_plot(values, sample, show=False)
-    save_figure(destination / "shap_summary.png", plt.gcf())
+    save_figure(destination / figure_file("shap_summary", figure_format), plt.gcf())
     plt.close("all")
     shap.summary_plot(values, sample, plot_type="bar", show=False)
-    save_figure(destination / "shap_bar.png", plt.gcf())
+    save_figure(destination / figure_file("shap_bar", figure_format), plt.gcf())
     plt.close("all")
 
 

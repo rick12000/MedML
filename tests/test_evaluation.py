@@ -320,7 +320,7 @@ def test_evaluate_cate_models_writes_pipeline_style_artifacts(
     )
     assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "toc.csv").is_file()
     assert (test_output_dir / "cate" / "t_learner" / "1_vs_0" / "calibration.csv").is_file()
-    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "evaluation.png").is_file()
+    assert (test_output_dir / "cate" / "comparison" / "1_vs_0" / "cate_evaluation.png").is_file()
 
 
 def calibration_from_rows(estimator_id: str, rows: list[dict[str, float]]) -> CalibrationSeries:
@@ -368,7 +368,7 @@ def test_prioritization_matches_the_oracle_ranking(
         fitted_rows = calibration_bin_rows(tau_hat=score, gamma=proxy, n_bins=CALIBRATION_BINS)
         oracle_rows = calibration_bin_rows(tau_hat=oracle_score, gamma=truth, n_bins=CALIBRATION_BINS)
         for name, file_name, fraction_values, toc_values, rows in (
-            (label, "evaluation.png", estimated_fraction, estimated_toc, fitted_rows),
+            (label, "cate_evaluation.png", estimated_fraction, estimated_toc, fitted_rows),
             (f"{label}_oracle", "evaluation_oracle.png", oracle_fraction, oracle_value, oracle_rows),
         ):
             plot_evaluation_figure(

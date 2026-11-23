@@ -32,9 +32,11 @@ from causal_pipeline.learners import build_learner, outcome_task
 from causal_pipeline.nuisance_metrics import log_crossfit_nuisances
 from causal_pipeline.policy import reward_direction
 from causal_pipeline.scaling import clone_scaled_estimator
-from causal_pipeline.utils import write_dataframe
+from causal_pipeline.utils import DEFAULT_FIGURE_FORMAT, figure_file, write_dataframe
 
 logger = logging.getLogger(__name__)
+
+CATE_EVALUATION_STEM = "cate_evaluation"
 
 
 def evaluation_learner_templates(
@@ -225,6 +227,7 @@ def save_comparison_figures(
     ranking_by_contrast: dict[str, list[RankingSeries]],
     calibration_by_contrast: dict[str, list[CalibrationSeries]],
     results_root: Path,
+    figure_format: str = DEFAULT_FIGURE_FORMAT,
 ) -> None:
     """One figure per contrast, with every estimator in it, plus the CSVs behind it."""
     for contrast, ranking in ranking_by_contrast.items():
@@ -233,7 +236,7 @@ def save_comparison_figures(
         plot_evaluation_figure(
             calibration=calibration,
             ranking=ranking,
-            save_path=str(comparison / "evaluation.png"),
+            save_path=str(comparison / figure_file(CATE_EVALUATION_STEM, figure_format)),
         )
         write_ranking_curve_data(comparison / "toc.csv", ranking)
         write_calibration_curve_data(comparison / "calibration.csv", calibration)
@@ -425,6 +428,7 @@ class CATEEvaluator:
         results_root: Path,
         outcome_favorability: OutcomeFavorability = OutcomeFavorability.HIGHER_IS_BETTER,
         groups: np.ndarray | pd.Series | None = None,
+        figure_format: str = DEFAULT_FIGURE_FORMAT,
     ) -> dict[str, list[ContrastEvaluation]]:
         logger.info(
             "Evaluating CATE models on the estimation sample (%s estimators)...",
@@ -527,6 +531,7 @@ class CATEEvaluator:
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results_root,
+            figure_format=figure_format,
         )
         logger.info("...Finished evaluating CATE models on the estimation sample")
         return results

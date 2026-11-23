@@ -8,10 +8,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from causal_pipeline.balance_figures import COVARIATE_BALANCE_FIGURE_NAME, plot_covariate_balance
+from causal_pipeline.balance_figures import COVARIATE_BALANCE_STEM, plot_covariate_balance
 from causal_pipeline.cate import mean_cate_table
 from causal_pipeline.config import DEFAULT_ATE_CONFIDENCE_LEVEL, ArbitraryTypesModel, PipelineConfig
-from causal_pipeline.diagnostics import DIAGNOSTIC_PAIR_FIGURE_NAME, plot_diagnostic_pair, plot_overlap
+from causal_pipeline.diagnostics import (
+    DIAGNOSTICS_DIRNAME,
+    PROPENSITY_BALANCE_STEM,
+    PROPENSITY_OVERLAP_STEM,
+    plot_diagnostic_pair,
+    plot_overlap,
+)
 from causal_pipeline.estimator_identity import assign_estimator_ids, attach_estimator_metadata
 from causal_pipeline.evaluation import (
     ContrastEvaluation,
@@ -30,7 +36,7 @@ from causal_pipeline.pooling import (
 )
 from causal_pipeline.results import ResultStore
 from causal_pipeline.subgroup_figures import write_subgroup_figures
-from causal_pipeline.utils import read_dataframe, write_dataframe
+from causal_pipeline.utils import figure_file, read_dataframe, write_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ def write_pooled_subgroups(
             table=df_pooled,
             split_order=[(split.column, split.cutoff) for split in splits],
             output_dir=results.root / "ate",
+            figure_format=config.figure_format,
         )
 
 
@@ -254,6 +261,7 @@ def write_pooled_curves(
             ranking_by_contrast=ranking_by_contrast,
             calibration_by_contrast=calibration_by_contrast,
             results_root=results.root,
+            figure_format=results.config.figure_format,
         )
 
 
@@ -279,9 +287,16 @@ def write_pooled_balance(
         results.write_dataframe("diagnostics/covariate_balance.csv", pooled_balance)
         plot_covariate_balance(
             balance=pooled_balance,
-            save_path=str(results.root / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
+            save_path=str(
+                results.root
+                / DIAGNOSTICS_DIRNAME
+                / figure_file(COVARIATE_BALANCE_STEM, config.figure_format)
+            ),
         )
-    overlap_paths = [run.results_root / "diagnostics" / "propensity_overlap.csv" for run in completed_runs]
+    overlap_paths = [
+        run.results_root / DIAGNOSTICS_DIRNAME / f"{PROPENSITY_OVERLAP_STEM}.csv"
+        for run in completed_runs
+    ]
     df_averaged = None
     df_probabilities = None
     if all(path.exists() for path in overlap_paths):
@@ -293,7 +308,7 @@ def write_pooled_balance(
             for column in value_columns:
                 stack = np.vstack([df_one[column].to_numpy(dtype=float) for df_one in overlap_tables])
                 df_averaged[column] = np.mean(stack, axis=0)
-            destination = results.root / "diagnostics" / "propensity_overlap.csv"
+            destination = results.root / DIAGNOSTICS_DIRNAME / f"{PROPENSITY_OVERLAP_STEM}.csv"
             write_dataframe(destination, df_averaged)
             data = config.data
             if "propensity" in df_averaged.columns:
@@ -307,7 +322,7 @@ def write_pooled_balance(
                 treatment_mode=data.treatment_mode,
                 treatment_values=data.treatment_values,
                 control_value=data.control_value,
-                save_path=str(destination.with_suffix(".png")),
+                save_path=str(destination.with_suffix(f".{config.figure_format}")),
             )
     if pooled_balance is not None and df_averaged is not None and df_probabilities is not None:
         data = config.data
@@ -318,7 +333,11 @@ def write_pooled_balance(
             treatment_values=data.treatment_values,
             control_value=data.control_value,
             balance=pooled_balance,
-            save_path=str(results.root / "diagnostics" / DIAGNOSTIC_PAIR_FIGURE_NAME),
+            save_path=str(
+                results.root
+                / DIAGNOSTICS_DIRNAME
+                / figure_file(PROPENSITY_BALANCE_STEM, config.figure_format)
+            ),
         )
 
 

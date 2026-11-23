@@ -19,9 +19,10 @@ from causal_pipeline.estimator_identity import normalize_estimator_alias
 from causal_pipeline.figures import INK, PUBLICATION_RC, REFERENCE_COLOR
 from causal_pipeline.policy import FittedPolicy, best_treatment_arm, reward_direction, subgroup_benefit
 from causal_pipeline.policy_tree import ExactPolicyTree, PolicySplitNode
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import figure_file, save_figure
 
-POLICY_TREE_FIGURE_NAME = "policy_tree.png"
+POLICY_TREE_STEM = "policy_tree"
+POLICY_TREE_FIGURE_NAME = figure_file(POLICY_TREE_STEM)
 TREAT_FILL = "#E3EEF8"
 TREAT_EDGE = "#0072B2"
 CONTROL_FILL = "#F4F4F4"

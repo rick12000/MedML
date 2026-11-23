@@ -27,9 +27,10 @@ from causal_pipeline.figures import (
 from causal_pipeline.config import ArbitraryTypesModel
 from causal_pipeline.policy import BOOTSTRAP_CI_LOWER_PERCENTILE, BOOTSTRAP_CI_UPPER_PERCENTILE
 from causal_pipeline.policy_value import ALWAYS_TREAT, NEVER_TREAT, OBSERVED
-from causal_pipeline.utils import save_figure
+from causal_pipeline.utils import figure_file, save_figure
 
-POLICY_VALUE_FIGURE_NAME = "value_comparison.png"
+POLICY_VALUE_STEM = "value_comparison"
+POLICY_VALUE_FIGURE_NAME = figure_file(POLICY_VALUE_STEM)
 COMPARISON_PREFIX = "vs_"
 CI_SUFFIXES = ("_ci_lower", "_ci_upper")
 BASELINE_METHODS = frozenset({NEVER_TREAT, ALWAYS_TREAT, OBSERVED})

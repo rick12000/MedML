@@ -20,7 +20,7 @@ from causallib.utils.stat_utils import calc_weighted_standardized_mean_differenc
 from pydantic import BaseModel, ConfigDict
 
 from causal_pipeline.balance_figures import (
-    COVARIATE_BALANCE_FIGURE_NAME,
+    COVARIATE_BALANCE_STEM,
     DEFAULT_MAX_COVARIATES,
     LOVE_MIN_PANEL_INCHES,
     LOVE_PANEL_PAD_INCHES,
@@ -55,7 +55,7 @@ from causal_pipeline.figures import (
     text_width,
     widest,
 )
-from causal_pipeline.utils import save_figure, write_dataframe
+from causal_pipeline.utils import DEFAULT_FIGURE_FORMAT, figure_file, save_figure, write_dataframe
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
 OVERLAP_HISTOGRAM_BINS = 30
@@ -68,7 +68,10 @@ PROPENSITY_AXIS_MAX = 1.0
 PROPENSITY_TICKS = (0.0, 0.25, 0.5, 0.75, 1.0)
 PROPENSITY_TICK_LABELS = ("0", "0.25", "0.5", "0.75", "1")
 OVERLAP_TITLE = "Propensity overlap"
-DIAGNOSTIC_PAIR_FIGURE_NAME = "propensity_balance.png"
+DIAGNOSTICS_DIRNAME = "diagnostics"
+PROPENSITY_OVERLAP_STEM = "propensity_overlap"
+PROPENSITY_BALANCE_STEM = "propensity_balance"
+DIAGNOSTIC_PAIR_FIGURE_NAME = figure_file(PROPENSITY_BALANCE_STEM)
 PAIR_TOP_INCHES = 0.42
 SAMPLE_SIZE_FONT_SIZE = 8.5
 SAMPLE_SIZE_LINE_INCHES = 0.20
@@ -144,9 +147,15 @@ class OverlapRun(BaseModel):
 class OverlapPreprocessor:
     """Score the pooled sample once, write overlap diagnostics, then optionally trim."""
 
-    def __init__(self, overlap: OverlapConfig, minimum_folds: int) -> None:
+    def __init__(
+        self,
+        overlap: OverlapConfig,
+        minimum_folds: int,
+        figure_format: str = DEFAULT_FIGURE_FORMAT,
+    ) -> None:
         self.overlap = overlap
         self.minimum_folds = minimum_folds
+        self.figure_format = figure_format
 
     def run(
         self,
@@ -174,7 +183,8 @@ class OverlapPreprocessor:
             groups=dataset_groups(pooled),
             log_scope="overlap",
         )
-        overlap_path = "diagnostics/propensity_overlap.png"
+        overlap_name = figure_file(PROPENSITY_OVERLAP_STEM, self.figure_format)
+        overlap_path = f"{DIAGNOSTICS_DIRNAME}/{overlap_name}"
         save_path = None
         if results_root is not None:
             save_path = str(Path(results_root) / overlap_path)
@@ -209,7 +219,11 @@ class OverlapPreprocessor:
         if results_root is not None:
             plot_covariate_balance(
                 balance=balance,
-                save_path=str(Path(results_root) / "diagnostics" / COVARIATE_BALANCE_FIGURE_NAME),
+                save_path=str(
+                    Path(results_root)
+                    / DIAGNOSTICS_DIRNAME
+                    / figure_file(COVARIATE_BALANCE_STEM, self.figure_format)
+                ),
             )
             plot_diagnostic_pair(
                 treatment=pooled.treatment_series.to_numpy(),
@@ -218,7 +232,11 @@ class OverlapPreprocessor:
                 treatment_values=pooled.treatment_values,
                 control_value=pooled.control_value,
                 balance=balance,
-                save_path=str(Path(results_root) / "diagnostics" / DIAGNOSTIC_PAIR_FIGURE_NAME),
+                save_path=str(
+                    Path(results_root)
+                    / DIAGNOSTICS_DIRNAME
+                    / figure_file(PROPENSITY_BALANCE_STEM, self.figure_format)
+                ),
             )
         trimmed_balance = None
         reduced = partitions

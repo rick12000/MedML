@@ -34,7 +34,7 @@ def test_recovery_cohorts_write_cate_evaluation_figures(
         results_root=results_root,
     )
     comparison = results_root / "cate" / "comparison" / "1_vs_0"
-    assert (comparison / "evaluation.png").is_file()
+    assert (comparison / "cate_evaluation.png").is_file()
     assert (comparison / "toc.csv").is_file()
     assert (comparison / "calibration.csv").is_file()
     for learner in ("s_learner", "t_learner"):

@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from causal_pipeline.ate import TreatmentContrastScores
-from causal_pipeline.config import ArbitraryTypesModel, SubgroupSplit
-from causal_pipeline.data import CausalDataset, contrast_columns
+from causal_pipeline.estimation.ate import TreatmentContrastScores
+from causal_pipeline.core.config import ArbitraryTypesModel, SubgroupSplit
+from causal_pipeline.core.data import CausalDataset, contrast_columns
 
 logger = logging.getLogger(__name__)
 

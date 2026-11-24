@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from causal_pipeline.config import PipelineConfig
+from causal_pipeline.core.config import PipelineConfig
 from causal_pipeline.pipeline import CausalPipeline
-from causal_pipeline.utils import read_dataframe
+from causal_pipeline.core.utils import read_dataframe
 
 
 def test_same_config_and_data_give_identical_outputs(

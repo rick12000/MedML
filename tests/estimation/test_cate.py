@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from causal_pipeline.estimation.cate import create_cate_estimator, mean_cate_table, warn_rowwise_internal_split
+from causal_pipeline.core.config import (
+    CATEKind,
+    CausalForestCATEEstimatorSpec,
+    DataConfig,
+    MetaCATEEstimatorSpec,
+)
+from causal_pipeline.nuisance.crossfit import cross_fit_predictions
+from causal_pipeline.core.data import CausalDataset
+
+TWO_STAGE_META_LEARNERS = frozenset(
+    {CATEKind.X_LEARNER, CATEKind.R_LEARNER, CATEKind.DR_LEARNER}
+)
+CROSSFIT_FOLD_COUNT = 5
+RECOVERY_FOLDS = 5
+CATE_MEAN_TOLERANCE = 0.05
+CATE_CORRELATION_FLOOR = 0.95
+# TARNet, CFRNet, and DragonNet need the optional JAX stack and a much larger fit.
+FAST_CATE_KINDS = [
+    CATEKind.S_LEARNER,
+    CATEKind.T_LEARNER,
+    CATEKind.X_LEARNER,
+    CATEKind.R_LEARNER,
+    CATEKind.DR_LEARNER,
+    CATEKind.CAUSAL_FOREST,
+]
+
+
+def test_grouped_neural_split_warns_and_continues(
+    binary_data_config: DataConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    grouped_config = binary_data_config.model_copy(update={"group_id": "patient_id"})
+    frame = pd.DataFrame(
+        {
+            "y": [0, 1],
+            "t": [0, 1],
+            "x1": [0.0, 1.0],
+            "x2": [1.0, 0.0],
+            "patient_id": [1, 1],
+        }
+    )
+    grouped = CausalDataset(data=grouped_config, df=frame)
+    ungrouped = CausalDataset(data=binary_data_config, df=frame.drop(columns=["patient_id"]))
+    with caplog.at_level(logging.WARNING):
+        warn_rowwise_internal_split(grouped, "DragonNet")
+        warn_rowwise_internal_split(ungrouped, "DragonNet")
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "DragonNet" in warnings[0].getMessage()
+    assert "row-wise" in warnings[0].getMessage()
+
+
+def test_binary_dr_outcome_model_predicts_probabilities(
+    binary_data_config: DataConfig,
+    df_synthetic_binary: pd.DataFrame,
+) -> None:
+    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
+    spec = MetaCATEEstimatorSpec(
+        kind=CATEKind.DR_LEARNER,
+        outcome_learner="linear",
+        effect_learner="linear",
+        propensity_learner="linear",
+        n_folds=2,
+    )
+    estimator = create_cate_estimator(spec=spec, data=dataset)
+    estimator.fit(data=dataset)
+    sample = dataset.X_adjustment.iloc[:30]
+    predicted = np.asarray(estimator.model.models_mu_c[0].predict(sample), dtype=float)
+    assert np.all((predicted > 0.0) & (predicted < 1.0))
+    assert not np.all(np.isin(predicted, (0.0, 1.0)))
+
+
+@pytest.mark.parametrize("architecture", ["linear", "random_forest"])
+@pytest.mark.parametrize("kind", FAST_CATE_KINDS)
+def test_cate_recovers_a_known_linear_effect(
+    kind: CATEKind,
+    architecture: str,
+    recovery_data_config: DataConfig,
+    heterogeneous_effect_cohort: tuple[pd.DataFrame, np.ndarray],
+) -> None:
+    frame, truth = heterogeneous_effect_cohort
+    dataset = CausalDataset(data=recovery_data_config, df=frame)
+    if kind == CATEKind.CAUSAL_FOREST:
+        spec = CausalForestCATEEstimatorSpec(
+            kind=kind,
+            outcome_learner=architecture,
+            propensity_learner=architecture,
+        )
+    else:
+        spec = MetaCATEEstimatorSpec(
+            kind=kind,
+            outcome_learner=architecture,
+            effect_learner=architecture,
+            propensity_learner=architecture,
+            n_folds=RECOVERY_FOLDS,
+        )
+    estimator = create_cate_estimator(spec=spec, data=dataset)
+    np.random.seed(0)
+    estimator.fit(data=dataset)
+    predictions = estimator.predict_effects(data=dataset)
+    estimated = predictions.iloc[:, 0].to_numpy(dtype=float)
+    truth_mean = float(np.mean(truth))
+    treated = frame.loc[frame["t"] == 1, "y"]
+    control = frame.loc[frame["t"] == 0, "y"]
+    unadjusted = float(treated.mean() - control.mean())
+    assert predictions.shape == (len(frame), 1)
+    assert abs(float(np.mean(estimated)) - truth_mean) < CATE_MEAN_TOLERANCE
+    assert abs(float(np.mean(estimated)) - truth_mean) < abs(unadjusted - truth_mean)
+    # A linear S-learner has no treatment-by-covariate term, so tau(x) stays flat.
+    if kind == CATEKind.S_LEARNER and architecture == "linear":
+        assert float(np.std(estimated)) < 0.05
+    else:
+        assert float(np.corrcoef(estimated, truth)[0, 1]) > CATE_CORRELATION_FLOOR
+    ate = estimator.estimate(data=dataset)
+    assert ate.shape[0] == 1
+    assert abs(float(ate["estimate"].iloc[0]) - truth_mean) < CATE_MEAN_TOLERANCE
+
+
+def test_mean_cate_table_averages_each_contrast() -> None:
+    predictions = pd.DataFrame({"1_vs_0": [0.0, 0.5, 1.0], "2_vs_0": [0.2, 0.2, 0.2]})
+    table = mean_cate_table(predictions)
+    assert table.shape == (2, 4)
+    assert list(table["contrast"]) == ["1_vs_0", "2_vs_0"]
+    assert np.isclose(table["estimate"].to_numpy(), [0.5, 0.2]).all()
+
+
+def test_cross_fit_predictions_score_each_row_from_the_other_folds(
+    binary_data_config: DataConfig,
+    df_synthetic_binary: pd.DataFrame,
+) -> None:
+    dataset = CausalDataset(data=binary_data_config, df=df_synthetic_binary)
+
+    def predict_fold(train: CausalDataset, held_out: CausalDataset) -> pd.DataFrame:
+        complement_mean = float(train.outcome_series.mean())
+        return pd.DataFrame({"effect": np.full(len(held_out.df), complement_mean)})
+
+    predictions = cross_fit_predictions(
+        dataset=dataset,
+        n_folds=CROSSFIT_FOLD_COUNT,
+        random_state=0,
+        predict_fold=predict_fold,
+    )
+    full_mean = float(dataset.outcome_series.mean())
+    assert predictions.shape == (len(df_synthetic_binary), 1)
+    assert not np.isclose(predictions["effect"].to_numpy(), full_mean).all()

@@ -10,9 +10,9 @@ import pytest
 from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestRegressor
 
-from causal_pipeline.cate import create_cate_estimator
-from causal_pipeline.parallel import available_cores, warm_process_pool
-from causal_pipeline.config import (
+from causal_pipeline.estimation.cate import create_cate_estimator
+from causal_pipeline.core.parallel import available_cores, warm_process_pool
+from causal_pipeline.core.config import (
     ATEKind,
     CATEEvaluationConfig,
     CATEKind,
@@ -31,9 +31,9 @@ from causal_pipeline.config import (
     SplitConfig,
     TreatmentMode,
 )
-from causal_pipeline.data import CausalDataset
-from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
-from causal_pipeline.imputation import CovariateImputer
+from causal_pipeline.core.data import CausalDataset
+from causal_pipeline.estimation.evaluation import CATEEvaluator, ContrastEvaluation
+from causal_pipeline.missing_data.imputation import CovariateImputer
 from tests.cache_paths import (
     TEST_CACHE_ROOT,
     module_cache_key,

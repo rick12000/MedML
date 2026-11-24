@@ -18,14 +18,14 @@ import logging
 import numpy as np
 import pandas as pd
 
-from causal_pipeline.config import (
+from causal_pipeline.core.config import (
     CATEEvaluationConfig,
     DataConfig,
     OutcomeType,
     TreatmentMode,
 )
-from causal_pipeline.data import CausalDataset
-from causal_pipeline.evaluation import CATEEvaluator
+from causal_pipeline.core.data import CausalDataset
+from causal_pipeline.estimation.evaluation import CATEEvaluator
 
 logging.disable(logging.CRITICAL)
 
@@ -65,7 +65,7 @@ def run(n_estimation: int, n_test: int, treated_share: float, repeats: int) -> N
         CATEEvaluationConfig(propensity_learner=LEARNER, outcome_learner=LEARNER)
     )
     propensity_template, outcome_template = (
-        __import__("causal_pipeline.evaluation", fromlist=["x"]).evaluation_learner_templates(
+        __import__("causal_pipeline.estimation.evaluation", fromlist=["x"]).evaluation_learner_templates(
             evaluator.evaluation, binary=False
         )
     )

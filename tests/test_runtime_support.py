@@ -4,8 +4,8 @@ import importlib.util
 
 import pytest
 
-from causal_pipeline.cate import ensure_cate_spec_supported
-from causal_pipeline.config import (
+from causal_pipeline.estimation.cate import ensure_cate_spec_supported
+from causal_pipeline.core.config import (
     CATEKind,
     DataConfig,
     DragonNetCATEEstimatorSpec,
@@ -36,7 +36,7 @@ def test_pipeline_init_fails_before_run_when_dragonnet_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "causal_pipeline.cate._ensure_modules",
+        "causal_pipeline.estimation.cate._ensure_modules",
         lambda _names, _label: (_ for _ in ()).throw(
             ImportError('Install with: pip install "medml[neural]"')
         ),

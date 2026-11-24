@@ -1,0 +1,875 @@
+"""CATE estimator adapters."""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import logging
+from abc import ABC, abstractmethod
+import numpy as np
+import pandas as pd
+import causalml.inference.meta.rlearner as causalml_rlearner
+from causalml.inference.meta.utils import concat_treatment_col
+from causalml.inference.meta import (
+    BaseDRClassifier,
+    BaseDRRegressor,
+    BaseRClassifier,
+    BaseRRegressor,
+    BaseSClassifier,
+    BaseSRegressor,
+    BaseTClassifier,
+    BaseTRegressor,
+    BaseXClassifier,
+    BaseXRegressor,
+)
+from econml.dml import CausalForestDML
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+from causalml.propensity import compute_r_residuals
+from sklearn.model_selection import cross_val_predict
+
+from causal_pipeline.core.config import (
+    ArbitraryTypesModel,
+    CATEEstimatorSpec,
+    CATEKind,
+    CausalForestCATEEstimatorSpec,
+    CFRNetCATEEstimatorSpec,
+    DEFAULT_LEARNER_RANDOM_STATE,
+    DragonNetCATEEstimatorSpec,
+    JsonValue,
+    MetaCATEEstimatorSpec,
+    OutcomeType,
+    TARNetCATEEstimatorSpec,
+    predict_outcome_mean,
+)
+from causal_pipeline.nuisance.crossfit import (
+    cross_fit_meta_learner_sample,
+    dataset_groups,
+    learner_random_state,
+)
+from causal_pipeline.core.data import CausalDataset, contrast_columns
+from causal_pipeline.diagnostics import probability_of_arm
+from causal_pipeline.nuisance.nuisance_metrics import (
+    log_econml_crossfit_nuisances,
+    log_nuisance_metric,
+    outcome_metric_from_predictions,
+)
+
+from causal_pipeline.nuisance.learner_tuning import CATELearners, resolve_cate_learners
+from causal_pipeline.core.parallel import SINGLE_CORE_N_JOBS, available_cores
+from causal_pipeline.core.scaling import clone_scaled_estimator, fit_transform_covariates, transform_covariates
+
+logger = logging.getLogger(__name__)
+
+NEURAL_EXTRA_INSTALL = 'pip install "medml[neural]"'
+
+META_LEARNER_CLASSES = {
+    ("s", False): BaseSRegressor,
+    ("s", True): BaseSClassifier,
+    ("t", False): BaseTRegressor,
+    ("t", True): BaseTClassifier,
+    ("x", False): BaseXRegressor,
+    ("x", True): BaseXClassifier,
+    ("r", False): BaseRRegressor,
+    ("r", True): BaseRClassifier,
+    ("dr", False): BaseDRRegressor,
+    ("dr", True): BaseDRClassifier,
+}
+
+
+class BaseCATEEstimator(ABC):
+    """Common interface for conditional average treatment effect estimators."""
+
+    @abstractmethod
+    def fit(self, data: CausalDataset) -> BaseCATEEstimator:
+        ...
+
+    @abstractmethod
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        ...
+
+    @abstractmethod
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        ...
+
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        """Outcome prediction on rows this fit did not train on, when the model can make one."""
+        return None
+
+    def logged_outcome_model(self) -> object:
+        resolved = getattr(self, "resolved_outcome_learner", None)
+        if resolved is not None:
+            return resolved
+        return getattr(self, "model", self)
+
+
+def ensure_cate_spec_supported(spec: CATEEstimatorSpec) -> None:
+    """Raise when a neural CATE spec needs packages that are not installed."""
+    if spec.kind in {CATEKind.TARNET, CATEKind.CFRNET}:
+        _ensure_modules(("jax", "flax", "catenets"), spec.kind.value)
+        return
+    if spec.kind == CATEKind.DRAGONNET:
+        _ensure_modules(("jax", "flax"), spec.kind.value)
+        try:
+            causalml_jax = importlib.import_module("causalml.inference.jax")
+        except ImportError as error:
+            raise ImportError(
+                f"DragonNet is not available with the installed packages. "
+                f"Install with: {NEURAL_EXTRA_INSTALL}"
+            ) from error
+        if not hasattr(causalml_jax, "DragonNet"):
+            raise ImportError(
+                f"DragonNet is not available with the installed packages. "
+                f"Install with: {NEURAL_EXTRA_INSTALL}"
+            )
+
+
+def _ensure_modules(module_names: tuple[str, ...], label: str) -> None:
+    missing = [name for name in module_names if importlib.util.find_spec(name) is None]
+    if not missing:
+        return
+    raise ImportError(
+        f"{label} requires optional packages ({', '.join(missing)}). "
+        f"Install with: {NEURAL_EXTRA_INSTALL}"
+    )
+
+
+META_LETTERS = {
+    CATEKind.S_LEARNER: "s",
+    CATEKind.T_LEARNER: "t",
+    CATEKind.X_LEARNER: "x",
+    CATEKind.R_LEARNER: "r",
+    CATEKind.DR_LEARNER: "dr",
+}
+
+
+def create_cate_estimator(
+    spec: CATEEstimatorSpec,
+    data: CausalDataset,
+    forest_n_jobs: int | None = None,
+    tune_estimators: bool = False,
+) -> BaseCATEEstimator:
+    ensure_cate_spec_supported(spec=spec)
+    learners = resolve_cate_learners(data, spec, tune=tune_estimators)
+    if spec.kind in META_LETTERS:
+        return MetaLearnerAdapter(
+            spec=spec,
+            data=data,
+            letter=META_LETTERS[spec.kind],
+            learners=learners,
+        )
+    if spec.kind == CATEKind.CAUSAL_FOREST:
+        return CausalForestAdapter(
+            spec=spec,
+            data=data,
+            learners=learners,
+            forest_n_jobs=forest_n_jobs,
+        )
+    if spec.kind == CATEKind.TARNET:
+        return TARNetAdapter(spec=spec, data=data)
+    if spec.kind == CATEKind.CFRNET:
+        return CFRNetAdapter(spec=spec, data=data)
+    if spec.kind == CATEKind.DRAGONNET:
+        return DragonNetAdapter(spec=spec, data=data)
+    raise ValueError(f"Unsupported CATE kind: {spec.kind}")
+
+
+def warn_rowwise_internal_split(data: CausalDataset, estimator_name: str) -> None:
+    """Library early stopping holds out rows and cannot keep groups intact."""
+    if data.group_id is None:
+        return
+    logger.warning(
+        "%s splits its training rows for early stopping and cannot keep groups together. "
+        "Continuing with that row-wise split. Outer cross-fitting still holds out whole groups.",
+        estimator_name,
+    )
+
+
+def binary_library_treatment(data: CausalDataset) -> np.ndarray:
+    """Code control as 0 and the single treated arm as 1 for libraries that assume that coding."""
+    non_control = [arm for arm in data.treatment_values if arm != data.control_value]
+    if len(non_control) != 1:
+        raise ValueError("TARNet, CFRNet, and DragonNet support one treated arm.")
+    return (data.treatment_series.to_numpy() != data.control_value).astype(int)
+
+
+def mean_cate_table(predictions: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for column in predictions.columns:
+        values = predictions[column].to_numpy(dtype=float)
+        rows.append(
+            {
+                "contrast": column,
+                "estimate": float(np.mean(values)),
+                "ci_lower": np.nan,
+                "ci_upper": np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+class ProbabilityOutcomeRegressor(RegressorMixin, BaseEstimator):
+    """Predict P(Y=1 | X) so a DR-learner pseudo-outcome stays on the probability scale.
+
+    causalml builds that pseudo-outcome with ``learner.predict``. A classifier's
+    ``predict`` returns a class label, which replaces the conditional probability
+    with 0 or 1 inside the doubly robust formula.
+    """
+
+    def __init__(self, classifier: BaseEstimator) -> None:
+        self.classifier = classifier
+
+    def fit(
+        self,
+        features: pd.DataFrame | np.ndarray,
+        outcome: pd.Series | np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> ProbabilityOutcomeRegressor:
+        self.model_ = clone(self.classifier)
+        if sample_weight is None:
+            self.model_.fit(features, outcome)
+        else:
+            self.model_.fit(features, outcome, sample_weight=sample_weight)
+        return self
+
+    def predict(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
+        probabilities = self.model_.predict_proba(features)
+        if probabilities.ndim != 2 or probabilities.shape[1] != 2:
+            raise ValueError("Binary DR outcome models must expose two class probabilities.")
+        return np.asarray(probabilities[:, 1], dtype=float)
+
+
+def build_meta_learner(
+    letter: str,
+    binary_outcome: bool,
+    outcome_learner: BaseEstimator,
+    effect_learner: BaseEstimator | None,
+    propensity_learner: BaseEstimator | None,
+    control_name: JsonValue,
+) -> BaseEstimator:
+    model_cls = META_LEARNER_CLASSES[(letter, binary_outcome)]
+    if letter in {"s", "t"}:
+        return model_cls(learner=clone_scaled_estimator(outcome_learner), control_name=control_name)
+    if effect_learner is None:
+        raise ValueError(f"{letter}-learner requires effect_learner.")
+    if letter == "x":
+        return model_cls(
+            control_outcome_learner=clone_scaled_estimator(outcome_learner),
+            treatment_outcome_learner=clone_scaled_estimator(outcome_learner),
+            control_effect_learner=clone_scaled_estimator(effect_learner),
+            treatment_effect_learner=clone_scaled_estimator(effect_learner),
+            control_name=control_name,
+        )
+    if letter == "r":
+        if propensity_learner is None:
+            raise ValueError("R-learner requires propensity_learner.")
+        return model_cls(
+            outcome_learner=clone_scaled_estimator(outcome_learner),
+            effect_learner=clone_scaled_estimator(effect_learner),
+            propensity_learner=clone_scaled_estimator(propensity_learner),
+            control_name=control_name,
+        )
+    if letter == "dr" and binary_outcome:
+        return BaseDRRegressor(
+            control_outcome_learner=ProbabilityOutcomeRegressor(
+                classifier=clone_scaled_estimator(outcome_learner),
+            ),
+            treatment_outcome_learner=ProbabilityOutcomeRegressor(
+                classifier=clone_scaled_estimator(outcome_learner),
+            ),
+            treatment_effect_learner=clone_scaled_estimator(effect_learner),
+            control_name=control_name,
+        )
+    return model_cls(
+        control_outcome_learner=clone_scaled_estimator(outcome_learner),
+        treatment_outcome_learner=clone_scaled_estimator(outcome_learner),
+        treatment_effect_learner=clone_scaled_estimator(effect_learner),
+        control_name=control_name,
+    )
+
+
+class MetaLearnerAdapter(BaseCATEEstimator):
+    def __init__(
+        self,
+        spec: MetaCATEEstimatorSpec,
+        data: CausalDataset,
+        letter: str,
+        learners: CATELearners,
+    ) -> None:
+        self.spec = spec
+        self.data = data
+        self.letter = letter
+        self.model = None
+        self.resolved_outcome_learner: BaseEstimator | None = learners.outcome
+        self.resolved_propensity_learner: BaseEstimator | None = learners.propensity
+        self.contrast_names = contrast_columns(
+            data.control_value,
+            data.treatment_values,
+        )
+        self.resolved_effect_learner = learners.effect
+
+    def fit(self, data: CausalDataset) -> MetaLearnerAdapter:
+        # The pipeline predicts each group from a model fit on the other groups.
+        # Any cross-fit inside causalml only reshuffles that training subset.
+        binary = self.data.outcome_type == OutcomeType.BINARY
+        outcome_learner = self.resolved_outcome_learner
+        effect_learner = self.resolved_effect_learner
+        propensity_learner = self.resolved_propensity_learner
+        self.model = build_meta_learner(
+            letter=self.letter,
+            binary_outcome=binary,
+            outcome_learner=outcome_learner,
+            effect_learner=effect_learner,
+            propensity_learner=propensity_learner,
+            control_name=data.control_value,
+        )
+        features = data.X_adjustment.copy()
+        treatment = data.treatment_series
+        outcome = data.outcome_series
+        propensity = None
+        if self.letter in {"x", "r", "dr"}:
+            if propensity_learner is None:
+                raise ValueError(f"{self.letter}-learner requires propensity_learner.")
+            features, treatment, outcome, propensity = cross_fit_meta_learner_sample(
+                covariates=features,
+                treatment=treatment,
+                outcome=outcome,
+                learner=propensity_learner,
+                treatment_values=data.treatment_values,
+                control_value=data.control_value,
+                n_folds=self.spec.n_folds,
+                random_state=learner_random_state(
+                    propensity_learner,
+                    self.spec.random_state,
+                ),
+                clip_bounds=self.spec.clip_bounds,
+                groups=dataset_groups(data),
+                log_scope=f"CATE/{self.letter}-learner",
+            )
+        if self.letter == "r":
+            fit_r_learner(
+                model=self.model,
+                features=features,
+                treatment=treatment,
+                outcome=outcome,
+                propensity=propensity,
+            )
+        elif propensity is None:
+            self.model.fit(
+                features,
+                treatment=treatment,
+                y=outcome,
+            )
+        else:
+            self.model.fit(
+                features,
+                treatment=treatment,
+                y=outcome,
+                p=propensity,
+            )
+        if self.letter == "x":
+            self.attach_propensity_model(features, treatment)
+        if self.letter == "r":
+            log_r_learner_crossfit_outcome(
+                model=self.model,
+                features=features,
+                treatment=treatment,
+                outcome=outcome,
+                binary_outcome=binary,
+            )
+        return self
+
+    def attach_propensity_model(
+        self,
+        features: pd.DataFrame,
+        treatment: pd.Series,
+    ) -> BaseEstimator | None:
+        """X-learner prediction reweights by e(X). Keep that model on the configured learner."""
+        if self.resolved_propensity_learner is None or self.model is None:
+            return None
+        fitted = clone_scaled_estimator(self.resolved_propensity_learner)
+        fitted.fit(features, treatment)
+        groups = list(getattr(self.model, "t_groups", []))
+        self.model.propensity_model = {
+            group: ArmProbabilityModel(fitted, group) for group in groups
+        }
+        return fitted
+
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        effects = self.model.predict(data.X_adjustment.copy())
+        learned_arms = list(getattr(self.model, "t_groups", []))
+        columns = (
+            contrast_columns(self.data.control_value, [self.data.control_value, *learned_arms])
+            if learned_arms
+            else self.contrast_names
+        )
+        if effects.ndim == 1:
+            effects_df = pd.DataFrame({columns[0]: effects}, index=data.X_adjustment.index)
+        else:
+            effects_df = pd.DataFrame(
+                effects,
+                index=data.X_adjustment.index,
+                columns=columns[: effects.shape[1]],
+            )
+        return effects_df
+
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        features = data.X_adjustment.copy()
+        propensity = None
+        if self.letter == "x" and getattr(self.model, "propensity_model", None):
+            propensity = {
+                group: predictor.predict(features)
+                for group, predictor in self.model.propensity_model.items()
+            }
+        result = self.model.estimate_ate(
+            features,
+            data.treatment_series,
+            data.outcome_series,
+            p=propensity,
+            pretrain=True,
+            **estimate_ate_interval_kwargs(self.model),
+        )
+        return table_from_estimate_ate(
+            parse_meta_learner_ate_result(result),
+            self.contrast_names,
+        )
+
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        if self.model is None or self.letter == "r":
+            return None
+        predicted = meta_learner_factual_outcome(
+            letter=self.letter,
+            model=self.model,
+            features=data.X_adjustment,
+            treatment=data.treatment_series,
+        )
+        return predicted
+
+
+class CausalForestAdapter(BaseCATEEstimator):
+    def __init__(
+        self,
+        spec: CausalForestCATEEstimatorSpec,
+        data: CausalDataset,
+        learners: CATELearners,
+        forest_n_jobs: int | None = None,
+    ) -> None:
+        self.spec = spec
+        self.data = data
+        self.forest_n_jobs = available_cores() if forest_n_jobs is None else forest_n_jobs
+        self.model = None
+        self.resolved_outcome_learner: BaseEstimator | None = learners.outcome
+        self.resolved_propensity_learner: BaseEstimator | None = learners.propensity
+        self.contrast_names = contrast_columns(
+            data.control_value,
+            data.treatment_values,
+        )
+
+    def fit(self, data: CausalDataset) -> CausalForestAdapter:
+        binary_outcome = self.data.outcome_type == OutcomeType.BINARY
+        self.model = CausalForestDML(
+            model_y=clone_scaled_estimator(self.resolved_outcome_learner),
+            model_t=clone_scaled_estimator(self.resolved_propensity_learner),
+            discrete_treatment=True,
+            discrete_outcome=binary_outcome,
+            n_jobs=self.forest_n_jobs,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
+        )
+        features = data.X_effect_modifiers.copy()
+        controls = data.X_controls.copy()
+        self.model.fit(
+            Y=data.outcome_series,
+            T=data.treatment_series,
+            X=features if features.shape[1] else None,
+            W=controls if controls.shape[1] else None,
+            groups=dataset_groups(data),
+            cache_values=True,
+        )
+        log_econml_crossfit_nuisances(
+            scope="CATE/causal_forest",
+            model=self.model,
+            outcome_learner=self.resolved_outcome_learner,
+            propensity_learner=self.resolved_propensity_learner,
+            binary_outcome=binary_outcome,
+        )
+        return self
+
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        features = data.X_effect_modifiers.copy()
+        feature_frame = features if features.shape[1] else None
+        columns = {}
+        for name, arm in zip(
+            self.contrast_names,
+            [value for value in self.data.treatment_values if value != self.data.control_value],
+            strict=True,
+        ):
+            effect = self.model.effect(feature_frame, T0=self.data.control_value, T1=arm)
+            columns[name] = np.ravel(effect)
+        return pd.DataFrame(columns)
+
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        features = data.X_effect_modifiers.copy()
+        feature_frame = features if features.shape[1] else None
+        rows = []
+        for name, arm in zip(
+            self.contrast_names,
+            [value for value in self.data.treatment_values if value != self.data.control_value],
+            strict=True,
+        ):
+            inference = self.model.ate_inference(
+                feature_frame,
+                T0=self.data.control_value,
+                T1=arm,
+            )
+            lower, upper = inference.conf_int_mean()
+            rows.append(
+                {
+                    "contrast": name,
+                    "estimate": float(np.squeeze(inference.mean_point)),
+                    "ci_lower": float(np.squeeze(lower)),
+                    "ci_upper": float(np.squeeze(upper)),
+                }
+            )
+        return pd.DataFrame(rows)
+
+
+class TARNetAdapter(BaseCATEEstimator):
+    def __init__(self, spec: TARNetCATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scaler = None
+        self.contrast_names = contrast_columns(
+            data.control_value,
+            data.treatment_values,
+        )
+
+    def fit(self, data: CausalDataset) -> TARNetAdapter:
+        warn_rowwise_internal_split(data, "TARNet")
+        from catenets.models.jax import TARNet
+
+        self.model = TARNet()
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
+        self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
+        return self
+
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None or self.scaler is None:
+            raise RuntimeError("Estimator is not fitted.")
+        effects = self.model.predict(transform_covariates(self.scaler, data.X_adjustment)).flatten()
+        return pd.DataFrame({self.contrast_names[0]: effects})
+
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        return mean_cate_table(self.predict_effects(data))
+
+
+class CFRNetAdapter(BaseCATEEstimator):
+    def __init__(self, spec: CFRNetCATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scaler = None
+        self.contrast_names = contrast_columns(
+            data.control_value,
+            data.treatment_values,
+        )
+
+    def fit(self, data: CausalDataset) -> CFRNetAdapter:
+        warn_rowwise_internal_split(data, "CFRNet")
+        from catenets.models.jax import CFRNet
+
+        self.model = CFRNet(penalty_disc=self.spec.penalty_disc)
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
+        self.model.fit(features, data.outcome_series.to_numpy(), binary_library_treatment(data))
+        return self
+
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None or self.scaler is None:
+            raise RuntimeError("Estimator is not fitted.")
+        effects = self.model.predict(transform_covariates(self.scaler, data.X_adjustment)).flatten()
+        return pd.DataFrame({self.contrast_names[0]: effects})
+
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        return mean_cate_table(self.predict_effects(data))
+
+
+class DragonNetAdapter(BaseCATEEstimator):
+    def __init__(self, spec: DragonNetCATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scaler = None
+        self.contrast_names = contrast_columns(
+            data.control_value,
+            data.treatment_values,
+        )
+
+    def fit(self, data: CausalDataset) -> DragonNetAdapter:
+        warn_rowwise_internal_split(data, "DragonNet")
+        from causalml.inference.jax import DragonNet
+
+        self.model = DragonNet()
+        self.scaler, features = fit_transform_covariates(data.X_adjustment)
+        treatment = binary_library_treatment(data)
+        outcome = data.outcome_series.to_numpy()
+        self.model.fit(features, y=outcome, treatment=treatment)
+        return self
+
+    def predict_effects(self, data: CausalDataset) -> pd.DataFrame:
+        if self.model is None or self.scaler is None:
+            raise RuntimeError("Estimator is not fitted.")
+        effects = self.model.predict_tau(transform_covariates(self.scaler, data.X_adjustment)).flatten()
+        return pd.DataFrame({self.contrast_names[0]: effects})
+
+    def estimate(self, data: CausalDataset) -> pd.DataFrame:
+        return mean_cate_table(self.predict_effects(data))
+
+    def factual_outcome(self, data: CausalDataset) -> np.ndarray | None:
+        if self.model is None or self.scaler is None:
+            return None
+        heads = np.asarray(self.model.predict(transform_covariates(self.scaler, data.X_adjustment)))
+        if heads.ndim != 2 or heads.shape[1] < 2:
+            return None
+        treated = binary_library_treatment(data) == 1
+        return np.where(treated, heads[:, 1], heads[:, 0])
+
+
+def rows_for_mask(features: pd.DataFrame, mask: np.ndarray) -> pd.DataFrame:
+    return features.iloc[np.flatnonzero(mask)]
+
+
+def write_masked(destination: np.ndarray, mask: np.ndarray, values: np.ndarray) -> None:
+    destination[mask] = values
+
+
+def mean_outcome_prediction(models: list[BaseEstimator], rows: pd.DataFrame) -> np.ndarray:
+    predictions = [predict_outcome_mean(model, rows) for model in models]
+    return np.mean(predictions, axis=0)
+
+
+def meta_learner_factual_outcome(
+    letter: str,
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+) -> np.ndarray:
+    """Factual outcome from the fitted nuisance models, on any rows those models can score."""
+    treatment_values = treatment.to_numpy()
+    predicted = np.zeros(len(treatment_values), dtype=float)
+    if letter == "s":
+        covered = np.zeros(len(treatment_values), dtype=float)
+        for group, fitted in model.models.items():
+            pair = (treatment_values == group) | (treatment_values == model.control_name)
+            if not np.any(pair):
+                continue
+            indicator = (treatment_values[pair] == group).astype(int)
+            design = concat_treatment_col(indicator, rows_for_mask(features, pair))
+            predicted[pair] += predict_outcome_mean(fitted, design)
+            covered[pair] += 1.0
+        missing = covered == 0.0
+        if np.any(missing):
+            raise ValueError("S-learner has no outcome model for every held-out treatment.")
+        return predicted / covered
+    if letter == "t":
+        control_model = model.model_c
+        arm_models = model.models_t
+    elif letter == "x":
+        control_model = model.model_mu_c
+        arm_models = model.models_mu_t
+    elif letter == "dr":
+        control = treatment_values == model.control_name
+        if np.any(control):
+            write_masked(
+                predicted,
+                control,
+                mean_outcome_prediction(model.models_mu_c, rows_for_mask(features, control)),
+            )
+        for group, fold_models in model.models_mu_t.items():
+            arm = treatment_values == group
+            if np.any(arm):
+                write_masked(
+                    predicted,
+                    arm,
+                    mean_outcome_prediction(fold_models, rows_for_mask(features, arm)),
+                )
+        return predicted
+    else:
+        raise ValueError(f"{letter}-learner has no held-out outcome prediction.")
+    control = treatment_values == model.control_name
+    if np.any(control):
+        write_masked(predicted, control, predict_outcome_mean(control_model, rows_for_mask(features, control)))
+    for group, fitted in arm_models.items():
+        arm = treatment_values == group
+        if np.any(arm):
+            write_masked(predicted, arm, predict_outcome_mean(fitted, rows_for_mask(features, arm)))
+    return predicted
+
+
+def fit_r_learner(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+    outcome: pd.Series,
+    propensity: pd.DataFrame | None,
+) -> None:
+    """Fit an R-learner without a process pool around its outcome cross-fit.
+
+    causalml requests every core for that cross-fit, including a hardcoded
+    request in the classifier. Those worker processes abort on Windows while
+    XGBoost builds its training matrix.
+    """
+    model.cv_n_jobs = SINGLE_CORE_N_JOBS
+    original = causalml_rlearner.cross_val_predict
+
+    def in_process(*args: object, **kwargs: object) -> np.ndarray:
+        kwargs["n_jobs"] = SINGLE_CORE_N_JOBS
+        return original(*args, **kwargs)
+
+    causalml_rlearner.cross_val_predict = in_process
+    try:
+        if propensity is None:
+            model.fit(features, treatment=treatment, y=outcome)
+        else:
+            model.fit(features, treatment=treatment, y=outcome, p=propensity)
+    finally:
+        causalml_rlearner.cross_val_predict = original
+
+
+def r_learner_oof_outcome_predictions(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+    outcome: pd.Series,
+) -> np.ndarray:
+    """Out-of-fold outcome predictions from the same splits causalml used to fit the R-learner.
+
+    causalml's XGBRRegressor stores its KFold as ``cv`` and cross-fits with it. The generic
+    BaseRLearner does not store a splitter: it calls compute_r_residuals, which is stratified
+    on treatment with the model's n_fold and random_state. Both are reproduced here.
+    The refit stays in this process, with one thread for the cross-fit.
+    """
+    y_values = outcome.to_numpy(dtype=float)
+    method = "predict_proba" if hasattr(model.model_mu, "predict_proba") else "predict"
+    cv = getattr(model, "cv", None)
+    if cv is not None:
+        predicted = cross_val_predict(
+            model.model_mu,
+            features,
+            outcome,
+            cv=cv,
+            method=method,
+            n_jobs=SINGLE_CORE_N_JOBS,
+        )
+        if method == "predict_proba":
+            predicted = predicted[:, 1]
+        return np.asarray(predicted, dtype=float)
+    y_residual, _ = compute_r_residuals(
+        X=np.asarray(features),
+        treatment=np.asarray(treatment),
+        y=y_values,
+        outcome_learner=model.model_mu,
+        n_folds=model.n_fold,
+        random_state=model.random_state,
+        n_jobs=SINGLE_CORE_N_JOBS,
+        compute_w_residual=False,
+        method=method,
+    )
+    return y_values - y_residual
+
+
+def log_r_learner_crossfit_outcome(
+    model: BaseEstimator,
+    features: pd.DataFrame,
+    treatment: pd.Series,
+    outcome: pd.Series,
+    binary_outcome: bool,
+) -> None:
+    """Score the R-learner outcome nuisance on causalml's own out-of-fold predictions."""
+    predicted = r_learner_oof_outcome_predictions(
+        model=model,
+        features=features,
+        treatment=treatment,
+        outcome=outcome,
+    )
+    metric = outcome_metric_from_predictions(
+        outcome=outcome.to_numpy(dtype=float),
+        predicted=np.asarray(predicted, dtype=float),
+        binary_outcome=binary_outcome,
+    )
+    if metric is not None:
+        log_nuisance_metric(
+            "CATE/r-learner outcome",
+            model.model_mu,
+            f"OOF {metric.name}",
+            metric.value,
+        )
+
+
+class ArmProbabilityModel:
+    """causalml calls propensity_model.predict and expects P(T = arm | X)."""
+
+    def __init__(self, learner: BaseEstimator, arm: JsonValue) -> None:
+        self.learner = learner
+        self.arm = arm
+
+    def predict(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
+        probabilities = pd.DataFrame(
+            self.learner.predict_proba(features),
+            columns=list(self.learner.classes_),
+        )
+        return probability_of_arm(probabilities, self.arm)
+
+
+class MetaLearnerAteResult(ArbitraryTypesModel):
+    point: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+
+
+def parse_meta_learner_ate_result(raw: tuple | float | np.ndarray) -> MetaLearnerAteResult:
+    if isinstance(raw, tuple):
+        point, lower, upper = raw[0], raw[1], raw[2]
+    else:
+        point = raw
+        lower = np.nan
+        upper = np.nan
+    return MetaLearnerAteResult(
+        point=np.atleast_1d(np.squeeze(point)).astype(float),
+        lower=np.atleast_1d(np.squeeze(lower)).astype(float),
+        upper=np.atleast_1d(np.squeeze(upper)).astype(float),
+    )
+
+
+def estimate_ate_interval_kwargs(model: BaseEstimator) -> dict[str, bool]:
+    estimate_ate = getattr(model, "estimate_ate", None)
+    if estimate_ate is None:
+        return {}
+    parameters = inspect.signature(estimate_ate).parameters
+    if "return_ci" in parameters:
+        return {"return_ci": True}
+    return {}
+
+
+def table_from_estimate_ate(
+    parsed: MetaLearnerAteResult,
+    contrast_names: list[str],
+) -> pd.DataFrame:
+    point_values = parsed.point
+    lower_values = parsed.lower
+    upper_values = parsed.upper
+    n_contrasts = min(len(contrast_names), len(point_values))
+    return pd.DataFrame(
+        {
+            "contrast": contrast_names[:n_contrasts],
+            "estimate": point_values[:n_contrasts],
+            "ci_lower": lower_values[:n_contrasts],
+            "ci_upper": upper_values[:n_contrasts],
+        }
+    )

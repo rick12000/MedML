@@ -7,9 +7,9 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from causal_pipeline.ate import TreatmentContrastScores
-from causal_pipeline.config import DataConfig, OutcomeType, SubgroupSplit, TreatmentMode
-from causal_pipeline.data import CausalDataset
+from causal_pipeline.estimation.ate import TreatmentContrastScores
+from causal_pipeline.core.config import DataConfig, OutcomeType, SubgroupSplit, TreatmentMode
+from causal_pipeline.core.data import CausalDataset
 from causal_pipeline.subgroup import (
     ABOVE_CUTOFF_RULE,
     OVERALL_LABEL,
@@ -18,7 +18,7 @@ from causal_pipeline.subgroup import (
     is_binary_values,
     subgroup_split_table,
 )
-from causal_pipeline.subgroup_figures import (
+from causal_pipeline.plotting.subgroup_figures import (
     GROUP_BLOCK_KEY,
     SPLIT_BLOCK_KEY,
     SUBGROUP_DIFFERENCES_FIGURE_NAME,

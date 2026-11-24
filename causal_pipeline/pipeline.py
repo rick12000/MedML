@@ -16,15 +16,15 @@ import pandas as pd
 from pydantic import ConfigDict
 from sklearn.base import BaseEstimator
 
-from causal_pipeline.ate import (
+from causal_pipeline.estimation.ate import (
     ATESensitivityAnalyzer,
     BaseATEEstimator,
     benchmark_sensitivity_models,
     initialize_ate_estimator,
     estimator_supports_sensitivity,
 )
-from causal_pipeline.cate import create_cate_estimator, ensure_cate_spec_supported, mean_cate_table
-from causal_pipeline.config import (
+from causal_pipeline.estimation.cate import create_cate_estimator, ensure_cate_spec_supported, mean_cate_table
+from causal_pipeline.core.config import (
     ATEEstimatorSpec,
     ATEKind,
     ArbitraryTypesModel,
@@ -37,11 +37,11 @@ from causal_pipeline.config import (
     PipelineConfig,
     PolicyKind,
 )
-from causal_pipeline.learners import build_learner, outcome_task
-from causal_pipeline.crossfit import cross_fit_predictions, cross_fit_splits, dataset_groups
-from causal_pipeline.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
+from causal_pipeline.core.learners import build_learner, outcome_task
+from causal_pipeline.nuisance.crossfit import cross_fit_predictions, cross_fit_splits, dataset_groups
+from causal_pipeline.core.data import CausalDataset, DataSplitter, minimum_groups_for_crossfit
 from causal_pipeline.diagnostics import OverlapPreprocessor
-from causal_pipeline.imputed import (
+from causal_pipeline.missing_data.imputed import (
     CompletedAnalysis,
     estimation_sample_size,
     pooled_cate_evaluation,
@@ -53,8 +53,8 @@ from causal_pipeline.imputed import (
     write_pooled_subgroups,
     write_pooled_transport,
 )
-from causal_pipeline.pooling import pool_nuisance_screens
-from causal_pipeline.imputation import (
+from causal_pipeline.missing_data.pooling import pool_nuisance_screens
+from causal_pipeline.missing_data.imputation import (
     EXCLUDED_IMPUTATION_SEED_OFFSET,
     CovariateImputer,
     complete_covariates,
@@ -66,53 +66,53 @@ from causal_pipeline.imputation import (
     require_selection_observed,
     validate_missingness,
 )
-from causal_pipeline.estimator_identity import (
+from causal_pipeline.core.estimator_identity import (
     assign_estimator_ids,
     attach_estimator_metadata,
     estimator_config_columns,
 )
-from causal_pipeline.evaluation import CATEEvaluator, ContrastEvaluation
-from causal_pipeline.figures import (
+from causal_pipeline.estimation.evaluation import CATEEvaluator, ContrastEvaluation
+from causal_pipeline.plotting.figures import (
     drop_nonfinite_effect_estimates,
     plot_interval_estimates,
     plot_point_estimates,
 )
-from causal_pipeline.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
-from causal_pipeline.nuisance_screen import run_nuisance_screen
-from causal_pipeline.parallel import (
+from causal_pipeline.nuisance.nuisance_metrics import log_nuisance_metric, outcome_metric_from_predictions
+from causal_pipeline.nuisance.nuisance_screen import run_nuisance_screen
+from causal_pipeline.core.parallel import (
     background_priority,
     imputation_draws_are_parallel,
     pool_workers,
     run_map,
     worker_library_jobs,
 )
-from causal_pipeline.policy import (
+from causal_pipeline.policies.policy import (
     POLICY_DATA_SPLIT_TEST,
     FittedPolicy,
     PolicyService,
-)
-from causal_pipeline.policy_figures import (
-    POLICY_TREE_STEM,
     policy_slice_slug,
+)
+from causal_pipeline.plotting.policy_figures import (
+    POLICY_TREE_STEM,
     save_policy_slice_figure,
 )
-from causal_pipeline.policy_value import (
+from causal_pipeline.policies.policy_value import (
     PolicyValueReport,
     evaluate_policy_values,
     patient_assignment_table,
 )
-from causal_pipeline.policy_value_figures import POLICY_VALUE_STEM, plot_policy_value_table
-from causal_pipeline.results import ResultStore
-from causal_pipeline.selection import (
+from causal_pipeline.plotting.policy_value_figures import POLICY_VALUE_STEM, plot_policy_value_table
+from causal_pipeline.core.results import ResultStore
+from causal_pipeline.estimation.selection import (
     plot_tipping_point,
     split_included_population,
     transport_included_effects,
     unseen_population_bound,
 )
 from causal_pipeline.subgroup import available_subgroup_splits, subgroup_split_table
-from causal_pipeline.subgroup_figures import write_subgroup_figures
-from causal_pipeline.logging_config import configure_package_runtime
-from causal_pipeline.utils import figure_file, read_dataframe, write_dataframe
+from causal_pipeline.plotting.subgroup_figures import write_subgroup_figures
+from causal_pipeline.core.logging_config import configure_package_runtime
+from causal_pipeline.core.utils import figure_file, read_dataframe, write_dataframe
 
 logger = logging.getLogger(__name__)
 

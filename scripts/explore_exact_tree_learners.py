@@ -15,7 +15,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from causal_pipeline.config import (
+from causal_pipeline.core.config import (
     CATEEvaluationConfig,
     CATEKind,
     DataConfig,
@@ -26,12 +26,12 @@ from causal_pipeline.config import (
     PolicySearchMode,
     TreatmentMode,
 )
-from causal_pipeline.cate import create_cate_estimator
-from causal_pipeline.crossfit import cross_fit_predictions
-from causal_pipeline.data import CausalDataset
-from causal_pipeline.evaluation import CATEEvaluator
-from causal_pipeline.policy import PolicyService, assigned_treatments
-from causal_pipeline.policy_value import evaluate_policy_values
+from causal_pipeline.estimation.cate import create_cate_estimator
+from causal_pipeline.nuisance.crossfit import cross_fit_predictions
+from causal_pipeline.core.data import CausalDataset
+from causal_pipeline.estimation.evaluation import CATEEvaluator
+from causal_pipeline.policies.policy import PolicyService, assigned_treatments
+from causal_pipeline.policies.policy_value import evaluate_policy_values
 
 logging.disable(logging.CRITICAL)
 
@@ -156,7 +156,7 @@ def run_setting(
 
 
 def _signal():
-    from causal_pipeline.config import TestValidationSignal
+    from causal_pipeline.core.config import TestValidationSignal
 
     return TestValidationSignal.ESTIMATION_FULL_FIT
 

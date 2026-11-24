@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from causal_pipeline.config import PipelineConfig, TreatmentMode
-from causal_pipeline.data import CausalDataset, DataPartitions
+from causal_pipeline.core.config import PipelineConfig, TreatmentMode
+from causal_pipeline.core.data import CausalDataset, DataPartitions
 from causal_pipeline.diagnostics import (
     DIAGNOSTIC_PAIR_FIGURE_NAME,
     OverlapPreprocessor,

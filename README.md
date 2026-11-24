@@ -6,18 +6,17 @@ Modular observational causal inference pipeline built as a thin orchestration la
 
 ```text
 causal_pipeline/
-  config.py        # Pydantic configuration models and estimator cloning
-  data.py          # CausalDataset, splitting, contrast utilities
-  diagnostics.py   # Propensity overlap and covariate balance (SMD)
-  balance_figures.py # Love plot of unadjusted vs weighted SMDs
-  ate.py           # ATE adapters and omitted-variable sensitivity
-  cate.py          # CATE adapters (meta-learners, forest, neural optional)
-  evaluation.py    # Robust proxy scores, calibration, ECETH, TOC, RATE
-  policy.py        # Policy trees, virtual twins, MOB (R), held-out policy scoring
-  results.py       # ResultStore persistence
-  pipeline.py      # CausalPipeline orchestration
-tests/               # Unit tests
-tests/integration/   # End-to-end pipeline tests
+  pipeline.py          # CausalPipeline orchestration
+  diagnostics.py       # propensity overlap and covariate balance
+  subgroup.py          # pre-specified subgroup splits
+  core/                # config, datasets, learners, scaling, runtime, artifacts
+  nuisance/            # cross-fitting, tuning, nuisance metrics and screens
+  estimation/          # ATE, CATE, evaluation, selection
+  policies/            # policy trees, virtual twins, held-out policy value
+  missing_data/        # imputation and Rubin's rules pooling
+  plotting/            # publication figures for the estimates above
+tests/                 # unit tests, grouped by the same scopes
+tests/integration/     # end-to-end pipeline tests
 ```
 
 ## Quick start

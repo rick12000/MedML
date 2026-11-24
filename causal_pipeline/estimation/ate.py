@@ -1,0 +1,1310 @@
+"""ATE estimator adapters, confidence intervals, and sensitivity."""
+
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from pathlib import Path
+
+import numpy as np
+from joblib import Parallel, delayed
+import pandas as pd
+from causallib.estimation import Standardization
+from doubleml import DoubleMLData
+from doubleml.irm import DoubleMLAPO, DoubleMLAPOS, DoubleMLIRM
+from doubleml.plm import DoubleMLPLR
+from doubleml.utils import PSProcessorConfig
+from pydantic import BaseModel, ConfigDict
+from sklearn.base import BaseEstimator
+
+from causal_pipeline.core.config import (
+    ATEEstimatorSpec,
+    ATEKind,
+    DoublyRobustATEEstimatorSpec,
+    DoubleMLATEEstimatorSpec,
+    IPWATEEstimatorSpec,
+    IPWWeighting,
+    JsonValue,
+    OutcomeType,
+    DEFAULT_LEARNER_RANDOM_STATE,
+    ArbitraryTypesModel,
+    SensitivityConfig,
+)
+from causal_pipeline.nuisance.crossfit import (
+    aipw_arm_scores,
+    cross_fit_nuisances,
+    VARIANCE_PROPENSITY_TREATED_AS_KNOWN,
+    factual_predictions,
+    hajek_influence,
+    horvitz_thompson_influence,
+    learner_random_state,
+    maybe_clip_propensity,
+    normal_interval_from_scores,
+    target_potential_outcomes,
+)
+from causal_pipeline.core.data import CausalDataset, contrast_columns
+from causal_pipeline.nuisance.nuisance_metrics import (
+    log_doubleml_apos_nuisances,
+    log_doubleml_irm_plr_nuisances,
+)
+from causal_pipeline.core.learners import LearnerArchitecture, build_learner, outcome_task
+from causal_pipeline.core.parallel import run_map
+from causal_pipeline.core.scaling import clone_scaled_estimator
+from causal_pipeline.core.utils import write_dataframe, write_html
+
+logger = logging.getLogger(__name__)
+
+
+def nuisance_learners(
+    outcome_name: LearnerArchitecture,
+    propensity_name: LearnerArchitecture,
+    binary_outcome: bool,
+    random_state: int,
+) -> tuple[BaseEstimator, BaseEstimator]:
+    """Outcome and propensity learners for one ATE estimator, built from approved names."""
+    outcome = build_learner(outcome_name, outcome_task(binary_outcome), random_state)
+    propensity = build_learner(propensity_name, "classification", random_state)
+    return outcome, propensity
+
+DML_UNCLIPPED_THRESHOLD = 1e-12
+SYMMETRIC_CLIP_TOLERANCE = 1e-8
+
+SENSITIVITY_STRENGTH_CAP = 0.9999
+SENSITIVITY_BISECT_ITERATIONS = 30
+SENSITIVITY_CONFOUNDING_RHO = 1.0
+SENSITIVITY_POINT_BOUND = "theta"
+SENSITIVITY_INTERVAL_BOUND = "ci"
+
+
+class TreatmentContrastScores(ArbitraryTypesModel):
+    """Per-row treatment contrasts whose average is the estimator's ATE."""
+
+    values: pd.DataFrame
+    positions: np.ndarray
+    groups: np.ndarray | None
+    confidence_level: float
+
+
+class BaseATEEstimator(ABC):
+    """Common interface for average treatment effect estimators."""
+
+    @abstractmethod
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> BaseATEEstimator:
+        ...
+
+    @abstractmethod
+    def estimate(self) -> pd.DataFrame:
+        ...
+
+    @abstractmethod
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        """Scores aligned to positions in the dataset passed to fit."""
+
+
+def initialize_ate_estimator(
+    spec: ATEEstimatorSpec,
+    data: CausalDataset,
+) -> BaseATEEstimator:
+    if spec.kind == ATEKind.IPW:
+        return IPWAdapter(spec=spec, data=data)
+    if spec.kind == ATEKind.AIPW:
+        return AIPWAdapter(spec=spec, data=data)
+    if spec.kind == ATEKind.TMLE:
+        return TMLEAdapter(spec=spec, data=data)
+    if spec.kind == ATEKind.DML_IRM:
+        return DoubleMLIRMAdapter(spec=spec, data=data)
+    if spec.kind == ATEKind.DML_PLR:
+        return DoubleMLPLRAdapter(spec=spec, data=data)
+    if spec.kind == ATEKind.DML_APOS:
+        return DoubleMLAPOSAdapter(spec=spec, data=data)
+    raise ValueError(f"Unsupported ATE kind: {spec.kind}")
+
+
+def doubleml_dataframe(
+    outcome: pd.Series,
+    treatment: pd.Series,
+    confounders: pd.DataFrame,
+    groups: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Align outcome, treatment, and confounders on a RangeIndex for DoubleML."""
+    columns = {
+        "y": np.asarray(outcome),
+        "d": np.asarray(treatment),
+    }
+    if groups is not None:
+        columns["cluster"] = np.asarray(groups)
+    return pd.concat(
+        [
+            pd.DataFrame(columns),
+            confounders.reset_index(drop=True),
+        ],
+        axis=1,
+    )
+
+
+def observation_groups(data: CausalDataset) -> np.ndarray | None:
+    if data.group_id is None:
+        return None
+    return data.df[data.group_id].to_numpy()
+
+
+def doubleml_data_from_frame(frame: pd.DataFrame) -> DoubleMLData:
+    if "cluster" in frame.columns:
+        return DoubleMLData(frame, y_col="y", d_cols="d", cluster_cols="cluster")
+    return DoubleMLData(frame, y_col="y", d_cols="d")
+
+
+def factual_outcome_predictions(
+    outcome_model: Standardization,
+    X: pd.DataFrame,
+    treatment: pd.Series,
+    treatment_arms: list[JsonValue],
+) -> np.ndarray:
+    """Predicted outcome under each unit's observed treatment arm."""
+    matrix = np.asarray(outcome_model.estimate_individual_outcome(X, treatment))
+    if matrix.ndim == 1:
+        return matrix
+    if matrix.ndim != 2:
+        raise ValueError(f"Unexpected outcome prediction shape: {matrix.shape}")
+    level_to_column = {level: index for index, level in enumerate(treatment_arms)}
+    columns = np.array([level_to_column[value] for value in treatment.to_numpy()])
+    rows = np.arange(len(treatment))
+    return matrix[rows, columns]
+
+
+def treated_propensity(fitted_propensity: np.ndarray) -> np.ndarray:
+    """P(T = treated | X) from a 1-d score or an arm-by-column matrix."""
+    propensity = np.asarray(fitted_propensity)
+    if propensity.ndim == 1:
+        return propensity
+    if propensity.ndim != 2 or propensity.shape[1] < 2:
+        raise ValueError("Expected a binary propensity vector or a 2+ column propensity matrix.")
+    return propensity[:, 1]
+
+
+class IPWAdapter(BaseATEEstimator):
+    def __init__(self, spec: IPWATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.treatment: pd.Series | None = None
+        self.outcome: pd.Series | None = None
+        self.propensity: pd.DataFrame | None = None
+        self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> IPWAdapter:
+        propensity_learner = build_learner(
+            self.spec.propensity_learner,
+            "classification",
+            self.spec.random_state,
+        )
+        self.source_index = data.df.index.copy()
+        self.treatment = data.treatment_series.copy()
+        self.outcome = data.outcome_series.copy()
+        _, propensity = cross_fit_nuisances(
+            covariates=data.X_adjustment.copy(),
+            treatment=self.treatment,
+            outcome=self.outcome,
+            treatment_values=data.treatment_values,
+            propensity_learner=propensity_learner,
+            outcome_learner=None,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                propensity_learner,
+                self.spec.random_state,
+            ),
+            clip_bounds=self.spec.clip_bounds,
+            groups=observation_groups(data),
+            log_scope="ATE/IPW",
+            tune_estimators=tune_estimators,
+        )
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
+        self.groups = observation_groups(data)
+        return self
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if (
+            self.treatment is None
+            or self.outcome is None
+            or self.propensity is None
+            or self.source_index is None
+        ):
+            raise RuntimeError("Estimator is not fitted.")
+        if self.spec.weighting == IPWWeighting.HORVITZ_THOMPSON:
+            arm_scores = horvitz_thompson_scores_by_arm(self.outcome, self.treatment, self.propensity)
+        else:
+            arm_scores = hajek_scores_by_arm(self.outcome, self.treatment, self.propensity)
+        return package_contrast_scores(
+            values=contrast_frame_from_arm_scores(
+                arm_scores=arm_scores,
+                control_value=self.data.control_value,
+                treatment_values=self.data.treatment_values,
+            ),
+            positions=positions_for_kept_rows(self.source_index, self.treatment.index),
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
+    def estimate(self) -> pd.DataFrame:
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
+            estimand=self.spec.estimand,
+            groups=scored.groups,
+        )
+        table = annotate_propensity_clip(table, self.spec.clip_bounds)
+        table["variance_assumption"] = VARIANCE_PROPENSITY_TREATED_AS_KNOWN
+        return table
+
+
+class AIPWAdapter(BaseATEEstimator):
+    def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.treatment: pd.Series | None = None
+        self.outcome: pd.Series | None = None
+        self.propensity: pd.DataFrame | None = None
+        self.potential_outcomes: pd.DataFrame | None = None
+        self.outcome_predictions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> AIPWAdapter:
+        binary_outcome = data.outcome_type == OutcomeType.BINARY
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=binary_outcome,
+            random_state=self.spec.random_state,
+        )
+        self.source_index = data.df.index.copy()
+        self.treatment = data.treatment_series.copy()
+        self.outcome = data.outcome_series.copy()
+        potential_outcomes, propensity = cross_fit_nuisances(
+            covariates=data.X_adjustment.copy(),
+            treatment=self.treatment,
+            outcome=self.outcome,
+            treatment_values=data.treatment_values,
+            propensity_learner=propensity_learner,
+            outcome_learner=outcome_learner,
+            binary_outcome=binary_outcome,
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                propensity_learner,
+                self.spec.random_state,
+            ),
+            clip_bounds=self.spec.clip_bounds,
+            groups=observation_groups(data),
+            log_scope="ATE/AIPW",
+            tune_estimators=tune_estimators,
+        )
+        if potential_outcomes is None:
+            raise RuntimeError("AIPW cross-fit did not return potential outcomes.")
+        self.potential_outcomes = potential_outcomes
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
+        self.groups = observation_groups(data)
+        self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
+        return self
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        return doubly_robust_contrast_scores(self)
+
+    def estimate(self) -> pd.DataFrame:
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
+            estimand=self.spec.estimand,
+            groups=scored.groups,
+        )
+        return annotate_propensity_clip(table, self.spec.clip_bounds)
+
+
+class TMLEAdapter(BaseATEEstimator):
+    def __init__(self, spec: DoublyRobustATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.treatment: pd.Series | None = None
+        self.outcome: pd.Series | None = None
+        self.propensity: pd.DataFrame | None = None
+        self.potential_outcomes: pd.DataFrame | None = None
+        self.outcome_predictions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
+        self.source_index: pd.Index | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> TMLEAdapter:
+        binary_outcome = data.outcome_type == OutcomeType.BINARY
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=binary_outcome,
+            random_state=self.spec.random_state,
+        )
+        self.source_index = data.df.index.copy()
+        self.treatment = data.treatment_series.copy()
+        self.outcome = data.outcome_series.copy()
+        initial_outcomes, propensity = cross_fit_nuisances(
+            covariates=data.X_adjustment.copy(),
+            treatment=self.treatment,
+            outcome=self.outcome,
+            treatment_values=data.treatment_values,
+            propensity_learner=propensity_learner,
+            outcome_learner=outcome_learner,
+            binary_outcome=binary_outcome,
+            n_folds=self.spec.n_folds,
+            random_state=learner_random_state(
+                propensity_learner,
+                self.spec.random_state,
+            ),
+            clip_bounds=self.spec.clip_bounds,
+            groups=observation_groups(data),
+            log_scope="ATE/TMLE",
+            tune_estimators=tune_estimators,
+        )
+        if initial_outcomes is None:
+            raise RuntimeError("TMLE cross-fit did not return potential outcomes.")
+        self.propensity = maybe_clip_propensity(propensity, self.spec.clip_bounds)
+        self.groups = observation_groups(data)
+        self.potential_outcomes = target_potential_outcomes(
+            outcome=self.outcome,
+            treatment=self.treatment,
+            potential_outcomes=initial_outcomes,
+            propensity=self.propensity,
+            treatment_values=data.treatment_values,
+            control_value=data.control_value,
+            reduced=self.spec.reduced,
+        )
+        self.outcome_predictions = factual_predictions(self.potential_outcomes, self.treatment)
+        return self
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        return doubly_robust_contrast_scores(self)
+
+    def estimate(self) -> pd.DataFrame:
+        scored = self.treatment_contrast_scores()
+        table = intervals_from_contrast_scores(
+            scores=scored.values,
+            level=scored.confidence_level,
+            estimand=self.spec.estimand,
+            groups=scored.groups,
+        )
+        return annotate_propensity_clip(table, self.spec.clip_bounds)
+
+
+class DoubleMLIRMAdapter(BaseATEEstimator):
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLIRMAdapter:
+        del tune_estimators
+        if len(data.treatment_values) != 2:
+            raise ValueError(
+                "DoubleML IRM supports two treatment arms. Use DML_APOS for multi-arm treatment."
+            )
+        X = data.X_adjustment.copy()
+        treatment = binary_treatment_indicator(data.treatment_series, data.control_value)
+        outcome = data.outcome_series.copy()
+        dml_data = doubleml_data_from_frame(
+            doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
+        )
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
+        )
+        ml_g = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
+        self.model = DoubleMLIRM(
+            dml_data,
+            ml_g=ml_g,
+            ml_m=ml_m,
+            n_folds=self.spec.n_folds,
+            n_rep=self.spec.n_rep,
+            score="ATE",
+            normalize_ipw=False,
+            ps_processor_config=doubleml_propensity_processor(self.spec),
+        )
+        self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
+        log_doubleml_irm_plr_nuisances(
+            scope="ATE/DML-IRM",
+            treatment=treatment.to_numpy(),
+            outcome=outcome.to_numpy(),
+            predictions=self.model.predictions,
+            outcome_learner=ml_g,
+            propensity_learner=ml_m,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            plr=False,
+        )
+        return self
+
+    def estimate(self) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        summary = self.model.confint(level=self.spec.confidence_level)
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        return pd.DataFrame(
+            {
+                "contrast": [contrast],
+                "estimand": [self.spec.estimand],
+                "estimate": [float(self.model.coef[0])],
+                "standard_error": [scalar_standard_error(self.model.se)],
+                "ci_lower": [float(summary.iloc[0, 0])],
+                "ci_upper": [float(summary.iloc[0, 1])],
+            }
+        )
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        # Unweighted IRM ATE has psi_a=-1; psi_b is the arm-level DR contrast.
+        scores = self.model.psi_elements["psi_b"][:, 0, 0]
+        return package_contrast_scores(
+            values=pd.DataFrame({contrast: scores}),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
+
+class DoubleMLPLRAdapter(BaseATEEstimator):
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLPLRAdapter:
+        del tune_estimators
+        X = data.X_adjustment.copy()
+        treatment = binary_treatment_indicator(data.treatment_series, data.control_value)
+        outcome = data.outcome_series.copy()
+        dml_data = doubleml_data_from_frame(
+            doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
+        )
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
+        )
+        ml_l = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
+        self.model = DoubleMLPLR(
+            dml_data,
+            ml_l=ml_l,
+            ml_m=ml_m,
+            n_folds=self.spec.n_folds,
+            n_rep=self.spec.n_rep,
+        )
+        self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
+        log_doubleml_irm_plr_nuisances(
+            scope="ATE/DML-PLR",
+            treatment=treatment.to_numpy(),
+            outcome=outcome.to_numpy(),
+            predictions=self.model.predictions,
+            outcome_learner=ml_l,
+            propensity_learner=ml_m,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            plr=True,
+        )
+        return self
+
+    def estimate(self) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        summary = self.model.confint(level=self.spec.confidence_level)
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        return pd.DataFrame(
+            {
+                "contrast": [f"plr_{contrast}"],
+                "estimand": ["partially_linear"],
+                "estimate": [float(self.model.coef[0])],
+                "standard_error": [scalar_standard_error(self.model.se)],
+                "ci_lower": [float(summary.iloc[0, 0])],
+                "ci_upper": [float(summary.iloc[0, 1])],
+            }
+        )
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        contrast = contrast_columns(self.data.control_value, self.data.treatment_values)[0]
+        scores = orthogonal_coefficient_scores(
+            self.model.psi_elements["psi_a"],
+            self.model.psi_elements["psi_b"],
+        )
+        return package_contrast_scores(
+            values=pd.DataFrame({f"plr_{contrast}": scores}),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
+
+class ClusterCapableDoubleMLAPOS(DoubleMLAPOS):
+    """DoubleMLAPOS with the cluster sample splitting the other DoubleML models use.
+
+    The installed DoubleMLAPOS calls the shared cluster splitter but never sets
+    ``_n_folds_per_cluster``, and it copies only the row partition onto each
+    potential-outcome model. Clustered data then cannot be fit. This subclass
+    records the same fold counts as ``DoubleML`` and passes the cluster
+    partition through.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        draw_sample_splitting = bool(kwargs.pop("draw_sample_splitting", True))
+        super().__init__(*args, draw_sample_splitting=False, **kwargs)
+        if self._is_cluster_data:
+            self._n_folds_per_cluster = self._n_folds
+            self._n_folds = self._n_folds ** self._dml_data.n_cluster_vars
+        if draw_sample_splitting:
+            self.draw_sample_splitting()
+            self._initialize_dml_model()
+
+    def _initialize_models(self) -> list[DoubleMLAPO]:
+        if not self._is_cluster_data:
+            return super()._initialize_models()
+        modellist: list[DoubleMLAPO] = []
+        model_arguments = {
+            "obj_dml_data": self._dml_data,
+            "ml_g": self._learner["ml_g"],
+            "ml_m": self._learner["ml_m"],
+            "score": self.score,
+            "n_folds": self.n_folds,
+            "n_rep": self.n_rep,
+            "weights": self.weights,
+            "ps_processor_config": self.ps_processor_config,
+            "normalize_ipw": self.normalize_ipw,
+            "draw_sample_splitting": False,
+        }
+        for level_index in range(self.n_treatment_levels):
+            model = DoubleMLAPO(treatment_level=self._treatment_levels[level_index], **model_arguments)
+            model.set_sample_splitting(
+                all_smpls=self.smpls,
+                all_smpls_cluster=self._smpls_cluster,
+            )
+            modellist.append(model)
+        return modellist
+
+    def fit(
+        self,
+        n_jobs_models: int | None = None,
+        n_jobs_cv: int | None = None,
+        store_predictions: bool = True,
+        store_models: bool = False,
+        external_predictions: dict | None = None,
+    ) -> ClusterCapableDoubleMLAPOS:
+        if not self._is_cluster_data:
+            return super().fit(
+                n_jobs_models=n_jobs_models,
+                n_jobs_cv=n_jobs_cv,
+                store_predictions=store_predictions,
+                store_models=store_models,
+                external_predictions=external_predictions,
+            )
+        # DoubleMLAPOS.fit concatenates one framework per treatment level.
+        # That concatenation is not implemented for clustered scores, so the
+        # level-specific models are kept and contrasts are formed later.
+        if external_predictions is not None:
+            self._check_external_predictions(external_predictions)
+            external_by_level = self._rename_external_predictions(external_predictions)
+        else:
+            external_by_level = None
+        fitted_models = Parallel(n_jobs=n_jobs_models, verbose=0, pre_dispatch="2*n_jobs")(
+            delayed(self._fit_model)(
+                level_index,
+                n_jobs_cv,
+                store_predictions,
+                store_models,
+                external_by_level,
+            )
+            for level_index in range(self.n_treatment_levels)
+        )
+        for level_index, fitted in enumerate(fitted_models):
+            self._modellist[level_index] = fitted
+        return self
+
+
+class DoubleMLAPOSAdapter(BaseATEEstimator):
+    def __init__(self, spec: DoubleMLATEEstimatorSpec, data: CausalDataset) -> None:
+        self.spec = spec
+        self.data = data
+        self.model = None
+        self.scored_positions: np.ndarray | None = None
+        self.groups: np.ndarray | None = None
+
+    def fit(self, data: CausalDataset, tune_estimators: bool = False) -> DoubleMLAPOSAdapter:
+        del tune_estimators
+        X = data.X_adjustment.copy()
+        treatment = data.treatment_series.copy()
+        outcome = data.outcome_series.copy()
+        dml_data = doubleml_data_from_frame(
+            doubleml_dataframe(outcome, treatment, X, observation_groups(data)),
+        )
+        outcome_learner, propensity_learner = nuisance_learners(
+            outcome_name=self.spec.outcome_learner,
+            propensity_name=self.spec.propensity_learner,
+            binary_outcome=data.outcome_type == OutcomeType.BINARY,
+            random_state=DEFAULT_LEARNER_RANDOM_STATE,
+        )
+        ml_g = clone_scaled_estimator(outcome_learner)
+        ml_m = clone_scaled_estimator(propensity_learner)
+        self.model = ClusterCapableDoubleMLAPOS(
+            dml_data,
+            ml_g=ml_g,
+            ml_m=ml_m,
+            treatment_levels=self.data.treatment_values,
+            n_folds=self.spec.n_folds,
+            n_rep=self.spec.n_rep,
+            ps_processor_config=doubleml_propensity_processor(self.spec),
+        )
+        self.model.fit()
+        self.scored_positions = np.arange(len(data.df))
+        self.groups = observation_groups(data)
+        log_doubleml_apos_nuisances(
+            scope="ATE/DML-APOS",
+            treatment=treatment.to_numpy(),
+            models=self.model._modellist,
+            treatment_levels=self.data.treatment_values,
+            propensity_learner=ml_m,
+        )
+        return self
+
+    def estimate(self) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Estimator is not fitted.")
+        return apos_contrast_table(
+            model=self.model,
+            control_value=self.data.control_value,
+            treatment_values=self.data.treatment_values,
+            level=self.spec.confidence_level,
+            estimand=self.spec.estimand,
+        )
+
+    def treatment_contrast_scores(self) -> TreatmentContrastScores:
+        if self.model is None or self.scored_positions is None:
+            raise RuntimeError("Estimator is not fitted.")
+        return package_contrast_scores(
+            values=apos_contrast_scores(
+                model=self.model,
+                control_value=self.data.control_value,
+                treatment_values=self.data.treatment_values,
+            ),
+            positions=self.scored_positions,
+            groups=self.groups,
+            confidence_level=self.spec.confidence_level,
+        )
+
+
+def apos_contrast_table(
+    model: ClusterCapableDoubleMLAPOS,
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+    level: float,
+    estimand: str,
+) -> pd.DataFrame:
+    """Difference of potential outcomes, one contrast at a time.
+
+    ``DoubleMLAPOS.causal_contrast`` concatenates those differences, and the
+    installed DoubleML build cannot concatenate clustered frameworks. Each
+    contrast is already a single clustered framework, so the interval comes
+    from that difference directly.
+    """
+    levels = list(model.treatment_levels)
+    reference = model.modellist[treatment_level_index(levels, control_value)].framework
+    names = contrast_columns(control_value, treatment_values)
+    arms = [value for value in treatment_values if value != control_value]
+    rows = []
+    for name, arm in zip(names, arms, strict=True):
+        contrast = model.modellist[treatment_level_index(levels, arm)].framework - reference
+        intervals = contrast.confint(level=level)
+        rows.append(
+            {
+                "contrast": name,
+                "estimand": estimand,
+                "estimate": float(np.ravel(contrast.thetas)[0]),
+                "standard_error": scalar_standard_error(contrast.ses),
+                "ci_lower": float(intervals.iloc[0, 0]),
+                "ci_upper": float(intervals.iloc[0, 1]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def apos_contrast_scores(
+    model: ClusterCapableDoubleMLAPOS,
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+) -> pd.DataFrame:
+    levels = list(model.treatment_levels)
+    reference = model.modellist[treatment_level_index(levels, control_value)]
+    control_scores = orthogonal_coefficient_scores(
+        reference.psi_elements["psi_a"],
+        reference.psi_elements["psi_b"],
+    )
+    names = contrast_columns(control_value, treatment_values)
+    arms = [value for value in treatment_values if value != control_value]
+    columns = {}
+    for name, arm in zip(names, arms, strict=True):
+        arm_model = model.modellist[treatment_level_index(levels, arm)]
+        arm_scores = orthogonal_coefficient_scores(
+            arm_model.psi_elements["psi_a"],
+            arm_model.psi_elements["psi_b"],
+        )
+        columns[name] = arm_scores - control_scores
+    return pd.DataFrame(columns)
+
+
+def scalar_standard_error(standard_errors: object) -> float:
+    """One published standard error.
+
+    DoubleML's interval is the median of the repetition-wise intervals. With
+    more than one repetition that median need not be symmetric about the median
+    coefficient, so Rubin's rules need ``se`` rather than the interval width.
+    """
+    values = np.ravel(np.asarray(standard_errors, dtype=float))
+    if values.size != 1 or not np.isfinite(values[0]) or float(values[0]) < 0.0:
+        raise ValueError("Each contrast needs one finite, non-negative standard error.")
+    return float(values[0])
+
+
+def treatment_level_index(levels: list[object], arm: JsonValue) -> int:
+    for index, level in enumerate(levels):
+        if level == arm:
+            return index
+    raise KeyError(arm)
+
+
+def binary_treatment_indicator(treatment: pd.Series, control_value: JsonValue) -> pd.Series:
+    """Code the control arm as 0 and every other arm as 1 for binary DoubleML models."""
+    indicator = (treatment.to_numpy() != control_value).astype(int)
+    return pd.Series(indicator, index=treatment.index, name=treatment.name)
+
+
+def estimator_supports_sensitivity(estimator: BaseATEEstimator) -> bool:
+    """DoubleML publishes a score-based omitted-variable bound. Other ATE fits do not."""
+    return isinstance(estimator, (DoubleMLIRMAdapter, DoubleMLPLRAdapter)) and estimator.model is not None
+
+
+def contrast_frame_from_arm_scores(
+    arm_scores: dict[JsonValue, np.ndarray],
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+) -> pd.DataFrame:
+    control_scores = arm_scores[control_value]
+    names = contrast_columns(control_value, treatment_values)
+    arms = [arm for arm in treatment_values if arm != control_value]
+    columns = {
+        name: arm_scores[arm] - control_scores
+        for name, arm in zip(names, arms, strict=True)
+    }
+    return pd.DataFrame(columns)
+
+
+def intervals_from_contrast_scores(
+    scores: pd.DataFrame,
+    level: float,
+    estimand: str,
+    groups: np.ndarray | None,
+) -> pd.DataFrame:
+    rows = []
+    for contrast in scores.columns:
+        estimate, lower, upper, standard_error = normal_interval_from_scores(
+            scores[contrast].to_numpy(dtype=float),
+            level,
+            groups=groups,
+        )
+        rows.append(
+            {
+                "contrast": contrast,
+                "estimand": estimand,
+                "estimate": estimate,
+                "standard_error": standard_error,
+                "ci_lower": lower,
+                "ci_upper": upper,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def doubly_robust_contrast_scores(
+    estimator: AIPWAdapter | TMLEAdapter,
+) -> TreatmentContrastScores:
+    if (
+        estimator.treatment is None
+        or estimator.outcome is None
+        or estimator.propensity is None
+        or estimator.potential_outcomes is None
+        or estimator.source_index is None
+    ):
+        raise RuntimeError("Estimator is not fitted.")
+    return package_contrast_scores(
+        values=contrast_frame_from_arm_scores(
+            arm_scores=aipw_scores_by_arm(
+                estimator.outcome,
+                estimator.treatment,
+                estimator.potential_outcomes,
+                estimator.propensity,
+            ),
+            control_value=estimator.data.control_value,
+            treatment_values=estimator.data.treatment_values,
+        ),
+        positions=positions_for_kept_rows(estimator.source_index, estimator.treatment.index),
+        groups=estimator.groups,
+        confidence_level=estimator.spec.confidence_level,
+    )
+
+
+def package_contrast_scores(
+    values: pd.DataFrame,
+    positions: np.ndarray,
+    groups: np.ndarray | None,
+    confidence_level: float,
+) -> TreatmentContrastScores:
+    if len(positions) != len(values):
+        raise ValueError("Contrast scores and row positions have different lengths.")
+    if groups is not None and len(groups) != len(values):
+        raise ValueError("Cluster ids and contrast scores have different lengths.")
+    return TreatmentContrastScores(
+        values=values,
+        positions=np.asarray(positions),
+        groups=None if groups is None else np.asarray(groups),
+        confidence_level=confidence_level,
+    )
+
+
+def positions_for_kept_rows(source_index: pd.Index, kept_index: pd.Index) -> np.ndarray:
+    if source_index.has_duplicates:
+        raise ValueError("The dataset index must be unique to align subgroup rows.")
+    locator = pd.Series(np.arange(len(source_index)), index=source_index)
+    positions = locator.loc[kept_index].to_numpy(dtype=int)
+    if len(positions) != len(kept_index):
+        raise ValueError("Scored rows could not be aligned to the dataset.")
+    return positions
+
+
+def orthogonal_coefficient_scores(psi_a: np.ndarray, psi_b: np.ndarray) -> np.ndarray:
+    """Scores whose mean is the DoubleML coefficient.
+
+    DoubleML reports the median coefficient across cross-fit repetitions, so the
+    returned scores follow that same repetition.
+    """
+    score_a = np.asarray(psi_a, dtype=float)
+    score_b = np.asarray(psi_b, dtype=float)
+    if score_a.shape != score_b.shape:
+        raise ValueError("DoubleML score components have different shapes.")
+    if score_a.ndim != 3 or score_a.shape[2] != 1:
+        raise ValueError("Subgroup contrasts expect one DoubleML coefficient.")
+    repetition_scores = []
+    repetition_means = []
+    for repetition in range(score_a.shape[1]):
+        denominator = float(np.mean(score_a[:, repetition, 0]))
+        if denominator == 0.0:
+            raise ValueError("DoubleML score derivative averages to zero.")
+        scores = -score_b[:, repetition, 0] / denominator
+        repetition_scores.append(scores)
+        repetition_means.append(float(np.mean(scores)))
+    order = np.argsort(repetition_means)
+    repetition_count = len(repetition_means)
+    if repetition_count % 2 == 1:
+        return repetition_scores[int(order[repetition_count // 2])]
+    left = int(order[repetition_count // 2 - 1])
+    right = int(order[repetition_count // 2])
+    return 0.5 * (repetition_scores[left] + repetition_scores[right])
+
+
+def hajek_scores_by_arm(
+    outcome: pd.Series,
+    treatment: pd.Series,
+    propensity: pd.DataFrame,
+) -> dict[JsonValue, np.ndarray]:
+    outcome_values = outcome.to_numpy(dtype=float)
+    treatment_values = treatment.to_numpy()
+    return {
+        arm: hajek_influence(
+            outcome=outcome_values,
+            treatment=treatment_values,
+            propensity=propensity[arm].to_numpy(dtype=float),
+            arm=arm,
+        )
+        for arm in propensity.columns
+    }
+
+
+def horvitz_thompson_scores_by_arm(
+    outcome: pd.Series,
+    treatment: pd.Series,
+    propensity: pd.DataFrame,
+) -> dict[JsonValue, np.ndarray]:
+    outcome_values = outcome.to_numpy(dtype=float)
+    treatment_values = treatment.to_numpy()
+    return {
+        arm: horvitz_thompson_influence(
+            outcome=outcome_values,
+            treatment=treatment_values,
+            propensity=propensity[arm].to_numpy(dtype=float),
+            arm=arm,
+        )
+        for arm in propensity.columns
+    }
+
+
+def doubleml_propensity_processor(spec: DoubleMLATEEstimatorSpec) -> PSProcessorConfig:
+    """Map symmetric clip bounds onto DoubleML's propensity clipping threshold."""
+    if spec.clip_bounds is None:
+        return PSProcessorConfig(clipping_threshold=DML_UNCLIPPED_THRESHOLD)
+    lower, upper = spec.clip_bounds
+    if abs(lower + upper - 1.0) > SYMMETRIC_CLIP_TOLERANCE:
+        raise ValueError(
+            "DoubleML clipping uses one threshold. Pass symmetric bounds (lower, 1 - lower)."
+        )
+    return PSProcessorConfig(clipping_threshold=lower)
+
+
+def annotate_propensity_clip(
+    table: pd.DataFrame,
+    clip_bounds: tuple[float, float] | None,
+) -> pd.DataFrame:
+    annotated = table.copy()
+    if clip_bounds is not None:
+        annotated["clip_lower"] = clip_bounds[0]
+        annotated["clip_upper"] = clip_bounds[1]
+    return annotated
+
+
+def aipw_scores_by_arm(
+    outcome: pd.Series,
+    treatment: pd.Series,
+    potential_outcomes: pd.DataFrame,
+    propensity: pd.DataFrame,
+) -> dict[JsonValue, np.ndarray]:
+    outcome_values = outcome.to_numpy(dtype=float)
+    treatment_values = treatment.to_numpy()
+    return {
+        arm: aipw_arm_scores(
+            outcome=outcome_values,
+            treatment=treatment_values,
+            potential_outcome=potential_outcomes[arm].to_numpy(dtype=float),
+            propensity=propensity[arm].to_numpy(dtype=float),
+            arm=arm,
+        )
+        for arm in potential_outcomes.columns
+    }
+
+
+def contrasts_from_population_outcomes(
+    population: pd.DataFrame | pd.Series,
+    control_value: JsonValue,
+    treatment_values: list[JsonValue],
+    estimand: str,
+) -> pd.DataFrame:
+    series = population_as_series(population)
+    names = contrast_columns(control_value, treatment_values)
+    arms = [arm for arm in treatment_values if arm != control_value]
+    rows = []
+    for name, arm in zip(names, arms, strict=True):
+        estimate = float(
+            population_outcome_for_arm(series, arm)
+            - population_outcome_for_arm(series, control_value),
+        )
+        rows.append(
+            {
+                "contrast": name,
+                "estimand": estimand,
+                "estimate": estimate,
+                "ci_lower": np.nan,
+                "ci_upper": np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def population_as_series(population: pd.DataFrame | pd.Series) -> pd.Series:
+    if isinstance(population, pd.DataFrame):
+        if population.shape[1] != 1:
+            raise ValueError("Population outcome table must be a Series or a single-column DataFrame.")
+        return population.iloc[:, 0]
+    return population
+
+
+def population_outcome_for_arm(population: pd.Series, arm: JsonValue) -> float:
+    if arm in population.index:
+        return float(population[arm])
+    matches = [index for index in population.index if str(index) == str(arm)]
+    if len(matches) == 1:
+        return float(population[matches[0]])
+    raise KeyError(arm)
+
+
+def sensitivity_contour_dataframe(figure: object) -> pd.DataFrame:
+    """Long-form grid underlying a DoubleML sensitivity contour plot."""
+    heatmap = None
+    for trace in figure.data:
+        trace_type = trace.type if hasattr(trace, "type") else trace.get("type")
+        if trace_type in {"heatmap", "contour"}:
+            heatmap = trace
+            break
+    if heatmap is None:
+        raise RuntimeError("Sensitivity plot did not include a contour trace.")
+    cf_d = np.asarray(heatmap.x, dtype=float)
+    cf_y = np.asarray(heatmap.y, dtype=float)
+    contour_values = np.asarray(heatmap.z, dtype=float)
+    rows: list[dict[str, float]] = []
+    for row_index, cf_y_value in enumerate(cf_y):
+        for column_index, cf_d_value in enumerate(cf_d):
+            rows.append(
+                {
+                    "cf_d": float(cf_d_value),
+                    "cf_y": float(cf_y_value),
+                    "contour_value": float(contour_values[row_index, column_index]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+class SensitivityResult(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    summary: pd.DataFrame
+    benchmarks: pd.DataFrame
+    contour_path: str | None
+
+
+class ATESensitivityAnalyzer:
+    """Omitted-variable sensitivity for dedicated ATE estimators."""
+
+    def __init__(self, sensitivity: SensitivityConfig) -> None:
+        self.sensitivity = sensitivity
+
+    def analyze(
+        self,
+        estimator: BaseATEEstimator,
+        estimator_id: str,
+        results_root: str,
+        benchmarks: pd.DataFrame | None = None,
+    ) -> SensitivityResult | None:
+        sensitivity_config = self.sensitivity
+        if estimator_supports_sensitivity(estimator):
+            if benchmarks is None:
+                raise ValueError("DoubleML sensitivity requires covariate benchmarks.")
+            return self.analyze_doubleml_native(
+                estimator.model,
+                estimator_id,
+                results_root,
+                sensitivity_config,
+                benchmarks,
+            )
+        logger.info(
+            "Skipping omitted-variable sensitivity for %s (DoubleML score bounds are the supported analysis)",
+            estimator_id,
+        )
+        return None
+
+    def analyze_doubleml_native(
+        self,
+        model: DoubleMLIRM | DoubleMLPLR,
+        estimator_id: str,
+        results_root: str,
+        sensitivity_config: SensitivityConfig,
+        benchmarks: pd.DataFrame,
+    ) -> SensitivityResult:
+        logger.info("Running DoubleML sensitivity analysis for %s...", estimator_id)
+        model.sensitivity_analysis(
+            level=sensitivity_config.confidence_level,
+            null_hypothesis=sensitivity_config.null_effect,
+        )
+        sensitivity_params = model.sensitivity_params
+        if sensitivity_params is None:
+            raise RuntimeError("DoubleML sensitivity analysis did not populate sensitivity_params.")
+        point_rv = float(np.ravel(sensitivity_params["rv"])[0])
+        interval_rv = float(np.ravel(sensitivity_params["rva"])[0])
+        best = benchmarks.iloc[benchmarks["benchmark_bias"].abs().argmax()]
+        contour_dir = Path(results_root) / "ate" / estimator_id / "sensitivity"
+        figure = model.sensitivity_plot(
+            level=sensitivity_config.confidence_level,
+            null_hypothesis=sensitivity_config.null_effect,
+        )
+        contour_path = str(write_html(contour_dir / "contour.html", figure))
+        write_dataframe(contour_dir / "contour.csv", sensitivity_contour_dataframe(figure))
+        summary = pd.DataFrame(
+            {
+                "robustness_value_point": [point_rv],
+                "robustness_value_interval": [interval_rv],
+                "benchmark_variable": [best["covariate"]],
+                "benchmark_treatment_strength": [best["benchmark_treatment_strength"]],
+                "benchmark_outcome_strength": [best["benchmark_outcome_strength"]],
+                "benchmark_bias": [best["benchmark_bias"]],
+                "benchmark_multiple_to_null": [best["benchmark_multiple_to_null"]],
+                "benchmark_multiple_to_null_interval": [best["benchmark_multiple_to_null_interval"]],
+            }
+        )
+        result = SensitivityResult(
+            summary=summary,
+            benchmarks=benchmarks,
+            contour_path=contour_path,
+        )
+        logger.info("...Finished DoubleML sensitivity analysis for %s", estimator_id)
+        return result
+
+
+class CovariateBenchmarkJob(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    estimator_id: str
+    model: DoubleMLIRM | DoubleMLPLR
+    covariate: str
+    null_effect: float
+    level: float
+
+
+def covariate_benchmark_row(job: CovariateBenchmarkJob) -> dict[str, float | str]:
+    """One omitted-covariate refit. The bisection uses that refit's strengths."""
+    benchmark = job.model.sensitivity_benchmark(benchmarking_set=[job.covariate]).iloc[0]
+    treatment_strength = float(benchmark["cf_d"])
+    outcome_strength = float(benchmark["cf_y"])
+    return {
+        "estimator_id": job.estimator_id,
+        "covariate": job.covariate,
+        "benchmark_treatment_strength": treatment_strength,
+        "benchmark_outcome_strength": outcome_strength,
+        "benchmark_bias": float(benchmark["delta_theta"]),
+        "benchmark_multiple_to_null": confounding_multiple_to_null(
+            model=job.model,
+            treatment_strength=treatment_strength,
+            outcome_strength=outcome_strength,
+            null_effect=job.null_effect,
+            level=job.level,
+            bound=SENSITIVITY_POINT_BOUND,
+        ),
+        "benchmark_multiple_to_null_interval": confounding_multiple_to_null(
+            model=job.model,
+            treatment_strength=treatment_strength,
+            outcome_strength=outcome_strength,
+            null_effect=job.null_effect,
+            level=job.level,
+            bound=SENSITIVITY_INTERVAL_BOUND,
+        ),
+    }
+
+
+def benchmark_sensitivity_models(
+    models: list[tuple[str, DoubleMLIRM | DoubleMLPLR]],
+    null_effect: float,
+    level: float,
+    parallel: bool,
+) -> dict[str, pd.DataFrame]:
+    """Refit every covariate benchmark. One map covers every supplied model."""
+    logger.debug("Computing sensitivity benchmarks for %s model(s)", len(models))
+    jobs = [
+        CovariateBenchmarkJob(
+            estimator_id=estimator_id,
+            model=model,
+            covariate=covariate,
+            null_effect=null_effect,
+            level=level,
+        )
+        for estimator_id, model in models
+        for covariate in model._dml_data.x_cols
+    ]
+    rows = run_map(covariate_benchmark_row, jobs, parallel=parallel)
+    frames: dict[str, pd.DataFrame] = {}
+    for estimator_id, model in models:
+        columns = list(model._dml_data.x_cols)
+        owned = [row for row in rows if row["estimator_id"] == estimator_id]
+        frame = pd.DataFrame(owned).drop(columns=["estimator_id"])
+        frames[estimator_id] = frame.set_index("covariate").loc[columns].reset_index()
+    return frames
+
+
+def doubleml_covariate_benchmarks(
+    model: DoubleMLIRM | DoubleMLPLR,
+    null_effect: float,
+    level: float,
+    parallel: bool,
+) -> pd.DataFrame:
+    frames = benchmark_sensitivity_models(
+        models=[("", model)],
+        null_effect=null_effect,
+        level=level,
+        parallel=parallel,
+    )
+    return frames[""]
+
+
+def confounding_multiple_to_null(
+    model: DoubleMLIRM | DoubleMLPLR,
+    treatment_strength: float,
+    outcome_strength: float,
+    null_effect: float,
+    level: float,
+    bound: str,
+) -> float:
+    """Smallest proportional multiple of a covariate benchmark whose bound covers the null."""
+    if treatment_strength <= 0.0 and outcome_strength <= 0.0:
+        return float("inf")
+    largest_multiple = largest_proportional_multiple(
+        treatment_strength=treatment_strength,
+        outcome_strength=outcome_strength,
+    )
+
+    def covers_null(multiple: float) -> bool:
+        lower, upper = doubleml_sensitivity_bounds(
+            model=model,
+            treatment_strength=multiple * treatment_strength,
+            outcome_strength=multiple * outcome_strength,
+            level=level,
+            bound=bound,
+        )
+        return lower <= null_effect <= upper
+
+    if covers_null(0.0):
+        return 0.0
+    if not covers_null(largest_multiple):
+        return float("inf")
+    lower_multiple = 0.0
+    upper_multiple = largest_multiple
+    for attempt in range(SENSITIVITY_BISECT_ITERATIONS):
+        midpoint = (lower_multiple + upper_multiple) / 2.0
+        if covers_null(midpoint):
+            upper_multiple = midpoint
+        else:
+            lower_multiple = midpoint
+    return float(upper_multiple)
+
+
+def largest_proportional_multiple(treatment_strength: float, outcome_strength: float) -> float:
+    peak = max(treatment_strength, outcome_strength)
+    if peak <= 0.0:
+        return 0.0
+    return SENSITIVITY_STRENGTH_CAP / peak
+
+
+def doubleml_sensitivity_bounds(
+    model: DoubleMLIRM | DoubleMLPLR,
+    treatment_strength: float,
+    outcome_strength: float,
+    level: float,
+    bound: str,
+) -> tuple[float, float]:
+    result = model._framework._calc_sensitivity_analysis(
+        cf_y=float(outcome_strength),
+        cf_d=float(treatment_strength),
+        rho=SENSITIVITY_CONFOUNDING_RHO,
+        level=level,
+    )
+    lower = float(np.ravel(result[bound]["lower"])[0])
+    upper = float(np.ravel(result[bound]["upper"])[0])
+    return lower, upper

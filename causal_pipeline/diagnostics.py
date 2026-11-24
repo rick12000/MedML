@@ -19,7 +19,7 @@ from matplotlib.ticker import MaxNLocator
 from causallib.utils.stat_utils import calc_weighted_standardized_mean_differences
 from pydantic import BaseModel, ConfigDict
 
-from causal_pipeline.balance_figures import (
+from causal_pipeline.plotting.balance_figures import (
     COVARIATE_BALANCE_STEM,
     DEFAULT_MAX_COVARIATES,
     LOVE_MIN_PANEL_INCHES,
@@ -30,16 +30,16 @@ from causal_pipeline.balance_figures import (
     draw_balance_panel,
     plot_covariate_balance,
 )
-from causal_pipeline.config import JsonValue, OverlapConfig, TreatmentMode
-from causal_pipeline.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
-from causal_pipeline.learners import build_learner
-from causal_pipeline.data import (
+from causal_pipeline.core.config import JsonValue, OverlapConfig, TreatmentMode
+from causal_pipeline.nuisance.crossfit import cross_fit_nuisances, dataset_groups, learner_random_state
+from causal_pipeline.core.learners import build_learner
+from causal_pipeline.core.data import (
     PROPENSITY_CLIP_FLOOR,
     CausalDataset,
     DataPartitions,
     ipw_weights_multi,
 )
-from causal_pipeline.figures import (
+from causal_pipeline.plotting.figures import (
     DIAGNOSTIC_LABEL_SIZE,
     DIAGNOSTIC_LEGEND_SIZE,
     DIAGNOSTIC_TITLE_SIZE,
@@ -55,7 +55,7 @@ from causal_pipeline.figures import (
     text_width,
     widest,
 )
-from causal_pipeline.utils import DEFAULT_FIGURE_FORMAT, figure_file, save_figure, write_dataframe
+from causal_pipeline.core.utils import DEFAULT_FIGURE_FORMAT, figure_file, save_figure, write_dataframe
 
 AUSTIN_SMD_RESCALE = float(np.sqrt(2.0))
 OVERLAP_HISTOGRAM_BINS = 30

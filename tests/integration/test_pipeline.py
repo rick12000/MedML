@@ -5,10 +5,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from causal_pipeline.learners import LearnerArchitecture
-from causal_pipeline.parallel import available_cores
+from causal_pipeline.core.learners import LearnerArchitecture
+from causal_pipeline.core.parallel import available_cores
 
-from causal_pipeline.config import (
+from causal_pipeline.core.config import (
     ATEKind,
     CATEEvaluationConfig,
     CATEEstimatorSpec,
@@ -32,7 +32,7 @@ from causal_pipeline.config import (
     SubgroupSplit,
 )
 from causal_pipeline.pipeline import CausalPipeline
-from causal_pipeline.utils import read_dataframe
+from causal_pipeline.core.utils import read_dataframe
 
 INTEGRATION_FOLDS = 2
 INTEGRATION_BOOTSTRAP_SAMPLES = 8

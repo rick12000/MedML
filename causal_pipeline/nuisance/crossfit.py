@@ -502,37 +502,6 @@ def expit_transform(value: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-value))
 
 
-def cross_fit_propensity_map(
-    covariates: pd.DataFrame,
-    treatment: pd.Series,
-    learner: BaseEstimator,
-    treatment_values: list[JsonValue],
-    control_value: JsonValue,
-    n_folds: int,
-    random_state: int,
-    clip_bounds: tuple[float, float] | None,
-    groups: pd.Series | np.ndarray | None = None,
-    log_scope: str | None = None,
-) -> dict[JsonValue, np.ndarray]:
-    """Out-of-fold P(T=a | T in {a, control}, X) for each non-control arm."""
-    _, propensity = cross_fit_nuisances(
-        covariates=covariates,
-        treatment=treatment,
-        outcome=treatment,
-        treatment_values=treatment_values,
-        propensity_learner=learner,
-        outcome_learner=None,
-        binary_outcome=False,
-        n_folds=n_folds,
-        random_state=random_state,
-        clip_bounds=clip_bounds,
-        groups=groups,
-        log_scope=log_scope,
-    )
-    clipped = maybe_clip_propensity(propensity, clip_bounds)
-    return one_versus_control_propensity(propensity=clipped, control_value=control_value)
-
-
 def cross_fit_meta_learner_sample(
     covariates: pd.DataFrame,
     treatment: pd.Series,

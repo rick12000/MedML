@@ -1229,21 +1229,6 @@ def benchmark_sensitivity_models(
     return frames
 
 
-def doubleml_covariate_benchmarks(
-    model: DoubleMLIRM | DoubleMLPLR,
-    null_effect: float,
-    level: float,
-    parallel: bool,
-) -> pd.DataFrame:
-    frames = benchmark_sensitivity_models(
-        models=[("", model)],
-        null_effect=null_effect,
-        level=level,
-        parallel=parallel,
-    )
-    return frames[""]
-
-
 def confounding_multiple_to_null(
     model: DoubleMLIRM | DoubleMLPLR,
     treatment_strength: float,
